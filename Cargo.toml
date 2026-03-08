@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["AEGIS Security System"]
 description = "Adaptive Evolutionary Guard with Integrated Security - Novel blockchain consensus security"
 
+[lib]
+name = "aegis"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aegis-node"
 path = "src/main.rs"
@@ -83,9 +87,9 @@ bit-vec = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 
-[[bench]]
-name = "layer0_bench"
-harness = false
+# [[bench]]
+# name = "layer0_bench"
+# harness = false
 
 [profile.release]
 opt-level = 3

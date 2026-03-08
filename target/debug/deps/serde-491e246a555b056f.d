@@ -1,0 +1,14 @@
+C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\deps\serde-491e246a555b056f.d: C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\build\serde-2a81fe2434ba5c50\out/private.rs
+
+C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\deps\libserde-491e246a555b056f.rlib: C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\build\serde-2a81fe2434ba5c50\out/private.rs
+
+C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\deps\libserde-491e246a555b056f.rmeta: C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\build\serde-2a81fe2434ba5c50\out/private.rs
+
+C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\ishaa\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\ishaa\OneDrive\Desktop\Blockchain\AEGIS\target\debug\build\serde-2a81fe2434ba5c50\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\ishaa\\OneDrive\\Desktop\\Blockchain\\AEGIS\\target\\debug\\build\\serde-2a81fe2434ba5c50\\out
