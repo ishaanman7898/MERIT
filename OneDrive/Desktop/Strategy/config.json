@@ -1,0 +1,10 @@
+{
+  "symbol": "GC=F",
+  "interval": "1m",
+  "discord_webhook": "https://discordapp.com/api/webhooks/1469866081878544429/x_K8LGXASJbKQxmiNMVOfp1_gvy-tqU-ausHPaspeUHSUHeLlsSVKSrASzIiL5JrNjpL",
+  "check_interval_seconds": 60,
+  "lookback_candles": 50,
+  "active_strategy": "heikin_ashi",
+  "take_profit_usd": 10.0,
+  "stop_loss_usd": 5.0
+}
