@@ -1,0 +1,6 @@
+streamlit==1.41.1
+supabase==2.11.0
+pandas==2.2.3
+requests==2.32.3
+pdfplumber==0.11.4
+Pillow==11.1.0

@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERIT — Setup Guide</title>
+    <style>
+        :root {
+            --navy: #1B2A4A;
+            --navy-light: #243557;
+            --gold: #C9A84C;
+            --gold-light: #e0c76e;
+            --bg: #0f1923;
+            --card-bg: #162231;
+            --text: #e0e0e0;
+            --text-muted: #8a9bb5;
+            --success: #4caf50;
+            --border: #2a3f5a;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 48px 20px 32px;
+            border-bottom: 2px solid var(--gold);
+            margin-bottom: 32px;
+        }
+        .header h1 {
+            font-size: 2.8rem;
+            color: var(--gold);
+            letter-spacing: 4px;
+            margin-bottom: 8px;
+        }
+        .header p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        /* Progress bar */
+        .progress-container {
+            background: var(--navy);
+            border-radius: 12px;
+            padding: 4px;
+            margin-bottom: 36px;
+            position: sticky;
+            top: 10px;
+            z-index: 100;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        }
+        .progress-bar {
+            height: 8px;
+            background: linear-gradient(90deg, var(--gold), var(--gold-light));
+            border-radius: 10px;
+            transition: width 0.5s ease;
+            width: 0%;
+        }
+        .progress-label {
+            text-align: center;
+            font-size: 0.85rem;
+            color: var(--gold);
+            padding: 6px 0 2px;
+        }
+
+        /* Step cards */
+        .step {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 28px;
+            margin-bottom: 24px;
+            transition: border-color 0.3s;
+        }
+        .step.active { border-color: var(--gold); }
+        .step.completed {
+            border-color: var(--success);
+            opacity: 0.85;
+        }
+        .step-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+        .step-number {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--navy);
+            border: 2px solid var(--gold);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: var(--gold);
+            flex-shrink: 0;
+        }
+        .step.completed .step-number {
+            background: var(--success);
+            border-color: var(--success);
+            color: #fff;
+        }
+        .step-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        .step-body { margin-top: 8px; }
+        .step-body p { margin-bottom: 12px; color: var(--text-muted); }
+        .step-body ol, .step-body ul {
+            margin: 12px 0 12px 20px;
+            color: var(--text-muted);
+        }
+        .step-body li { margin-bottom: 6px; }
+
+        /* Code blocks */
+        .code-block {
+            background: #0d1520;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 16px;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9rem;
+            color: var(--gold-light);
+            position: relative;
+            margin: 12px 0;
+            overflow-x: auto;
+        }
+        .copy-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: var(--navy);
+            border: 1px solid var(--gold);
+            color: var(--gold);
+            padding: 4px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: background 0.2s;
+        }
+        .copy-btn:hover { background: var(--gold); color: var(--navy); }
+
+        /* Mark complete button */
+        .mark-btn {
+            display: inline-block;
+            margin-top: 16px;
+            padding: 10px 24px;
+            background: transparent;
+            border: 2px solid var(--gold);
+            color: var(--gold);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .mark-btn:hover { background: var(--gold); color: var(--navy); }
+        .mark-btn.done {
+            background: var(--success);
+            border-color: var(--success);
+            color: #fff;
+            cursor: default;
+        }
+
+        /* Highlights */
+        code {
+            background: rgba(201, 168, 76, 0.15);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9em;
+            color: var(--gold-light);
+        }
+        a { color: var(--gold); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        strong { color: #fff; }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--border);
+            margin-top: 40px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>MERIT</h1>
+        <p>Mass Email & Real-time Inventory Tracker — Setup Guide</p>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-container">
+        <div class="progress-bar" id="progressBar"></div>
+        <div class="progress-label" id="progressLabel">0 / 5 steps completed</div>
+    </div>
+
+    <!-- Step 1 -->
+    <div class="step active" id="step-1">
+        <div class="step-header">
+            <div class="step-number" id="num-1">1</div>
+            <div class="step-title">Fork & Clone the Repository</div>
+        </div>
+        <div class="step-body">
+            <p>Fork this repository on GitHub, then clone it to your local machine.</p>
+            <div class="code-block">
+                git clone https://github.com/YOUR_USERNAME/merit.git
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+            </div>
+            <div class="code-block">
+                cd merit
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+            </div>
+            <p>After cloning, push to your fork's <code>main</code> branch. GitHub Actions will automatically deploy this setup page to your GitHub Pages.</p>
+            <button class="mark-btn" onclick="markComplete(1)">Mark Complete</button>
+        </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step" id="step-2">
+        <div class="step-header">
+            <div class="step-number" id="num-2">2</div>
+            <div class="step-title">Create a Supabase Project</div>
+        </div>
+        <div class="step-body">
+            <ol>
+                <li>Go to <a href="https://supabase.com/dashboard" target="_blank">supabase.com/dashboard</a> and create a new project.</li>
+                <li>Once created, go to <strong>Settings → API</strong>.</li>
+                <li>Copy the <strong>Project URL</strong> — it looks like <code>https://xyzcompany.supabase.co</code>.</li>
+                <li>Copy the <strong>anon / public</strong> key — it starts with <code>eyJhbGciOi...</code>.</li>
+            </ol>
+            <p>Save both values — you'll need them in Steps 3 and 5.</p>
+            <button class="mark-btn" onclick="markComplete(2)">Mark Complete</button>
+        </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step" id="step-3">
+        <div class="step-header">
+            <div class="step-number" id="num-3">3</div>
+            <div class="step-title">Run the Database Schema</div>
+        </div>
+        <div class="step-body">
+            <ol>
+                <li>In your Supabase project, go to <strong>SQL Editor</strong> (left sidebar).</li>
+                <li>Click <strong>New query</strong>.</li>
+                <li>Open the file <code>supabase/schema.sql</code> from the repository and paste its entire contents into the editor.</li>
+                <li>Click <strong>Run</strong>.</li>
+            </ol>
+            <p>This creates all tables (<code>products</code>, <code>inventory</code>, <code>email_campaigns</code>, <code>orders</code>, <code>config</code>) and the <code>inventory_summary</code> view.</p>
+            <button class="mark-btn" onclick="markComplete(3)">Mark Complete</button>
+        </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step" id="step-4">
+        <div class="step-header">
+            <div class="step-number" id="num-4">4</div>
+            <div class="step-title">Deploy to Streamlit Community Cloud</div>
+        </div>
+        <div class="step-body">
+            <ol>
+                <li>Go to <a href="https://share.streamlit.io" target="_blank">share.streamlit.io</a> and sign in with GitHub.</li>
+                <li>Click <strong>New app</strong>.</li>
+                <li>Select your forked <strong>merit</strong> repository.</li>
+                <li>Set the <strong>Main file path</strong> to: <code>app/main.py</code></li>
+                <li>Click <strong>Deploy</strong>.</li>
+            </ol>
+            <p>The app will install dependencies from <code>requirements.txt</code> and launch.</p>
+            <button class="mark-btn" onclick="markComplete(4)">Mark Complete</button>
+        </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="step" id="step-5">
+        <div class="step-header">
+            <div class="step-number" id="num-5">5</div>
+            <div class="step-title">Complete First-Run Setup</div>
+        </div>
+        <div class="step-body">
+            <p>When MERIT launches for the first time, it will show a setup wizard. Fill in:</p>
+            <ul>
+                <li><strong>Supabase URL</strong> and <strong>Anon Key</strong> — from Step 2.</li>
+                <li><strong>SMTP Sender Email</strong> — your Gmail address (e.g. <code>firm@gmail.com</code>).</li>
+                <li><strong>SMTP App Password</strong> — generate one at
+                    <a href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a>.
+                    (Requires 2FA enabled on your Google account.)</li>
+                <li><strong>Firm Name</strong> — used in email headers and the "From" field.</li>
+                <li><strong>Logo URL</strong> (optional) — a direct link to your firm's logo image.
+                    If broken or empty, emails gracefully fall back to the firm name as text.</li>
+                <li><strong>Accent Colors</strong> — navy and gold defaults match the VEI brand.</li>
+            </ul>
+            <p>Click <strong>Save & Configure</strong>, then restart the app. MERIT is now fully operational.</p>
+            <button class="mark-btn" onclick="markComplete(5)">Mark Complete</button>
+        </div>
+    </div>
+
+    <!-- Step 6 -->
+    <div class="step" id="step-6">
+        <div class="step-header">
+            <div class="step-number" id="num-6">6</div>
+            <div class="step-title">Upload Product Images</div>
+        </div>
+        <div class="step-body">
+            <p>After setup, go to <strong>Product Images</strong> in the sidebar to upload product photos:</p>
+            <ul>
+                <li>Images are automatically <strong>compressed</strong> (resized to max 1200px, JPEG quality 80).</li>
+                <li>Stored in <strong>Supabase Storage</strong> (a "product-images" bucket is auto-created).</li>
+                <li>When you send order emails, these images are <strong>automatically attached</strong>.</li>
+                <li>Supports <strong>2 images per product</strong> (primary + secondary).</li>
+                <li><strong>Bulk upload</strong> — name files starting with the SKU (e.g., <code>SKU123_front.jpg</code>).</li>
+            </ul>
+            <p>If the auto-created bucket doesn't work, go to <strong>Storage</strong> in your Supabase dashboard
+               and create a bucket named <code>product-images</code> with <strong>public</strong> access.</p>
+            <button class="mark-btn" onclick="markComplete(6)">Mark Complete</button>
+        </div>
+    </div>
+
+    <div class="footer">
+        MERIT — Open-source inventory & email tool for VEI firms.<br>
+        Licensed under MIT.
+    </div>
+</div>
+
+<script>
+    const TOTAL_STEPS = 6;
+    let completed = JSON.parse(localStorage.getItem('merit_setup_progress') || '[]');
+
+    function updateUI() {
+        const count = completed.length;
+        document.getElementById('progressBar').style.width = ((count / TOTAL_STEPS) * 100) + '%';
+        document.getElementById('progressLabel').textContent = count + ' / ' + TOTAL_STEPS + ' steps completed';
+
+        for (let i = 1; i <= TOTAL_STEPS; i++) {
+            const step = document.getElementById('step-' + i);
+            const num = document.getElementById('num-' + i);
+            const btn = step.querySelector('.mark-btn');
+
+            if (completed.includes(i)) {
+                step.classList.add('completed');
+                step.classList.remove('active');
+                num.textContent = '✓';
+                btn.textContent = 'Completed';
+                btn.classList.add('done');
+            } else {
+                step.classList.remove('completed');
+                num.textContent = i;
+                btn.textContent = 'Mark Complete';
+                btn.classList.remove('done');
+
+                // First incomplete step is active
+                if (!completed.includes(i)) {
+                    const isFirst = !completed.some(c => c >= i);
+                    if (count === i - 1 || i === Math.min(...[1,2,3,4,5,6].filter(x => !completed.includes(x)))) {
+                        step.classList.add('active');
+                    } else {
+                        step.classList.remove('active');
+                    }
+                }
+            }
+        }
+    }
+
+    function markComplete(step) {
+        if (completed.includes(step)) return;
+        completed.push(step);
+        completed.sort();
+        localStorage.setItem('merit_setup_progress', JSON.stringify(completed));
+        updateUI();
+    }
+
+    function copyCode(btn) {
+        const block = btn.parentElement;
+        const text = block.textContent.replace('Copy', '').replace('Copied!', '').trim();
+        navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        });
+    }
+
+    // Initialize
+    updateUI();
+</script>
+</body>
+</html>
