@@ -624,16 +624,8 @@ def _build_items_html(prods: list[str], products_lookup: dict[str, str] | None) 
     return "".join(rows)
 
 
-def build_html(
-    order: dict,
-    from_name: str,
-    products_lookup: dict[str, str] | None = None,
-) -> str:
-    name      = order.get("name", "Customer")
-    order_num = order.get("order_number", "N/A")
-    prods     = split_products(order.get("products", ""))
-    items     = _build_items_html(prods, products_lookup)
-    return f"""<!DOCTYPE html>
+_DEFAULT_EMAIL_TEMPLATE = """\
+<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;">
@@ -644,12 +636,12 @@ def build_html(
                     box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:100%;">
         <tr>
           <td style="background:#18181b;padding:28px 36px;">
-            <p style="margin:0;font-size:20px;font-weight:700;color:#fff;">{from_name}</p>
+            <p style="margin:0;font-size:20px;font-weight:700;color:#fff;">{{from_name}}</p>
           </td>
         </tr>
         <tr>
           <td style="padding:32px 36px;">
-            <p style="margin:0 0 12px;font-size:16px;color:#111;">Hi {name},</p>
+            <p style="margin:0 0 12px;font-size:16px;color:#111;">Hi {{name}},</p>
             <p style="margin:0 0 24px;font-size:14px;color:#555;line-height:1.6;">
               Thank you for your order. Here is a summary of what you ordered.
             </p>
@@ -662,7 +654,7 @@ def build_html(
                     Order Number
                   </p>
                   <p style="margin:0;font-size:22px;font-weight:700;color:#18181b;">
-                    #{order_num}
+                    #{{order_number}}
                   </p>
                 </td>
               </tr>
@@ -672,7 +664,7 @@ def build_html(
               Items Ordered
             </p>
             <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:28px;">
-              {items}
+              {{items_html}}
             </table>
             <p style="margin:0;font-size:13px;color:#888;line-height:1.6;">
               Questions? Just reply to this email and we will be happy to help.
@@ -681,7 +673,7 @@ def build_html(
         </tr>
         <tr>
           <td style="background:#fafafa;padding:16px 36px;border-top:1px solid #ebebeb;">
-            <p style="margin:0;font-size:12px;color:#bbb;">Sent by {from_name}</p>
+            <p style="margin:0;font-size:12px;color:#bbb;">Sent by {{from_name}}</p>
           </td>
         </tr>
       </table>
@@ -689,6 +681,26 @@ def build_html(
   </table>
 </body>
 </html>"""
+
+
+def build_html(
+    order: dict,
+    from_name: str,
+    products_lookup: dict[str, str] | None = None,
+    template: str | None = None,
+) -> str:
+    name      = order.get("name", "Customer")
+    order_num = order.get("order_number", "N/A")
+    prods     = split_products(order.get("products", ""))
+    items     = _build_items_html(prods, products_lookup)
+    tpl = (template.strip() if template and template.strip() else _DEFAULT_EMAIL_TEMPLATE)
+    return (
+        tpl
+        .replace("{{name}}", name)
+        .replace("{{order_number}}", order_num)
+        .replace("{{from_name}}", from_name)
+        .replace("{{items_html}}", items)
+    )
 
 
 def build_text(order: dict, from_name: str) -> str:
@@ -1842,7 +1854,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
 
     with save_col:
         if st.button("Save Settings", type="primary", use_container_width=True):
-            # Preserve products list when saving settings
+            # Preserve products list and email template when saving settings
             existing_products = cfg.get("products", [])
             new_cfg = {
                 "from_name":                inp_from_name.strip(),
@@ -1857,6 +1869,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                 "supabase_service_role_key": inp_sb_service.strip(),
                 "supabase_db_password":     cfg.get("supabase_db_password", ""),
                 "neon_connection_string":   inp_neon.strip(),
+                "email_html_template":      cfg.get("email_html_template", ""),
                 "products":                 existing_products,
             }
             save_config(new_cfg)
@@ -1893,7 +1906,9 @@ elif page == "Email Sender":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_single, tab_bulk, tab_csv = st.tabs(["Single Entry", "Bulk Entry", "CSV Import"])
+    tab_single, tab_bulk, tab_csv, tab_template = st.tabs(
+        ["Single Entry", "Bulk Entry", "CSV Import", "Email Template"]
+    )
 
     # ─ Single ───────────────────────────────────
     with tab_single:
@@ -2016,6 +2031,86 @@ elif page == "Email Sender":
                 st.success(f"Imported {len(rows)} orders into the queue.")
                 st.rerun()
 
+    # ─ Email Template ───────────────────────────
+    with tab_template:
+        st.markdown("#### Customize your email layout")
+        st.caption(
+            "Write or paste HTML below. Use the variables listed to inject order data. "
+            "Saved to config.json — persists across restarts."
+        )
+
+        _tpl_vars_md = """
+| Variable | What it inserts |
+|---|---|
+| `{{name}}` | Customer's name |
+| `{{order_number}}` | Order number |
+| `{{from_name}}` | Your store / company name |
+| `{{items_html}}` | Ready-made HTML rows for each ordered product (with images when available) |
+"""
+        with st.expander("Available template variables", expanded=True):
+            st.markdown(_tpl_vars_md)
+
+        _ai_prompt = """\
+You are building an HTML email template for an order confirmation email.
+Use ONLY these variables (double curly braces, exactly as shown):
+  {{name}}         — customer's name
+  {{order_number}} — order number
+  {{from_name}}    — store / company name
+  {{items_html}}   — pre-built HTML <tr> rows listing the ordered products (with product images when available). Wrap this inside a <table cellpadding="0" cellspacing="0" style="width:100%;">…</table>.
+
+Requirements:
+- Return a COMPLETE HTML document (<!DOCTYPE html> … </html>)
+- Email-safe: inline styles only, no external CSS or JS, table-based layout
+- Mobile-friendly: max content width 600 px, readable on small screens
+- Must include all four variables above
+
+Design brief: [describe your style here — e.g. "clean and minimal, brand color #4F46E5, sans-serif font, white background, dark header bar, soft rounded corners"]
+"""
+        with st.expander("AI prompt — copy this into ChatGPT / Claude to generate a template"):
+            st.code(_ai_prompt, language=None)
+            st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
+
+        _current_tpl = cfg.get("email_html_template", "").strip()
+        _editor_val  = _current_tpl if _current_tpl else _DEFAULT_EMAIL_TEMPLATE
+
+        _tpl_input = st.text_area(
+            "HTML template",
+            value=_editor_val,
+            height=380,
+            key="email_tpl_editor",
+            label_visibility="collapsed",
+            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}} as placeholders.",
+        )
+
+        _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
+        with _tpl_c1:
+            if st.button("Save Template", type="primary", use_container_width=True, key="btn_save_tpl"):
+                cfg["email_html_template"] = _tpl_input.strip()
+                save_config(cfg)
+                st.session_state.cfg = cfg
+                st.success("Template saved.")
+        with _tpl_c2:
+            if st.button("Reset to Default", use_container_width=True, key="btn_reset_tpl"):
+                cfg["email_html_template"] = ""
+                save_config(cfg)
+                st.session_state.cfg = cfg
+                st.success("Reset to built-in template.")
+                st.rerun()
+        with _tpl_c3:
+            if st.button("Preview", use_container_width=True, key="btn_preview_tpl"):
+                _preview_order = {
+                    "name": "Jane Smith",
+                    "order_number": "ORD-1001",
+                    "products": "Blue T-Shirt | Black Jeans",
+                }
+                _preview_html = build_html(
+                    _preview_order,
+                    cfg.get("from_name") or "Your Store",
+                    template=_tpl_input.strip() or None,
+                )
+                with st.expander("Preview (sample order)", expanded=True):
+                    st.components.v1.html(_preview_html, height=520, scrolling=True)
+
     # ── Queue ───────────────────────────────────
 
     st.divider()
@@ -2113,8 +2208,10 @@ elif page == "Email Sender":
                 msg["To"]      = order["email"]
                 msg["Subject"] = subject
                 msg.attach(MIMEText(build_text(order, from_name), "plain"))
-                # Pass image lookup so product images appear in the email
-                msg.attach(MIMEText(build_html(order, from_name, _products_lookup), "html"))
+                msg.attach(MIMEText(
+                    build_html(order, from_name, _products_lookup, cfg.get("email_html_template")),
+                    "html",
+                ))
 
                 try:
                     server.send_message(msg)
