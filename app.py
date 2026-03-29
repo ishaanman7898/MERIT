@@ -168,13 +168,17 @@ def _has_any_db(cfg: dict) -> bool:
 
 def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     """Upsert one product into ALL configured databases. Always saves to SQLite."""
+    _stock = int(product.get("stock_left", 0))
+    _status = str(product.get("status") or (
+        "Out of stock" if _stock == 0 else ("Low stock" if _stock <= 10 else "In stock")
+    ))
     row = {
         "sku":        product["sku"],
         "item_name":  product["item_name"],
         "category":   product.get("category", ""),
         "price":      product.get("price", 0.0),
-        "stock_left": 0,   # always start at 0 inventory
-        "status":     "In stock",
+        "stock_left": _stock,
+        "status":     _status,
         "image_url":  product.get("image_url", "N/A"),
     }
     results = []
@@ -214,7 +218,7 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
                         ON CONFLICT(sku) DO UPDATE SET
                             item_name=EXCLUDED.item_name, category=EXCLUDED.category,
                             price=EXCLUDED.price, image_url=EXCLUDED.image_url
-                    """, (row["sku"],row["item_name"],row["category"],row["price"],0,"In stock",row["image_url"]))
+                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["stock_left"],row["status"],row["image_url"]))
             conn_pg.close()
             results.append("Neon")
         except Exception as exc:
@@ -769,10 +773,18 @@ if page == "Products":
 
     products = load_products_for_catalog(cfg)
 
-    tab_single, tab_bulk, tab_catalog = st.tabs(["Add Single", "Bulk Add", "Catalog"])
+    # Compute sync targets for display in this page
+    _p_has_sb = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+    _p_has_neon = bool(cfg.get("neon_connection_string"))
+    _p_sync = ["SQLite"] + (["Neon"] if _p_has_neon else []) + (["Supabase"] if _p_has_sb else [])
+    _p_sync_str = " + ".join(_p_sync)
 
-    # ══ SINGLE ADD ══════════════════════════════
-    with tab_single:
+    tab_add_single, tab_bulk_add, tab_bulk_edit, tab_bulk_del, tab_catalog = st.tabs(
+        ["Add Single", "Bulk Add", "Bulk Edit", "Bulk Delete", "Catalog"]
+    )
+
+    # ══ ADD SINGLE ══════════════════════════════
+    with tab_add_single:
         col_left, col_right = st.columns([3, 2])
         with col_left:
             p_sku      = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
@@ -789,9 +801,7 @@ if page == "Products":
             if p_image:
                 st.image(p_image, use_container_width=True)
 
-        _add_clicked = st.button("Add Product", type="primary", use_container_width=True, key="btn_add_product")
-
-        if _add_clicked:
+        if st.button("Add Product", type="primary", use_container_width=True, key="btn_add_product"):
             if not p_sku.strip():
                 st.error("SKU is required.")
             elif not p_name.strip():
@@ -802,14 +812,13 @@ if page == "Products":
                     if not cfg.get("imghippo_api_key"):
                         st.warning("Image skipped — add an Imghippo API key in Settings first.")
                     else:
-                        with st.spinner("Uploading image to Imghippo..."):
+                        with st.spinner("Uploading image..."):
                             try:
                                 image_url = upload_to_imghippo(
                                     p_image.read(), cfg["imghippo_api_key"], name=p_name.strip()
                                 )
                             except Exception as _img_err:
                                 st.error(f"Image upload failed: {_img_err}")
-
                 product = {
                     "sku":        p_sku.strip().upper(),
                     "item_name":  p_name.strip(),
@@ -819,19 +828,18 @@ if page == "Products":
                     "status":     "In stock",
                     "image_url":  image_url,
                 }
-                updated = [p for p in products if p["sku"] != product["sku"]]
-                updated.append(product)
-                cfg["products"] = updated
+                ok, saved_to = save_product_to_db(product, cfg)
+                _cp = cfg.get("products", [])
+                cfg["products"] = [p for p in _cp if p.get("sku") != product["sku"]]
+                cfg["products"].append(product)
                 save_config(cfg)
                 st.session_state.cfg = cfg
-
-                ok, saved_to = save_product_to_db(product, cfg)
-                st.success(f"**{product['item_name']}** added · Saved to: {saved_to}")
+                st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
                 st.rerun()
 
     # ══ BULK ADD ════════════════════════════════
-    with tab_bulk:
-        st.caption("Fill in the table below — SKU and Product Name are required. Leave image blank; add images later via the Catalog tab.")
+    with tab_bulk_add:
+        st.caption(f"Add multiple products at once. Synced to: **{_p_sync_str}**")
         _bulk_template = pd.DataFrame({
             "SKU":      [""] * 8,
             "Name":     [""] * 8,
@@ -849,7 +857,7 @@ if page == "Products":
         )
         _bc1, _bc2 = st.columns(2)
         with _bc1:
-            _bulk_csv = st.file_uploader("Or import CSV (columns: SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
+            _bulk_csv = st.file_uploader("Or import CSV (SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
         with _bc2:
             st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
             if st.button("Add All to Products", type="primary", use_container_width=True, key="btn_bulk_add"):
@@ -868,37 +876,121 @@ if page == "Products":
                         elif "cat" in _cl: _col_map[_c] = "Category"
                         elif "price" in _cl: _col_map[_c] = "Price"
                     _csv_df = _csv_df.rename(columns=_col_map)
-                    for _need in ["SKU","Name"]:
+                    for _need in ["SKU", "Name"]:
                         if _need not in _csv_df.columns: _csv_df[_need] = ""
                     if "Category" not in _csv_df.columns: _csv_df["Category"] = "General"
                     if "Price" not in _csv_df.columns: _csv_df["Price"] = 0.0
                     rows_to_add = pd.concat([rows_to_add, _csv_df[["SKU","Name","Category","Price"]]], ignore_index=True)
-
                 added = 0
                 for _, _row in rows_to_add.iterrows():
-                    _sku = str(_row["SKU"]).strip().upper()
+                    _sku  = str(_row["SKU"]).strip().upper()
                     _name = str(_row["Name"]).strip()
                     if not _sku or not _name: continue
                     try: _price = round(float(_row["Price"]), 2)
                     except: _price = 0.0
-                    _product = {"sku": _sku, "item_name": _name, "category": str(_row.get("Category","General")).strip() or "General", "price": _price, "stock_left": 0, "status": "In stock", "image_url": "N/A"}
-                    _existing = [p for p in st.session_state.cfg.get("products",[]) if p["sku"] != _sku]
-                    _existing.append(_product)
-                    st.session_state.cfg["products"] = _existing
+                    _product = {
+                        "sku": _sku, "item_name": _name,
+                        "category": str(_row.get("Category","General")).strip() or "General",
+                        "price": _price, "stock_left": 0, "status": "In stock", "image_url": "N/A",
+                    }
                     save_product_to_db(_product, cfg)
+                    _cp = cfg.get("products", [])
+                    cfg["products"] = [p for p in _cp if p.get("sku") != _sku]
+                    cfg["products"].append(_product)
                     added += 1
-                save_config(st.session_state.cfg)
-                st.success(f"Added {added} products.")
+                save_config(cfg)
+                st.session_state.cfg = cfg
+                st.success(f"Added {added} products · Synced to: {_p_sync_str}")
                 st.rerun()
+
+    # ══ BULK EDIT ═══════════════════════════════
+    with tab_bulk_edit:
+        if not products:
+            st.info("No products yet — add some first.")
+        else:
+            st.caption(f"Edit any field inline, then Save All. Synced to: **{_p_sync_str}**")
+            _be_df = pd.DataFrame([{
+                "sku":       str(p.get("sku", "")),
+                "item_name": str(p.get("item_name", "")),
+                "category":  str(p.get("category", "")),
+                "price":     float(p.get("price", 0.0)),
+                "image_url": str(p.get("image_url", "N/A")),
+            } for p in products if p.get("sku")])
+            _be_edited = st.data_editor(
+                _be_df,
+                column_config={
+                    "sku":       st.column_config.TextColumn("SKU",       disabled=True),
+                    "item_name": st.column_config.TextColumn("Name"),
+                    "category":  st.column_config.TextColumn("Category"),
+                    "price":     st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
+                    "image_url": st.column_config.TextColumn("Image URL"),
+                },
+                use_container_width=True,
+                num_rows="fixed",
+                key="bulk_edit_products",
+            )
+            if st.button("Save All Changes", type="primary", use_container_width=True, key="btn_bulk_edit_save"):
+                _orig_map = {p.get("sku"): p for p in products}
+                saved = 0
+                for _, _erow in _be_edited.iterrows():
+                    _esku  = str(_erow.get("sku", "")).strip()
+                    _ename = str(_erow.get("item_name", "")).strip()
+                    if not _esku or not _ename: continue
+                    _orig  = _orig_map.get(_esku, {})
+                    _upd   = {
+                        "sku":        _esku,
+                        "item_name":  _ename,
+                        "category":   str(_erow.get("category", "General")).strip() or "General",
+                        "price":      round(float(_erow.get("price", 0.0)), 2),
+                        "image_url":  str(_erow.get("image_url", "N/A")).strip() or "N/A",
+                        "stock_left": int(_orig.get("stock_left", 0)),
+                        "status":     str(_orig.get("status", "In stock")),
+                    }
+                    save_product_to_db(_upd, cfg)
+                    _cp = cfg.get("products", [])
+                    cfg["products"] = [_upd if p.get("sku") == _esku else p for p in _cp]
+                    if not any(p.get("sku") == _esku for p in _cp):
+                        cfg["products"].append(_upd)
+                    saved += 1
+                save_config(cfg)
+                st.session_state.cfg = cfg
+                st.success(f"Saved {saved} products · Synced to: {_p_sync_str}")
+                st.rerun()
+
+    # ══ BULK DELETE ═════════════════════════════
+    with tab_bulk_del:
+        if not products:
+            st.info("No products yet.")
+        else:
+            st.caption(f"Select products to permanently remove from all databases: **{_p_sync_str}**")
+            _bd_map = {
+                p["sku"]: f"{p.get('item_name', p['sku'])} ({p['sku']})"
+                for p in products if p.get("sku")
+            }
+            _bd_selected = st.multiselect(
+                "Select products to delete",
+                options=list(_bd_map.keys()),
+                format_func=lambda s: _bd_map[s],
+                key="bulk_del_select",
+            )
+            if _bd_selected:
+                st.warning(f"**{len(_bd_selected)} product(s) selected** for permanent deletion from {_p_sync_str}.")
+                _bd_confirm = st.checkbox("I confirm permanent deletion", key="bulk_del_confirm")
+                if st.button("Delete Selected", type="primary", key="btn_bulk_del", disabled=not _bd_confirm):
+                    for _bdsku in _bd_selected:
+                        delete_product_from_db(_bdsku, cfg)
+                    cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _bd_selected]
+                    save_config(cfg)
+                    st.session_state.cfg = cfg
+                    st.success(f"Deleted {len(_bd_selected)} product(s) from {_p_sync_str}.")
+                    st.rerun()
 
     # ══ CATALOG ═════════════════════════════════
     with tab_catalog:
         if not products:
             st.info("No products yet. Use Add Single or Bulk Add above.")
         else:
-            # Sync button
-            _has_cloud = _has_cloud_db
-            if _has_cloud:
+            if _has_cloud_db:
                 if st.button("Sync All to Cloud Databases", use_container_width=True, key="btn_sync_all"):
                     _ok_n, _fail_n = 0, 0
                     for prod in products:
@@ -921,7 +1013,6 @@ if page == "Products":
                     img_badge = "<span style='font-size:11px;background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:12px;margin-left:6px;'>image</span>" if has_img else "<span style='font-size:11px;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:12px;margin-left:6px;'>no image</span>"
                     st.markdown(f"**{prod['item_name']}** <code style='font-size:11px;background:#f4f4f5;padding:2px 8px;border-radius:12px;color:#555;'>{prod['sku']}</code>{img_badge}", unsafe_allow_html=True)
                     st.caption(f"{prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
-                    # Image upload for existing product
                     _up = st.file_uploader("Replace image", type=["jpg","jpeg","png","webp"], key=f"reup_{prod['sku']}_{i}", label_visibility="collapsed")
                     if _up and cfg.get("imghippo_api_key"):
                         if st.button("Upload image", key=f"upbtn_{prod['sku']}_{i}"):
@@ -929,16 +1020,15 @@ if page == "Products":
                                 try:
                                     _new_url = upload_to_imghippo(_up.read(), cfg["imghippo_api_key"], name=prod["item_name"])
                                     prod["image_url"] = _new_url
-                                    # Sync new image URL to ALL databases
                                     save_product_to_db(prod, cfg)
                                     _cfg_prods = [dict(p) for p in cfg.get("products", [])]
-                                    for _cp in _cfg_prods:
-                                        if _cp.get("sku") == prod["sku"]:
-                                            _cp["image_url"] = _new_url
+                                    for _cpc in _cfg_prods:
+                                        if _cpc.get("sku") == prod["sku"]:
+                                            _cpc["image_url"] = _new_url
                                     cfg["products"] = _cfg_prods
                                     save_config(cfg)
                                     st.session_state.cfg = cfg
-                                    st.success("Image updated across all databases.")
+                                    st.success(f"Image updated across {_p_sync_str}.")
                                     st.rerun()
                                 except Exception as _e:
                                     st.error(f"Upload failed: {_e}")
@@ -946,15 +1036,12 @@ if page == "Products":
                     st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
                     if st.button("Delete", key=f"del_prod_{i}", use_container_width=True):
                         _del_sku = prod["sku"]
-                        # Remove from ALL databases
                         _, _del_msg = delete_product_from_db(_del_sku, cfg)
-                        # Remove from config.json
                         cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") != _del_sku]
                         save_config(cfg)
                         st.session_state.cfg = cfg
-                        st.toast(f"Deleted {_del_sku} from: {_del_msg}")
+                        st.toast(f"Deleted {_del_sku} · {_del_msg}")
                         st.rerun()
-                # ── Edit form (inline expander) ──────────────────
                 with st.expander(f"Edit {prod.get('item_name', prod['sku'])}"):
                     with st.form(key=f"edit_prod_{prod['sku']}_{i}"):
                         _e_c1, _e_c2 = st.columns(2)
@@ -966,23 +1053,22 @@ if page == "Products":
                             _e_img   = st.text_input("Image URL",   value=str(prod.get("image_url", "N/A")))
                         if st.form_submit_button("Save Changes", type="primary"):
                             _upd = {
-                                "sku":       prod["sku"],
-                                "item_name": _e_name.strip() or prod.get("item_name", ""),
-                                "category":  _e_cat.strip() or prod.get("category", "General"),
-                                "price":     round(_e_price, 2),
-                                "image_url": _e_img.strip() or "N/A",
+                                "sku":        prod["sku"],
+                                "item_name":  _e_name.strip() or prod.get("item_name", ""),
+                                "category":   _e_cat.strip() or prod.get("category", "General"),
+                                "price":      round(_e_price, 2),
+                                "image_url":  _e_img.strip() or "N/A",
                                 "stock_left": prod.get("stock_left", 0),
-                                "status":    prod.get("status", "In stock"),
+                                "status":     prod.get("status", "In stock"),
                             }
                             _ok, _msg = save_product_to_db(_upd, cfg)
-                            # Update config.json product list
                             _cfg_prods = cfg.get("products", [])
                             cfg["products"] = [_upd if p.get("sku") == _upd["sku"] else p for p in _cfg_prods]
                             if not any(p.get("sku") == _upd["sku"] for p in _cfg_prods):
                                 cfg["products"].append(_upd)
                             save_config(cfg)
                             st.session_state.cfg = cfg
-                            st.success(f"Updated across: {_msg}")
+                            st.success(f"Updated · {_msg}")
                             st.rerun()
                 st.divider()
 
@@ -1011,16 +1097,22 @@ elif page == "Inventory":
     if _has_supabase: _sync_targets.append("Supabase")
     st.caption(f"Reading from: **{_source_label}** · Writing to: **{' + '.join(_sync_targets)}**")
 
+    _inv_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if not inv_df.empty and "item_name" in inv_df.columns else {}
+
     if inv_df.empty:
-        st.info("No products in inventory yet. Add products on the **Products** page first.")
-    else:
-        inv_tab_adjust, inv_tab_edit, inv_tab_delete = st.tabs(["Adjust Stock", "Edit Product", "Delete Product"])
+        st.info("No products in inventory yet. Use **Add Products** below to add your first product.")
 
-        # ══ ADJUST STOCK ════════════════════════════════
-        with inv_tab_adjust:
+    inv_tab_adjust, inv_tab_add, inv_tab_bulk_edit, inv_tab_edit, inv_tab_delete = st.tabs(
+        ["Adjust Stock", "Add Products", "Bulk Edit", "Edit Product", "Delete Products"]
+    )
+
+    # ══ ADJUST STOCK ════════════════════════════════
+    with inv_tab_adjust:
+        if inv_df.empty:
+            st.info("Add products first.")
+        else:
             st.subheader("Bulk Adjust")
-            st.caption("Enter a delta (+ adds stock, − removes stock) then click Apply.")
-
+            st.caption("Enter a delta (+ adds, − removes) then Apply. All changes sync to every database.")
             display_cols = ["sku", "item_name", "category", "stock_left", "status"]
             show_cols = [c for c in display_cols if c in inv_df.columns]
             edit_df = inv_df[show_cols].copy()
@@ -1028,17 +1120,16 @@ elif page == "Inventory":
             edited = st.data_editor(
                 edit_df,
                 column_config={
-                    "sku":        st.column_config.TextColumn("SKU",           disabled=True),
-                    "item_name":  st.column_config.TextColumn("Product",       disabled=True),
-                    "category":   st.column_config.TextColumn("Category",      disabled=True),
-                    "stock_left": st.column_config.NumberColumn("Stock",        disabled=True),
-                    "status":     st.column_config.TextColumn("Status",        disabled=True),
-                    "delta":      st.column_config.NumberColumn("Adjust By",   help="+10 adds, -5 removes"),
+                    "sku":        st.column_config.TextColumn("SKU",      disabled=True),
+                    "item_name":  st.column_config.TextColumn("Product",  disabled=True),
+                    "category":   st.column_config.TextColumn("Category", disabled=True),
+                    "stock_left": st.column_config.NumberColumn("Stock",  disabled=True),
+                    "status":     st.column_config.TextColumn("Status",   disabled=True),
+                    "delta":      st.column_config.NumberColumn("Adjust By", help="+10 adds, -5 removes"),
                 },
                 use_container_width=True,
                 key="inv_editor",
             )
-
             if st.button("Apply Adjustments", type="primary", use_container_width=True):
                 changes = edited[edited["delta"] != 0]
                 if changes.empty:
@@ -1050,20 +1141,16 @@ elif page == "Inventory":
                         _msgs  = []
                         _, _m = adjust_inventory_sqlite(_sku, _delta)
                         _msgs.append(_m)
-                        if _has_neon:
-                            _, _m2 = adjust_inventory_neon(_sku, _delta, cfg)
-                            _msgs.append(_m2)
-                        if _has_supabase:
-                            _, _m3 = adjust_inventory_supabase(_sku, _delta, cfg)
-                            _msgs.append(_m3)
+                        if _has_neon:     _, _m2 = adjust_inventory_neon(_sku, _delta, cfg);     _msgs.append(_m2)
+                        if _has_supabase: _, _m3 = adjust_inventory_supabase(_sku, _delta, cfg); _msgs.append(_m3)
                         st.toast(f"{_row.get('item_name', _sku)}: {' · '.join(_msgs)}")
-                    st.success(f"Applied {len(changes)} adjustment(s) across {' + '.join(_sync_targets)}.")
+                    st.success(f"Applied {len(changes)} adjustment(s) · {' + '.join(_sync_targets)}")
                     st.rerun()
 
             st.divider()
             st.subheader("Quick Adjust")
             _qa_options  = inv_df["sku"].tolist()
-            _qa_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if "item_name" in inv_df.columns else {}
+            _qa_name_map = _inv_name_map
             _qa_c1, _qa_c2, _qa_c3 = st.columns([3, 1, 1])
             with _qa_c1:
                 _qa_sku = st.selectbox("Product", _qa_options,
@@ -1074,7 +1161,7 @@ elif page == "Inventory":
                 st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
                 if st.button("Apply", type="primary", use_container_width=True, key="qa_apply"):
                     if _qa_delta == 0:
-                        st.warning("Delta is 0 — nothing to do.")
+                        st.warning("Delta is 0.")
                     else:
                         _, _qm = adjust_inventory_sqlite(_qa_sku, int(_qa_delta))
                         if _has_neon:     adjust_inventory_neon(_qa_sku, int(_qa_delta), cfg)
@@ -1086,16 +1173,147 @@ elif page == "Inventory":
             st.subheader("Current Inventory")
             st.dataframe(load_inventory_preferring_cloud(cfg), use_container_width=True)
 
-        # ══ EDIT PRODUCT ════════════════════════════════
-        with inv_tab_edit:
+    # ══ ADD PRODUCTS (Bulk Add with Stock) ══════════
+    with inv_tab_add:
+        st.subheader("Add Products to Inventory")
+        st.caption(f"Add products with initial stock. Synced to: **{' + '.join(_sync_targets)}**")
+        _ia_template = pd.DataFrame({
+            "SKU":      [""] * 6,
+            "Name":     [""] * 6,
+            "Category": [""] * 6,
+            "Price":    [0.0] * 6,
+            "Stock":    [0] * 6,
+        })
+        _ia_edited = st.data_editor(
+            _ia_template,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="inv_add_editor",
+            column_config={
+                "Price": st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
+                "Stock": st.column_config.NumberColumn("Initial Stock", min_value=0),
+            },
+        )
+        _ia_csv = st.file_uploader(
+            "Or import CSV (columns: SKU, Name, Category, Price, Stock)",
+            type=["csv"], key="inv_add_csv",
+        )
+        if st.button("Add All to Inventory", type="primary", use_container_width=True, key="btn_inv_add"):
+            rows_to_add_inv = _ia_edited[
+                _ia_edited["SKU"].astype(str).str.strip().ne("") &
+                _ia_edited["Name"].astype(str).str.strip().ne("")
+            ]
+            if _ia_csv:
+                _idf = pd.read_csv(_ia_csv)
+                _idf.columns = _idf.columns.str.strip()
+                _icol_map = {}
+                for _ic in _idf.columns:
+                    _icl = _ic.lower()
+                    if "sku" in _icl: _icol_map[_ic] = "SKU"
+                    elif "name" in _icl or "product" in _icl: _icol_map[_ic] = "Name"
+                    elif "cat" in _icl: _icol_map[_ic] = "Category"
+                    elif "price" in _icl: _icol_map[_ic] = "Price"
+                    elif "stock" in _icl or "qty" in _icl or "quantity" in _icl: _icol_map[_ic] = "Stock"
+                _idf = _idf.rename(columns=_icol_map)
+                for _ineed in ["SKU", "Name"]:
+                    if _ineed not in _idf.columns: _idf[_ineed] = ""
+                if "Category" not in _idf.columns: _idf["Category"] = "General"
+                if "Price"    not in _idf.columns: _idf["Price"]    = 0.0
+                if "Stock"    not in _idf.columns: _idf["Stock"]    = 0
+                rows_to_add_inv = pd.concat([rows_to_add_inv, _idf[["SKU","Name","Category","Price","Stock"]]], ignore_index=True)
+
+            _ia_added = 0
+            for _, _iarow in rows_to_add_inv.iterrows():
+                _iasku  = str(_iarow["SKU"]).strip().upper()
+                _ianame = str(_iarow["Name"]).strip()
+                if not _iasku or not _ianame: continue
+                try: _iaprice = round(float(_iarow.get("Price", 0)), 2)
+                except: _iaprice = 0.0
+                try: _iastock = int(_iarow.get("Stock", 0))
+                except: _iastock = 0
+                _iaprod = {
+                    "sku":        _iasku,
+                    "item_name":  _ianame,
+                    "category":   str(_iarow.get("Category", "General")).strip() or "General",
+                    "price":      _iaprice,
+                    "stock_left": _iastock,
+                    "status":     "Out of stock" if _iastock == 0 else ("Low stock" if _iastock <= 10 else "In stock"),
+                    "image_url":  "N/A",
+                }
+                save_product_to_db(_iaprod, cfg)
+                set_stock_all_dbs(_iasku, _iastock, cfg)
+                _cp = cfg.get("products", [])
+                cfg["products"] = [p for p in _cp if p.get("sku") != _iasku]
+                cfg["products"].append(_iaprod)
+                _ia_added += 1
+            save_config(cfg)
+            st.session_state.cfg = cfg
+            st.success(f"Added {_ia_added} product(s) · Synced to: {' + '.join(_sync_targets)}")
+            st.rerun()
+
+    # ══ BULK EDIT ═══════════════════════════════════
+    with inv_tab_bulk_edit:
+        if inv_df.empty:
+            st.info("Add products first.")
+        else:
+            st.subheader("Bulk Edit Products")
+            st.caption(f"Edit any field inline, then Save All. Synced to: **{' + '.join(_sync_targets)}**")
+            _ibe_cols = ["sku", "item_name", "category", "price", "stock_left", "image_url"]
+            _ibe_show = [c for c in _ibe_cols if c in inv_df.columns]
+            _ibe_df   = inv_df[_ibe_show].copy()
+            _ibe_edited = st.data_editor(
+                _ibe_df,
+                column_config={
+                    "sku":        st.column_config.TextColumn("SKU",       disabled=True),
+                    "item_name":  st.column_config.TextColumn("Name"),
+                    "category":   st.column_config.TextColumn("Category"),
+                    "price":      st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
+                    "stock_left": st.column_config.NumberColumn("Stock",     min_value=0),
+                    "image_url":  st.column_config.TextColumn("Image URL"),
+                },
+                use_container_width=True,
+                num_rows="fixed",
+                key="inv_bulk_edit",
+            )
+            if st.button("Save All Changes", type="primary", use_container_width=True, key="btn_inv_bulk_edit"):
+                _ibe_saved = 0
+                for _, _iberow in _ibe_edited.iterrows():
+                    _ibesku  = str(_iberow.get("sku", "")).strip()
+                    _ibename = str(_iberow.get("item_name", "")).strip()
+                    if not _ibesku or not _ibename: continue
+                    _ibestock = int(_iberow.get("stock_left", 0))
+                    _ibeupd = {
+                        "sku":        _ibesku,
+                        "item_name":  _ibename,
+                        "category":   str(_iberow.get("category", "General")).strip() or "General",
+                        "price":      round(float(_iberow.get("price", 0.0)), 2),
+                        "stock_left": _ibestock,
+                        "image_url":  str(_iberow.get("image_url", "N/A")).strip() or "N/A",
+                        "status":     "Out of stock" if _ibestock == 0 else ("Low stock" if _ibestock <= 10 else "In stock"),
+                    }
+                    save_product_to_db(_ibeupd, cfg)
+                    set_stock_all_dbs(_ibesku, _ibestock, cfg)
+                    _cp = cfg.get("products", [])
+                    cfg["products"] = [_ibeupd if p.get("sku") == _ibesku else p for p in _cp]
+                    if not any(p.get("sku") == _ibesku for p in _cp):
+                        cfg["products"].append(_ibeupd)
+                    _ibe_saved += 1
+                save_config(cfg)
+                st.session_state.cfg = cfg
+                st.success(f"Saved {_ibe_saved} products · Synced to: {' + '.join(_sync_targets)}")
+                st.rerun()
+
+    # ══ EDIT PRODUCT (single) ═══════════════════════
+    with inv_tab_edit:
+        if inv_df.empty:
+            st.info("Add products first.")
+        else:
             st.subheader("Edit Product Details")
-            st.caption("Changes are saved to all configured databases.")
-            _edit_options  = inv_df["sku"].tolist()
-            _edit_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if "item_name" in inv_df.columns else {}
+            st.caption(f"Synced to: **{' + '.join(_sync_targets)}**")
             _edit_sku_sel = st.selectbox(
                 "Select product",
-                _edit_options,
-                format_func=lambda s: f"{_edit_name_map.get(s, s)} ({s})",
+                inv_df["sku"].tolist(),
+                format_func=lambda s: f"{_inv_name_map.get(s, s)} ({s})",
                 key="edit_inv_sku",
             )
             if _edit_sku_sel:
@@ -1120,41 +1338,48 @@ elif page == "Inventory":
                             "image_url":  _ei.strip() or "N/A",
                             "status":     "Out of stock" if _es == 0 else ("Low stock" if _es <= 10 else "In stock"),
                         }
-                        # Sync name/category/price/image to all DBs
                         _ok, _msg = save_product_to_db(_upd_prod, cfg)
-                        # Sync stock separately (save_product_to_db preserves existing stock on update)
                         set_stock_all_dbs(_edit_sku_sel, _es, cfg)
-                        # Update config.json
                         _cfg_prods = cfg.get("products", [])
                         cfg["products"] = [_upd_prod if p.get("sku") == _edit_sku_sel else p for p in _cfg_prods]
                         if not any(p.get("sku") == _edit_sku_sel for p in _cfg_prods):
                             cfg["products"].append(_upd_prod)
                         save_config(cfg)
                         st.session_state.cfg = cfg
-                        st.success(f"Updated across: {_msg}")
+                        st.success(f"Updated · {_msg}")
                         st.rerun()
 
-        # ══ DELETE PRODUCT ══════════════════════════════
-        with inv_tab_delete:
-            st.subheader("Delete Product")
-            st.caption("Permanently removes the product from ALL configured databases.")
-            _del_options  = inv_df["sku"].tolist()
-            _del_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if "item_name" in inv_df.columns else {}
-            _del_sku_sel = st.selectbox(
-                "Select product to delete",
-                _del_options,
-                format_func=lambda s: f"{_del_name_map.get(s, s)} ({s})",
-                key="del_inv_sku",
+    # ══ DELETE PRODUCTS (bulk) ═══════════════════════
+    with inv_tab_delete:
+        if inv_df.empty:
+            st.info("No products to delete.")
+        else:
+            st.subheader("Delete Products")
+            st.caption(f"Permanently removes selected products from: **{' + '.join(_sync_targets)}** and the Products catalog.")
+            _del_map = {
+                str(r.get("sku")): f"{r.get('item_name', r.get('sku'))} ({r.get('sku')})"
+                for _, r in inv_df.iterrows() if r.get("sku")
+            }
+            _del_selected = st.multiselect(
+                "Select products to delete",
+                options=list(_del_map.keys()),
+                format_func=lambda s: _del_map[s],
+                key="del_inv_multi",
             )
-            st.warning(f"This will permanently delete **{_del_name_map.get(_del_sku_sel, _del_sku_sel)}** from: {' + '.join(_sync_targets)}")
-            _del_confirm = st.checkbox("I understand this cannot be undone", key="del_inv_confirm")
-            if st.button("Delete Product", type="primary", key="del_inv_btn", disabled=not _del_confirm):
-                _, _del_msg = delete_product_from_db(_del_sku_sel, cfg)
-                cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") != _del_sku_sel]
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.success(f"Deleted from: {_del_msg}")
-                st.rerun()
+            if _del_selected:
+                st.warning(
+                    f"**{len(_del_selected)} product(s) selected** will be permanently deleted "
+                    f"from {' + '.join(_sync_targets)} and the Products catalog."
+                )
+                _del_confirm = st.checkbox("I understand this cannot be undone", key="del_inv_confirm")
+                if st.button("Delete Selected Products", type="primary", key="del_inv_btn", disabled=not _del_confirm):
+                    for _dsku in _del_selected:
+                        delete_product_from_db(_dsku, cfg)
+                    cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _del_selected]
+                    save_config(cfg)
+                    st.session_state.cfg = cfg
+                    st.success(f"Deleted {len(_del_selected)} product(s) from {' + '.join(_sync_targets)}.")
+                    st.rerun()
 
 
 # ═════════════════════════════════════════════
