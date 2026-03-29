@@ -870,37 +870,77 @@ if page == "Products":
     # ══ BULK ADD ════════════════════════════════
     with tab_bulk_add:
         st.caption(f"Add multiple products at once. Synced to: **{_p_sync_str}**")
-        _bulk_template = pd.DataFrame({
-            "SKU":      [""] * 8,
-            "Name":     [""] * 8,
-            "Category": [""] * 8,
-            "Price":    [0.0] * 8,
-        })
-        _bulk_edited = st.data_editor(
-            _bulk_template,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="bulk_editor",
-            column_config={
-                "Price": st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
-            },
-        )
-        _bc1, _bc2 = st.columns(2)
-        with _bc1:
-            _bulk_csv = st.file_uploader("Or import CSV (SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
-        with _bc2:
-            _bulk_images = st.file_uploader(
-                "Product images (filename = SKU, e.g. SKU001.jpg)",
-                type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True,
-                key="bulk_images",
-                help="Each file's name (without extension) is matched to a SKU. Requires Imghippo API key.",
+
+        # ── Row state ────────────────────────────────────────────────
+        if "pb_ids" not in st.session_state:
+            st.session_state.pb_ids   = list(range(4))
+            st.session_state.pb_next  = 4
+
+        _PB_COLS = [1.5, 2.5, 1.5, 1.2, 2.8, 0.45]
+
+        # Header labels
+        _pbh = st.columns(_PB_COLS)
+        for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Image", ""], _pbh):
+            _col.caption(_lbl)
+
+        # Per-row inputs
+        for _rid in list(st.session_state.pb_ids):
+            _pc = st.columns(_PB_COLS)
+            with _pc[0]:
+                st.text_input("sku", key=f"pb_sku_{_rid}", placeholder="SKU-001",
+                              label_visibility="collapsed")
+            with _pc[1]:
+                st.text_input("name", key=f"pb_name_{_rid}", placeholder="Blue T-Shirt",
+                              label_visibility="collapsed")
+            with _pc[2]:
+                st.text_input("cat", key=f"pb_cat_{_rid}", placeholder="General",
+                              label_visibility="collapsed")
+            with _pc[3]:
+                st.number_input("price", key=f"pb_price_{_rid}", min_value=0.0,
+                                step=0.01, format="%.2f", label_visibility="collapsed")
+            with _pc[4]:
+                st.file_uploader("img", key=f"pb_img_{_rid}",
+                                 type=["jpg","jpeg","png","webp"],
+                                 label_visibility="collapsed")
+            with _pc[5]:
+                st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+                if st.button("×", key=f"pb_del_{_rid}", use_container_width=True,
+                             help="Remove this row"):
+                    st.session_state.pb_ids.remove(_rid)
+                    st.rerun()
+
+        # Add row + CSV import
+        _pbadd_c1, _pbadd_c2 = st.columns([1, 3])
+        with _pbadd_c1:
+            if st.button("+ Add Row", use_container_width=True, key="pb_add_row"):
+                st.session_state.pb_ids.append(st.session_state.pb_next)
+                st.session_state.pb_next += 1
+                st.rerun()
+        with _pbadd_c2:
+            _bulk_csv = st.file_uploader(
+                "Or import CSV (SKU, Name, Category, Price)",
+                type=["csv"], key="bulk_csv",
             )
+
         if st.button("Add All to Products", type="primary", use_container_width=True, key="btn_bulk_add"):
-            rows_to_add = _bulk_edited[
-                _bulk_edited["SKU"].astype(str).str.strip().ne("") &
-                _bulk_edited["Name"].astype(str).str.strip().ne("")
-            ]
+            # Collect manual rows from session state
+            _pb_rows: list[dict] = []
+            for _rid in st.session_state.pb_ids:
+                _bsku  = str(st.session_state.get(f"pb_sku_{_rid}", "")).strip().upper()
+                _bname = str(st.session_state.get(f"pb_name_{_rid}", "")).strip()
+                if not _bsku or not _bname:
+                    continue
+                try: _bprice = round(float(st.session_state.get(f"pb_price_{_rid}", 0.0)), 2)
+                except: _bprice = 0.0
+                _pb_rows.append({
+                    "sku":   _bsku,
+                    "name":  _bname,
+                    "cat":   str(st.session_state.get(f"pb_cat_{_rid}", "")).strip() or "General",
+                    "price": _bprice,
+                    "img":   st.session_state.get(f"pb_img_{_rid}"),
+                })
+
+            # Merge CSV rows (no per-row image for CSV rows)
             if _bulk_csv:
                 _csv_df = pd.read_csv(_bulk_csv)
                 _csv_df.columns = _csv_df.columns.str.strip()
@@ -915,47 +955,48 @@ if page == "Products":
                 for _need in ["SKU", "Name"]:
                     if _need not in _csv_df.columns: _csv_df[_need] = ""
                 if "Category" not in _csv_df.columns: _csv_df["Category"] = "General"
-                if "Price" not in _csv_df.columns: _csv_df["Price"] = 0.0
-                rows_to_add = pd.concat([rows_to_add, _csv_df[["SKU","Name","Category","Price"]]], ignore_index=True)
-            # Build SKU → uploaded image map (normalize: uppercase, strip -_)
-            def _norm_sku(s: str) -> str:
-                return re.sub(r"[-_]", "", s.upper())
-            _img_map: dict[str, object] = {}
-            if _bulk_images:
-                for _imgf in _bulk_images:
-                    _stem = Path(_imgf.name).stem
-                    _img_map[_norm_sku(_stem)] = _imgf
+                if "Price"    not in _csv_df.columns: _csv_df["Price"]    = 0.0
+                for _, _cr in _csv_df.iterrows():
+                    _csku = str(_cr["SKU"]).strip().upper()
+                    _cname = str(_cr["Name"]).strip()
+                    if _csku and _cname:
+                        try: _cprice = round(float(_cr["Price"]), 2)
+                        except: _cprice = 0.0
+                        _pb_rows.append({
+                            "sku": _csku, "name": _cname,
+                            "cat": str(_cr.get("Category","General")).strip() or "General",
+                            "price": _cprice, "img": None,
+                        })
+
             added = 0
             _img_uploaded = 0
-            for _, _row in rows_to_add.iterrows():
-                _sku  = str(_row["SKU"]).strip().upper()
-                _name = str(_row["Name"]).strip()
-                if not _sku or not _name: continue
-                try: _price = round(float(_row["Price"]), 2)
-                except: _price = 0.0
+            for _pbr in _pb_rows:
                 _image_url = "N/A"
-                _matched_img = _img_map.get(_norm_sku(_sku))
-                if _matched_img and cfg.get("imghippo_api_key"):
+                if _pbr["img"] and cfg.get("imghippo_api_key"):
                     try:
-                        _matched_img.seek(0)
+                        _pbr["img"].seek(0)
                         _image_url = upload_to_imghippo(
-                            _matched_img.read(), cfg["imghippo_api_key"], name=_name
+                            _pbr["img"].read(), cfg["imghippo_api_key"], name=_pbr["name"]
                         )
                         _img_uploaded += 1
                     except Exception:
                         pass
                 _product = {
-                    "sku": _sku, "item_name": _name,
-                    "category": str(_row.get("Category","General")).strip() or "General",
-                    "price": _price, "stock_left": 0, "status": "In stock", "image_url": _image_url,
+                    "sku": _pbr["sku"], "item_name": _pbr["name"],
+                    "category": _pbr["cat"], "price": _pbr["price"],
+                    "stock_left": 0, "status": "In stock", "image_url": _image_url,
                 }
                 save_product_to_db(_product, cfg)
                 _cp = cfg.get("products", [])
-                cfg["products"] = [p for p in _cp if p.get("sku") != _sku]
+                cfg["products"] = [p for p in _cp if p.get("sku") != _pbr["sku"]]
                 cfg["products"].append(_product)
                 added += 1
+
             save_config(cfg)
             st.session_state.cfg = cfg
+            # Reset rows
+            st.session_state.pb_ids  = list(range(4))
+            st.session_state.pb_next = 4
             _img_note = f" · {_img_uploaded} image(s) uploaded" if _img_uploaded else ""
             st.success(f"Added {added} products{_img_note} · Synced to: {_p_sync_str}")
             st.cache_data.clear()
@@ -1255,7 +1296,7 @@ elif page == "Inventory":
                     )
 
                 with _rc5:
-                    st.markdown("<div style='margin-top:4px;'></div>", unsafe_allow_html=True)
+                    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
                     if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
                         if _delta_val == 0:
                             st.toast(f"{_pname}: delta is 0, nothing changed.")
@@ -1273,105 +1314,148 @@ elif page == "Inventory":
     with inv_tab_add:
         st.subheader("Add Products to Inventory")
         st.caption(f"Add products with initial stock. Synced to: **{' + '.join(_sync_targets)}**")
-        _ia_template = pd.DataFrame({
-            "SKU":      [""] * 6,
-            "Name":     [""] * 6,
-            "Category": [""] * 6,
-            "Price":    [0.0] * 6,
-            "Stock":    [0] * 6,
-        })
-        _ia_edited = st.data_editor(
-            _ia_template,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="inv_add_editor",
-            column_config={
-                "Price": st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
-                "Stock": st.column_config.NumberColumn("Initial Stock", min_value=0),
-            },
-        )
-        _ia_c1, _ia_c2 = st.columns(2)
-        with _ia_c1:
+
+        # ── Row state ────────────────────────────────────────────────
+        if "ia_ids" not in st.session_state:
+            st.session_state.ia_ids  = list(range(4))
+            st.session_state.ia_next = 4
+
+        _IA_COLS = [1.4, 2.2, 1.4, 1.1, 1.0, 2.8, 0.45]
+
+        # Header labels
+        _iah = st.columns(_IA_COLS)
+        for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Stock", "Image", ""], _iah):
+            _col.caption(_lbl)
+
+        # Per-row inputs
+        for _rid in list(st.session_state.ia_ids):
+            _ic = st.columns(_IA_COLS)
+            with _ic[0]:
+                st.text_input("sku", key=f"ia_sku_{_rid}", placeholder="SKU-001",
+                              label_visibility="collapsed")
+            with _ic[1]:
+                st.text_input("name", key=f"ia_name_{_rid}", placeholder="Blue T-Shirt",
+                              label_visibility="collapsed")
+            with _ic[2]:
+                st.text_input("cat", key=f"ia_cat_{_rid}", placeholder="General",
+                              label_visibility="collapsed")
+            with _ic[3]:
+                st.number_input("price", key=f"ia_price_{_rid}", min_value=0.0,
+                                step=0.01, format="%.2f", label_visibility="collapsed")
+            with _ic[4]:
+                st.number_input("stock", key=f"ia_stock_{_rid}", min_value=0,
+                                step=1, label_visibility="collapsed")
+            with _ic[5]:
+                st.file_uploader("img", key=f"ia_img_{_rid}",
+                                 type=["jpg","jpeg","png","webp"],
+                                 label_visibility="collapsed")
+            with _ic[6]:
+                st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+                if st.button("×", key=f"ia_del_{_rid}", use_container_width=True,
+                             help="Remove this row"):
+                    st.session_state.ia_ids.remove(_rid)
+                    st.rerun()
+
+        # Add row + CSV import
+        _iaadd_c1, _iaadd_c2 = st.columns([1, 3])
+        with _iaadd_c1:
+            if st.button("+ Add Row", use_container_width=True, key="ia_add_row"):
+                st.session_state.ia_ids.append(st.session_state.ia_next)
+                st.session_state.ia_next += 1
+                st.rerun()
+        with _iaadd_c2:
             _ia_csv = st.file_uploader(
-                "Or import CSV (columns: SKU, Name, Category, Price, Stock)",
+                "Or import CSV (SKU, Name, Category, Price, Stock)",
                 type=["csv"], key="inv_add_csv",
             )
-        with _ia_c2:
-            _ia_images = st.file_uploader(
-                "Product images (filename = SKU, e.g. SKU001.jpg)",
-                type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True,
-                key="inv_add_images",
-                help="Each file's name (without extension) is matched to a SKU. Requires Imghippo API key.",
-            )
+
         if st.button("Add All to Inventory", type="primary", use_container_width=True, key="btn_inv_add"):
-            rows_to_add_inv = _ia_edited[
-                _ia_edited["SKU"].astype(str).str.strip().ne("") &
-                _ia_edited["Name"].astype(str).str.strip().ne("")
-            ]
+            # Collect manual rows
+            _ia_rows: list[dict] = []
+            for _rid in st.session_state.ia_ids:
+                _iasku  = str(st.session_state.get(f"ia_sku_{_rid}", "")).strip().upper()
+                _ianame = str(st.session_state.get(f"ia_name_{_rid}", "")).strip()
+                if not _iasku or not _ianame:
+                    continue
+                try: _iaprice = round(float(st.session_state.get(f"ia_price_{_rid}", 0.0)), 2)
+                except: _iaprice = 0.0
+                try: _iastock = int(st.session_state.get(f"ia_stock_{_rid}", 0))
+                except: _iastock = 0
+                _ia_rows.append({
+                    "sku":   _iasku,
+                    "name":  _ianame,
+                    "cat":   str(st.session_state.get(f"ia_cat_{_rid}", "")).strip() or "General",
+                    "price": _iaprice,
+                    "stock": _iastock,
+                    "img":   st.session_state.get(f"ia_img_{_rid}"),
+                })
+
+            # Merge CSV rows
             if _ia_csv:
                 _idf = pd.read_csv(_ia_csv)
                 _idf.columns = _idf.columns.str.strip()
                 _icol_map = {}
-                for _ic in _idf.columns:
-                    _icl = _ic.lower()
-                    if "sku" in _icl: _icol_map[_ic] = "SKU"
-                    elif "name" in _icl or "product" in _icl: _icol_map[_ic] = "Name"
-                    elif "cat" in _icl: _icol_map[_ic] = "Category"
-                    elif "price" in _icl: _icol_map[_ic] = "Price"
-                    elif "stock" in _icl or "qty" in _icl or "quantity" in _icl: _icol_map[_ic] = "Stock"
+                for _ic2 in _idf.columns:
+                    _icl = _ic2.lower()
+                    if "sku" in _icl: _icol_map[_ic2] = "SKU"
+                    elif "name" in _icl or "product" in _icl: _icol_map[_ic2] = "Name"
+                    elif "cat" in _icl: _icol_map[_ic2] = "Category"
+                    elif "price" in _icl: _icol_map[_ic2] = "Price"
+                    elif "stock" in _icl or "qty" in _icl or "quantity" in _icl: _icol_map[_ic2] = "Stock"
                 _idf = _idf.rename(columns=_icol_map)
                 for _ineed in ["SKU", "Name"]:
                     if _ineed not in _idf.columns: _idf[_ineed] = ""
                 if "Category" not in _idf.columns: _idf["Category"] = "General"
                 if "Price"    not in _idf.columns: _idf["Price"]    = 0.0
                 if "Stock"    not in _idf.columns: _idf["Stock"]    = 0
-                rows_to_add_inv = pd.concat([rows_to_add_inv, _idf[["SKU","Name","Category","Price","Stock"]]], ignore_index=True)
-            # Build SKU → uploaded image map
-            _ia_img_map: dict[str, object] = {}
-            if _ia_images:
-                for _iimgf in _ia_images:
-                    _istem = Path(_iimgf.name).stem
-                    _ia_img_map[re.sub(r"[-_]", "", _istem.upper())] = _iimgf
+                for _, _cr in _idf.iterrows():
+                    _csku = str(_cr["SKU"]).strip().upper()
+                    _cname = str(_cr["Name"]).strip()
+                    if _csku and _cname:
+                        try: _cprice = round(float(_cr["Price"]), 2)
+                        except: _cprice = 0.0
+                        try: _cstock = int(_cr["Stock"])
+                        except: _cstock = 0
+                        _ia_rows.append({
+                            "sku": _csku, "name": _cname,
+                            "cat": str(_cr.get("Category","General")).strip() or "General",
+                            "price": _cprice, "stock": _cstock, "img": None,
+                        })
 
             _ia_added = 0
             _ia_imgs_uploaded = 0
-            for _, _iarow in rows_to_add_inv.iterrows():
-                _iasku  = str(_iarow["SKU"]).strip().upper()
-                _ianame = str(_iarow["Name"]).strip()
-                if not _iasku or not _ianame: continue
-                try: _iaprice = round(float(_iarow.get("Price", 0)), 2)
-                except: _iaprice = 0.0
-                try: _iastock = int(_iarow.get("Stock", 0))
-                except: _iastock = 0
+            for _iar in _ia_rows:
                 _ia_image_url = "N/A"
-                _ia_matched = _ia_img_map.get(re.sub(r"[-_]", "", _iasku))
-                if _ia_matched and cfg.get("imghippo_api_key"):
+                if _iar["img"] and cfg.get("imghippo_api_key"):
                     try:
-                        _ia_matched.seek(0)
+                        _iar["img"].seek(0)
                         _ia_image_url = upload_to_imghippo(
-                            _ia_matched.read(), cfg["imghippo_api_key"], name=_ianame
+                            _iar["img"].read(), cfg["imghippo_api_key"], name=_iar["name"]
                         )
                         _ia_imgs_uploaded += 1
                     except Exception:
                         pass
                 _iaprod = {
-                    "sku":        _iasku,
-                    "item_name":  _ianame,
-                    "category":   str(_iarow.get("Category", "General")).strip() or "General",
-                    "price":      _iaprice,
-                    "stock_left": _iastock,
-                    "status":     "Out of stock" if _iastock == 0 else ("Low stock" if _iastock <= 10 else "In stock"),
+                    "sku":        _iar["sku"],
+                    "item_name":  _iar["name"],
+                    "category":   _iar["cat"],
+                    "price":      _iar["price"],
+                    "stock_left": _iar["stock"],
+                    "status":     "Out of stock" if _iar["stock"] == 0 else ("Low stock" if _iar["stock"] <= 10 else "In stock"),
                     "image_url":  _ia_image_url,
                 }
                 save_product_to_db(_iaprod, cfg)
-                set_stock_all_dbs(_iasku, _iastock, cfg)
+                set_stock_all_dbs(_iar["sku"], _iar["stock"], cfg)
                 _cp = cfg.get("products", [])
-                cfg["products"] = [p for p in _cp if p.get("sku") != _iasku]
+                cfg["products"] = [p for p in _cp if p.get("sku") != _iar["sku"]]
                 cfg["products"].append(_iaprod)
                 _ia_added += 1
+
             save_config(cfg)
             st.session_state.cfg = cfg
+            # Reset rows
+            st.session_state.ia_ids  = list(range(4))
+            st.session_state.ia_next = 4
             _ia_img_note = f" · {_ia_imgs_uploaded} image(s) uploaded" if _ia_imgs_uploaded else ""
             st.success(f"Added {_ia_added} product(s){_ia_img_note} · Synced to: {' + '.join(_sync_targets)}")
             st.cache_data.clear()
