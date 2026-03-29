@@ -1174,69 +1174,100 @@ elif page == "Inventory":
         if inv_df.empty:
             st.info("Add products first.")
         else:
-            st.subheader("Bulk Adjust")
-            st.caption("Enter a delta (+ adds, − removes) then Apply. All changes sync to every database.")
-            display_cols = ["sku", "item_name", "category", "stock_left", "status"]
-            show_cols = [c for c in display_cols if c in inv_df.columns]
-            edit_df = inv_df[show_cols].copy()
-            edit_df["delta"] = 0
-            edited = st.data_editor(
-                edit_df,
-                column_config={
-                    "sku":        st.column_config.TextColumn("SKU",      disabled=True),
-                    "item_name":  st.column_config.TextColumn("Product",  disabled=True),
-                    "category":   st.column_config.TextColumn("Category", disabled=True),
-                    "stock_left": st.column_config.NumberColumn("Stock",  disabled=True),
-                    "status":     st.column_config.TextColumn("Status",   disabled=True),
-                    "delta":      st.column_config.NumberColumn("Adjust By", help="+10 adds, -5 removes"),
-                },
-                use_container_width=True,
-                key="inv_editor",
+            st.caption(
+                f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
+                f"Synced to: **{' + '.join(_sync_targets)}**"
             )
-            if st.button("Apply Adjustments", type="primary", use_container_width=True):
-                changes = edited[edited["delta"] != 0]
-                if changes.empty:
-                    st.warning("No changes — set a non-zero delta first.")
-                else:
-                    for _, _row in changes.iterrows():
-                        _sku   = _row["sku"]
-                        _delta = int(_row["delta"])
-                        _msgs  = []
-                        _, _m = adjust_inventory_sqlite(_sku, _delta)
-                        _msgs.append(_m)
-                        if _has_neon:     _, _m2 = adjust_inventory_neon(_sku, _delta, cfg);     _msgs.append(_m2)
-                        if _has_supabase: _, _m3 = adjust_inventory_supabase(_sku, _delta, cfg); _msgs.append(_m3)
-                        st.toast(f"{_row.get('item_name', _sku)}: {' · '.join(_msgs)}")
-                    st.success(f"Applied {len(changes)} adjustment(s) · {' + '.join(_sync_targets)}")
+
+            # ── Apply All Changes ──────────────────────────────────────
+            if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
+                _adj_applied = 0
+                for _, _arow in inv_df.iterrows():
+                    _asku   = str(_arow["sku"])
+                    _adelta = int(st.session_state.get(f"adj_{_asku}", 0))
+                    if _adelta == 0:
+                        continue
+                    adjust_inventory_sqlite(_asku, _adelta)
+                    if _has_neon:     adjust_inventory_neon(_asku, _adelta, cfg)
+                    if _has_supabase: adjust_inventory_supabase(_asku, _adelta, cfg)
+                    _adj_applied += 1
+                if _adj_applied:
+                    st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
                     st.cache_data.clear()
                     st.rerun()
+                else:
+                    st.warning("All deltas are 0 — set a non-zero amount first.")
 
             st.divider()
-            st.subheader("Quick Adjust")
-            _qa_options  = inv_df["sku"].tolist()
-            _qa_name_map = _inv_name_map
-            _qa_c1, _qa_c2, _qa_c3 = st.columns([3, 1, 1])
-            with _qa_c1:
-                _qa_sku = st.selectbox("Product", _qa_options,
-                    format_func=lambda s: f"{_qa_name_map.get(s, s)} ({s})", key="qa_sku")
-            with _qa_c2:
-                _qa_delta = st.number_input("Adjust By", step=1, value=0, key="qa_delta")
-            with _qa_c3:
-                st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-                if st.button("Apply", type="primary", use_container_width=True, key="qa_apply"):
-                    if _qa_delta == 0:
-                        st.warning("Delta is 0.")
+
+            # ── Per-product rows ───────────────────────────────────────
+            _img_col_exists = "image_url" in inv_df.columns
+            for _, _pr in inv_df.iterrows():
+                _psku   = str(_pr.get("sku", ""))
+                _pname  = str(_pr.get("item_name", _psku))
+                _pstock = int(_pr.get("stock_left", 0))
+                _pstat  = str(_pr.get("status", ""))
+                _pcat   = str(_pr.get("category", ""))
+                _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
+
+                _stat_color = "#dc2626" if "Out" in _pstat else ("#f59e0b" if "Low" in _pstat else "#16a34a")
+
+                _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5])
+
+                with _rc1:
+                    if _pimg and _pimg not in ("N/A", "", "nan"):
+                        st.image(_pimg, width=56)
                     else:
-                        _, _qm = adjust_inventory_sqlite(_qa_sku, int(_qa_delta))
-                        if _has_neon:     adjust_inventory_neon(_qa_sku, int(_qa_delta), cfg)
-                        if _has_supabase: adjust_inventory_supabase(_qa_sku, int(_qa_delta), cfg)
-                        st.success(f"{_qa_name_map.get(_qa_sku, _qa_sku)}: {_qm}")
-                        st.cache_data.clear()
-                        st.rerun()
+                        st.markdown(
+                            "<div style='width:56px;height:56px;background:#f4f4f5;"
+                            "border-radius:8px;display:flex;align-items:center;"
+                            "justify-content:center;color:#bbb;font-size:10px;'>"
+                            "No img</div>",
+                            unsafe_allow_html=True,
+                        )
 
-            st.divider()
-            st.subheader("Current Inventory")
-            st.dataframe(load_inventory_preferring_cloud(cfg), use_container_width=True)
+                with _rc2:
+                    st.markdown(f"**{_pname}**")
+                    st.caption(f"{_psku}  ·  {_pcat}")
+                    if _pimg and _pimg not in ("N/A", "", "nan"):
+                        _short = _pimg if len(_pimg) <= 50 else _pimg[:47] + "…"
+                        st.markdown(
+                            f"<a href='{_pimg}' target='_blank' style='font-size:11px;color:#888;'>{_short}</a>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("_no image_")
+
+                with _rc3:
+                    st.markdown(
+                        f"<div style='margin-top:4px;'>"
+                        f"<span style='font-size:26px;font-weight:700;color:#18181b;'>{_pstock}</span>"
+                        f"<span style='font-size:11px;margin-left:6px;color:{_stat_color};'>{_pstat}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                with _rc4:
+                    _delta_val = st.number_input(
+                        "±", step=1, value=0, key=f"adj_{_psku}",
+                        label_visibility="collapsed",
+                        help="+5 adds stock, -3 removes stock",
+                    )
+
+                with _rc5:
+                    st.markdown("<div style='margin-top:4px;'></div>", unsafe_allow_html=True)
+                    if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
+                        if _delta_val == 0:
+                            st.toast(f"{_pname}: delta is 0, nothing changed.")
+                        else:
+                            _, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
+                            if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
+                            if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
+                            st.toast(f"{_pname}: {_am}")
+                            st.cache_data.clear()
+                            st.rerun()
+
+                st.divider()
 
     # ══ ADD PRODUCTS (Bulk Add with Stock) ══════════
     with inv_tab_add:
@@ -1904,6 +1935,28 @@ elif page == "Email Sender":
     st.title("Email Sender")
     st.caption("Build a queue of orders and send personalised confirmation emails in bulk.")
 
+    # Build catalog lookup once — used for image-match warnings and inventory deduction
+    _catalog_products = load_products()
+    _catalog_name_lower: set[str] = {
+        str(p.get("item_name", "")).lower().strip()
+        for p in _catalog_products if p.get("item_name")
+    }
+    _name_to_sku: dict[str, str] = {
+        str(p.get("item_name", "")).lower().strip(): str(p.get("sku", ""))
+        for p in _catalog_products if p.get("sku") and p.get("item_name")
+    }
+
+    def _unmatched_products(raw_products: str) -> list[str]:
+        """Return product names that have no fuzzy match in the catalog."""
+        if not _catalog_name_lower:
+            return []
+        unmatched = []
+        for pname in split_products(raw_products):
+            pl = pname.lower()
+            if not any(pl in cn or cn in pl for cn in _catalog_name_lower):
+                unmatched.append(pname)
+        return unmatched
+
     # ── Entry tabs ──────────────────────────────
 
     tab_single, tab_bulk, tab_csv, tab_template = st.tabs(
@@ -1925,6 +1978,15 @@ elif page == "Email Sender":
                 placeholder="Blue T-Shirt\nBlack Jeans\nRunning Shoes",
                 help="One product per line, or separate with | or ;",
             )
+
+        if s_prods and _catalog_name_lower:
+            _s_unmatched = _unmatched_products(s_prods)
+            if _s_unmatched:
+                st.warning(
+                    f"No catalog match for: **{', '.join(_s_unmatched)}** — "
+                    "product image(s) won't appear in the email. "
+                    "Check spelling or add the product in the Products page."
+                )
 
         if st.button("Add to Queue", key="single_add", type="primary"):
             if add_to_queue(s_name, s_email, s_order, s_prods):
@@ -1958,6 +2020,24 @@ elif page == "Email Sender":
                 ),
             },
         )
+
+        # Warn about unmatched products across all rows
+        if _catalog_name_lower:
+            _bulk_all_prods: list[str] = []
+            for _, _brow in edited.iterrows():
+                _bpr = str(_brow.get("Products", "")).strip()
+                if _bpr and _bpr not in ("nan", ""):
+                    _bulk_all_prods.extend(split_products(_bpr))
+            _bulk_unmatched = sorted({
+                p for p in _bulk_all_prods
+                if p and not any(p.lower() in cn or cn in p.lower() for cn in _catalog_name_lower)
+            })
+            if _bulk_unmatched:
+                st.warning(
+                    f"No catalog match for: **{', '.join(_bulk_unmatched)}** — "
+                    "product image(s) won't appear in emails. "
+                    "Check spelling or add them in the Products page."
+                )
 
         col_add, col_clear = st.columns(2)
         with col_add:
@@ -2109,7 +2189,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     template=_tpl_input.strip() or None,
                 )
                 with st.expander("Preview (sample order)", expanded=True):
-                    st.components.v1.html(_preview_html, height=520, scrolling=True)
+                    st.components.v1.html(_preview_html, height=740, scrolling=True)
 
     # ── Queue ───────────────────────────────────
 
@@ -2238,8 +2318,32 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             server.quit()
             prog.progress(1.0, text="Done")
 
+            # ── Deduct inventory for every successfully sent order ──────
+            _has_sb_send  = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+            _has_neon_send = bool(cfg.get("neon_connection_string","").strip())
+            _deductions: dict[str, int] = {}
+            for _si, _sorder in enumerate(queue):
+                if results[_si]["Status"] == "Sent":
+                    for _spname in split_products(_sorder.get("products", "")):
+                        _spl = _spname.lower().strip()
+                        _matched_sku = _name_to_sku.get(_spl)
+                        if not _matched_sku:
+                            for _cn, _csku in _name_to_sku.items():
+                                if _spl in _cn or _cn in _spl:
+                                    _matched_sku = _csku
+                                    break
+                        if _matched_sku:
+                            _deductions[_matched_sku] = _deductions.get(_matched_sku, 0) + 1
+            if _deductions:
+                for _dsku, _dqty in _deductions.items():
+                    adjust_inventory_sqlite(_dsku, -_dqty)
+                    if _has_neon_send:  adjust_inventory_neon(_dsku, -_dqty, cfg)
+                    if _has_sb_send:    adjust_inventory_supabase(_dsku, -_dqty, cfg)
+                st.cache_data.clear()
+
             if failed_n == 0:
-                st.success(f"All {sent_n} emails sent successfully.")
+                _inv_note = f" · Deducted stock for {sum(_deductions.values())} item(s)" if _deductions else ""
+                st.success(f"All {sent_n} emails sent successfully.{_inv_note}")
             else:
                 st.warning(f"{sent_n} sent, {failed_n} failed. See the results table above.")
 
