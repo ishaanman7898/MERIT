@@ -1,0 +1,25 @@
+# ── Secrets & local config ─────────────────────────────────────────────────
+# config.json holds your API keys, SMTP password, and DB credentials.
+# Each user creates their own from config.template.json — never commit yours.
+config.json
+
+# ── Local SQLite database ───────────────────────────────────────────────────
+# data.db is your local cache. Cloud databases are the source of truth.
+data.db
+
+# ── Python cache ────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env
+
+# ── IDE / OS junk ────────────────────────────────────────────────────────────
+.DS_Store
+.vscode/
+*.swp

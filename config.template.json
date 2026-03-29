@@ -1,0 +1,16 @@
+{
+  "_instructions": "Copy this file to config.json and fill in your own credentials. config.json is gitignored and never committed.",
+  "from_name": "Your Store Name",
+  "subject": "Your Order",
+  "smtp_email": "yourname@gmail.com",
+  "smtp_password": "your-16-char-app-password",
+  "imghippo_api_key": "your_imghippo_api_key",
+  "supabase_url": "https://xxxxxxxxxxxx.supabase.co",
+  "supabase_pat": "sbp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "supabase_key": "eyJhbGci...your-anon-key",
+  "supabase_publishable_key": "sb_publishable_...",
+  "supabase_service_role_key": "eyJhbGci...your-service-role-key",
+  "supabase_db_password": "your-db-password",
+  "neon_connection_string": "",
+  "products": []
+}
