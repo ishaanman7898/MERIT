@@ -1339,7 +1339,12 @@ elif page == "Inventory":
                 _pcat   = str(_pr.get("category", ""))
                 _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
 
-                _stat_color = "#dc2626" if "Out" in _pstat else ("#f59e0b" if "Low" in _pstat else "#16a34a")
+                _stat_color = (
+                    "#7c3aed" if "Backordered" in _pstat
+                    else "#dc2626" if "Out" in _pstat
+                    else "#f59e0b" if "Low" in _pstat
+                    else "#16a34a"
+                )
 
                 _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5])
 
@@ -1370,7 +1375,7 @@ elif page == "Inventory":
                 with _rc3:
                     st.markdown(
                         f"<div style='margin-top:4px;'>"
-                        f"<span style='font-size:26px;font-weight:700;color:#18181b;'>{_pstock}</span>"
+                        f"<span style='font-size:26px;font-weight:700;color:#ffffff;'>{_pstock}</span>"
                         f"<span style='font-size:11px;margin-left:6px;color:{_stat_color};'>{_pstat}</span>"
                         f"</div>",
                         unsafe_allow_html=True,
