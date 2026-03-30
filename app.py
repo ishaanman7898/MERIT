@@ -52,6 +52,14 @@ def _init_sqlite():
 
 _init_sqlite()
 
+
+def _clear_data_caches():
+    """Clear both the @st.cache_data function cache and the per-session state caches."""
+    st.cache_data.clear()
+    st.session_state.pop("_products_cache", None)
+    st.session_state.pop("_inv_cache", None)
+
+
 # ─────────────────────────────────────────────
 # Config persistence
 # ─────────────────────────────────────────────
@@ -800,7 +808,10 @@ if page == "Products":
     if not _has_cloud_db:
         st.info("Saving to **SQLite** (local). Connect Supabase or Neon in Settings for cloud backup.")
 
-    products = load_products_for_catalog(cfg)
+    if "_products_cache" not in st.session_state:
+        with st.spinner("Loading products…"):
+            st.session_state["_products_cache"] = load_products_for_catalog(cfg)
+    products = st.session_state["_products_cache"]
 
     # Compute sync targets for display in this page
     _p_has_sb = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
@@ -864,7 +875,7 @@ if page == "Products":
                 save_config(cfg)
                 st.session_state.cfg = cfg
                 st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
-                st.cache_data.clear()
+                _clear_data_caches()
                 st.rerun()
 
     # ══ BULK ADD ════════════════════════════════
@@ -999,7 +1010,7 @@ if page == "Products":
             st.session_state.pb_next = 4
             _img_note = f" · {_img_uploaded} image(s) uploaded" if _img_uploaded else ""
             st.success(f"Added {added} products{_img_note} · Synced to: {_p_sync_str}")
-            st.cache_data.clear()
+            _clear_data_caches()
             st.rerun()
 
     # ══ BULK EDIT ═══════════════════════════════
@@ -1054,7 +1065,7 @@ if page == "Products":
                 save_config(cfg)
                 st.session_state.cfg = cfg
                 st.success(f"Saved {saved} products · Synced to: {_p_sync_str}")
-                st.cache_data.clear()
+                _clear_data_caches()
                 st.rerun()
 
     # ══ BULK DELETE ═════════════════════════════
@@ -1083,7 +1094,7 @@ if page == "Products":
                     save_config(cfg)
                     st.session_state.cfg = cfg
                     st.success(f"Deleted {len(_bd_selected)} product(s) from {_p_sync_str}.")
-                    st.cache_data.clear()
+                    _clear_data_caches()
                     st.rerun()
 
     # ══ CATALOG ═════════════════════════════════
@@ -1130,7 +1141,7 @@ if page == "Products":
                                     save_config(cfg)
                                     st.session_state.cfg = cfg
                                     st.success(f"Image updated across {_p_sync_str}.")
-                                    st.cache_data.clear()
+                                    _clear_data_caches()
                                     st.rerun()
                                 except Exception as _e:
                                     st.error(f"Upload failed: {_e}")
@@ -1143,7 +1154,7 @@ if page == "Products":
                         save_config(cfg)
                         st.session_state.cfg = cfg
                         st.toast(f"Deleted {_del_sku} · {_del_msg}")
-                        st.cache_data.clear()
+                        _clear_data_caches()
                         st.rerun()
                 with st.expander(f"Edit {prod.get('item_name', prod['sku'])}"):
                     with st.form(key=f"edit_prod_{prod['sku']}_{i}"):
@@ -1172,7 +1183,7 @@ if page == "Products":
                             save_config(cfg)
                             st.session_state.cfg = cfg
                             st.success(f"Updated · {_msg}")
-                            st.cache_data.clear()
+                            _clear_data_caches()
                             st.rerun()
                 st.divider()
 
@@ -1187,7 +1198,10 @@ elif page == "Inventory":
     st.caption("All changes sync across every configured database simultaneously.")
 
     # Load from best available source: Supabase > Neon > SQLite
-    inv_df = load_inventory_preferring_cloud(cfg)
+    if "_inv_cache" not in st.session_state:
+        with st.spinner("Loading inventory…"):
+            st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
+    inv_df = st.session_state["_inv_cache"]
 
     # ── DB source / sync badges ───────────────────────────────────────
     _sb_url = cfg.get("supabase_url", "").strip()
@@ -1234,7 +1248,7 @@ elif page == "Inventory":
                     _adj_applied += 1
                 if _adj_applied:
                     st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
-                    st.cache_data.clear()
+                    _clear_data_caches()
                     st.rerun()
                 else:
                     st.warning("All deltas are 0 — set a non-zero amount first.")
@@ -1305,7 +1319,7 @@ elif page == "Inventory":
                             if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
                             if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
                             st.toast(f"{_pname}: {_am}")
-                            st.cache_data.clear()
+                            _clear_data_caches()
                             st.rerun()
 
                 st.divider()
@@ -1458,7 +1472,7 @@ elif page == "Inventory":
             st.session_state.ia_next = 4
             _ia_img_note = f" · {_ia_imgs_uploaded} image(s) uploaded" if _ia_imgs_uploaded else ""
             st.success(f"Added {_ia_added} product(s){_ia_img_note} · Synced to: {' + '.join(_sync_targets)}")
-            st.cache_data.clear()
+            _clear_data_caches()
             st.rerun()
 
     # ══ BULK EDIT ═══════════════════════════════════
@@ -1511,7 +1525,7 @@ elif page == "Inventory":
                 save_config(cfg)
                 st.session_state.cfg = cfg
                 st.success(f"Saved {_ibe_saved} products · Synced to: {' + '.join(_sync_targets)}")
-                st.cache_data.clear()
+                _clear_data_caches()
                 st.rerun()
 
     # ══ EDIT PRODUCT (single) ═══════════════════════
@@ -1558,7 +1572,7 @@ elif page == "Inventory":
                         save_config(cfg)
                         st.session_state.cfg = cfg
                         st.success(f"Updated · {_msg}")
-                        st.cache_data.clear()
+                        _clear_data_caches()
                         st.rerun()
 
     # ══ DELETE PRODUCTS (bulk) ═══════════════════════
@@ -1591,7 +1605,7 @@ elif page == "Inventory":
                     save_config(cfg)
                     st.session_state.cfg = cfg
                     st.success(f"Deleted {len(_del_selected)} product(s) from {' + '.join(_sync_targets)}.")
-                    st.cache_data.clear()
+                    _clear_data_caches()
                     st.rerun()
 
 
@@ -2258,6 +2272,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 cfg["email_html_template"] = ""
                 save_config(cfg)
                 st.session_state.cfg = cfg
+                st.session_state.pop("_tpl_preview_html", None)
                 st.success("Reset to built-in template.")
                 st.rerun()
         with _tpl_c3:
@@ -2267,13 +2282,17 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     "order_number": "ORD-1001",
                     "products": "Blue T-Shirt | Black Jeans",
                 }
-                _preview_html = build_html(
+                st.session_state["_tpl_preview_html"] = build_html(
                     _preview_order,
                     cfg.get("from_name") or "Your Store",
                     template=_tpl_input.strip() or None,
                 )
-                with st.expander("Preview (sample order)", expanded=True):
-                    st.components.v1.html(_preview_html, height=740, scrolling=True)
+
+        # Render preview full-width below the buttons (persists across reruns)
+        if "_tpl_preview_html" in st.session_state:
+            st.markdown("---")
+            st.markdown("**Email preview** — sample order: Jane Smith · ORD-1001 · Blue T-Shirt, Black Jeans")
+            st.components.v1.html(st.session_state["_tpl_preview_html"], height=800, scrolling=True)
 
     # ── Queue ───────────────────────────────────
 
@@ -2423,7 +2442,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     adjust_inventory_sqlite(_dsku, -_dqty)
                     if _has_neon_send:  adjust_inventory_neon(_dsku, -_dqty, cfg)
                     if _has_sb_send:    adjust_inventory_supabase(_dsku, -_dqty, cfg)
-                st.cache_data.clear()
+                _clear_data_caches()
 
             if failed_n == 0:
                 _inv_note = f" · Deducted stock for {sum(_deductions.values())} item(s)" if _deductions else ""

@@ -6,7 +6,7 @@ Send personalised order-confirmation emails in bulk, manage your product catalog
 
 ## Table of Contents
 
-1. [Quick Start (Fork & Run)](#1-quick-start-fork--run)
+1. [Quick Start — Streamlit Cloud (recommended) or Local](#1-quick-start-fork--run)
 2. [Required Credentials](#2-required-credentials)
    - [Gmail App Password](#21-gmail-app-password-required)
    - [Imghippo API Key](#22-imghippo-api-key-required-for-product-images)
@@ -22,19 +22,48 @@ Send personalised order-confirmation emails in bulk, manage your product catalog
 
 ## 1. Quick Start (Fork & Run)
 
-### Fork the repo
+### Recommended: Deploy on Streamlit Cloud (no install required)
 
-1. Click **Fork** at the top-right of this page
-2. Clone your fork locally:
+This is the easiest way to run MERIT — no Python or terminal needed.
+
+1. **Fork this repo**
+   - Make sure you are signed in to GitHub with the account you want to use
+   - Click **Fork** at the top-right of this page
+   - This creates your own copy of the repo under your GitHub account
+
+2. **Create a Streamlit account**
+   - Go to [share.streamlit.io](https://share.streamlit.io) and click **Sign up**
+   - Sign in with the **same GitHub account** you used to fork the repo
+
+3. **Deploy the app**
+   - Click **Create app** in your Streamlit dashboard
+   - Select **"Deploy from GitHub"**
+   - Click your forked repository in the list
+   - Set the fields:
+     - **Branch:** `master`
+     - **Main file path:** `app.py`
+     - **App URL:** type your company name (e.g. `thrive-merit`) — this becomes your public URL
+   - Click **Deploy** and wait ~60 seconds
+
+4. **Configure credentials inside the app**
+   - Once the app loads, go to **Settings** and fill in your Gmail, Imghippo, and optionally Supabase/Neon credentials
+   - Click **Save Settings** — everything is stored and persists automatically
+   - See [Required Credentials](#2-required-credentials) below for step-by-step guides on getting each key
+
+> **Why Supabase is important on Streamlit Cloud:** Streamlit Cloud resets its local filesystem on every restart, so the local SQLite `data.db` will be wiped. Connect Supabase (free tier) in Settings → Database Connections so your products and inventory survive restarts.
+
+---
+
+### Alternative: Run locally
+
+Clone your fork:
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/MERIT.git
 cd MERIT
 ```
 
-### Install dependencies
-
-Python 3.10 or newer is required.
+Install dependencies (Python 3.10+ required):
 
 ```bash
 pip install -r requirements.txt
@@ -52,25 +81,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Set up your config
-
-Copy the template — this is where all your credentials live:
+Copy the config template:
 
 ```bash
 cp config.template.json config.json
 ```
 
-`config.json` is already in `.gitignore` so your credentials are never committed.
+`config.json` is in `.gitignore` and is never committed.
 
-### Run the app
+Run:
 
 ```bash
 streamlit run app.py
 ```
 
-Open [http://localhost:8501](http://localhost:8501) in your browser.
-
-Go to **Settings** and fill in your credentials (see below). Everything saves to `config.json` automatically and persists across restarts.
+Open [http://localhost:8501](http://localhost:8501) in your browser and go to **Settings** to fill in your credentials.
 
 ---
 
