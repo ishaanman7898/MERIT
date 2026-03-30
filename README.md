@@ -1,8 +1,8 @@
-# MERIT — Mass Email & Inventory Tool
+# MERIT — Mass Email & Inventory Tool for VEI Firms
 
-MERIT is a self-hosted Streamlit app for small businesses and e-commerce stores. It lets you send personalised order-confirmation emails in bulk, manage a product catalog with images, and track live inventory — all from one browser tab, with no code required after setup.
+MERIT is a self-hosted Streamlit app built specifically for **Virtual Enterprise International (VEI)** firms. It lets you send personalised order-confirmation emails in bulk, manage a product catalog with images, and track live inventory — all from one browser tab, with no code required after setup.
 
-Every write syncs across every database you've configured simultaneously (SQLite always, plus Supabase and/or Neon if connected), so your data is never in just one place.
+Every write syncs across every database you've configured simultaneously (SQLite always, plus Supabase and/or Neon if connected), so your firm's data is never in just one place.
 
 ---
 
@@ -48,7 +48,7 @@ This is the fastest path — your app is live in under 2 minutes, nothing to ins
    - Set the following fields exactly:
      - **Branch:** `master`
      - **Main file path:** `app.py`
-     - **App URL:** type your company or brand name (e.g. `acme-merit`) — this becomes your public URL at `acme-merit.streamlit.app`
+     - **App URL:** type your VEI firm name (e.g. `acme-merit`) — this becomes your public URL at `acme-merit.streamlit.app`
    - Click **Deploy** — the app will be live in about 60 seconds
 
 4. **Configure credentials inside the app**
@@ -227,7 +227,7 @@ Neon is a serverless Postgres database. It works the same way as Supabase in MER
 Use this after deploying or after a fresh local install:
 
 - [ ] Open the app and go to **Settings** in the left sidebar
-- [ ] Fill in **From Name** — your store or brand name. This appears in emails and as the browser tab title
+- [ ] Fill in **From Name** — your VEI firm name. This appears in emails and as the browser tab title
 - [ ] Fill in **Default Subject Line** — e.g. `Your order #{{order_number}} is confirmed`
 - [ ] Under **Gmail SMTP**: enter your Gmail address and 16-character App Password
 - [ ] Under **Image Hosting**: enter your Imghippo API Key and click **Test Key**
@@ -398,7 +398,7 @@ Use these placeholders anywhere in your HTML — MERIT substitutes real values b
 |---|---|
 | `{{name}}` | Customer's full name |
 | `{{order_number}}` | Order number |
-| `{{from_name}}` | Your store name (from Settings → From Name) |
+| `{{from_name}}` | Your VEI firm name (from Settings → From Name) |
 | `{{items_html}}` | A pre-built HTML block of table rows — one per product — with product image, name, and SKU |
 
 **Example:**
@@ -412,14 +412,14 @@ Use these placeholders anywhere in your HTML — MERIT substitutes real values b
   <table cellpadding="8" cellspacing="0" style="width:100%;border-collapse:collapse;">
     {{items_html}}
   </table>
-  <p style="margin-top:24px;">Thanks for shopping with {{from_name}}.</p>
+  <p style="margin-top:24px;">Thanks for your order — {{from_name}}</p>
 </body>
 </html>
 ```
 
 ### Generate a template with AI
 
-In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / Claude**. Copy the full prompt text, replace the design brief placeholder at the bottom with your own brief (e.g. `"dark theme, brand color #1a1a2e, modern sans-serif"`), then paste it into ChatGPT or Claude. Copy the returned HTML into the template editor and click **Save Template**.
+In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / Claude**. Copy the full prompt text, replace the design brief placeholder at the bottom with your own brief (e.g. `"dark theme, VEI firm color #1a1a2e, modern sans-serif"`), then paste it into ChatGPT or Claude. Copy the returned HTML into the template editor and click **Save Template**.
 
 ### Requirements for custom templates
 
@@ -433,7 +433,7 @@ In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / C
 
 ## 8. Database Architecture
 
-MERIT writes to all configured databases simultaneously on every create, update, and delete operation. This means your data is always consistent across every store.
+MERIT writes to all configured databases simultaneously on every create, update, and delete operation. This means your firm's data is always consistent across every configured source.
 
 | Database | Type | When active |
 |---|---|---|
@@ -478,8 +478,8 @@ The app always reads from the highest-priority source that is configured and ava
 - This is expected — Streamlit Cloud resets the local filesystem on every restart
 - Connect Supabase (free tier) so your inventory and products are stored in the cloud
 
-**App shows "MERIT" instead of your store name in the browser tab**
-- Go to Settings, fill in **From Name**, and click **Save Settings** — the tab title updates on the next page load
+**App shows "MERIT" instead of your firm name in the browser tab**
+- Go to Settings, fill in **From Name** with your VEI firm name, and click **Save Settings** — the tab title updates on the next page load
 
 **Products page or Inventory page is slow to load**
 - The first load after a restart hits the database — subsequent loads within the same session use a 30-second in-memory cache

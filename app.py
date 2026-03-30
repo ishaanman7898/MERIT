@@ -1,6 +1,6 @@
 """
-Mass Email Sender
-Open-source · Gmail SMTP · ImgBB image hosting · Supabase / Neon database
+MERIT — Mass Email & Inventory Tool for Virtual Enterprise (VEI) firms
+Gmail SMTP · Imghippo image hosting · Supabase / Neon database
 """
 
 import base64
@@ -1855,7 +1855,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         inp_from_name = st.text_input(
             "From Name",
             value=cfg.get("from_name", ""),
-            placeholder="Acme Store",
+            placeholder="Acme VEI Firm",
             help="Displayed as the sender name in the recipient's inbox",
         )
     with col2:
@@ -2406,7 +2406,7 @@ elif page == "Email Sender":
 |---|---|
 | `{{name}}` | Customer's name |
 | `{{order_number}}` | Order number |
-| `{{from_name}}` | Your store / company name |
+| `{{from_name}}` | Your VEI firm name |
 | `{{items_html}}` | Ready-made HTML rows for each ordered product (with images when available) |
 """
         with st.expander("Available template variables", expanded=True):
@@ -2417,7 +2417,7 @@ You are building an HTML email template for an order confirmation email.
 Use ONLY these variables (double curly braces, exactly as shown):
   {{name}}         — customer's name
   {{order_number}} — order number
-  {{from_name}}    — store / company name
+  {{from_name}}    — VEI firm name
   {{items_html}}   — pre-built HTML <tr> rows listing the ordered products (with product images when available). Wrap this inside a <table cellpadding="0" cellspacing="0" style="width:100%;">…</table>.
 
 Requirements:
@@ -2468,7 +2468,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 }
                 st.session_state["_tpl_preview_html"] = build_html(
                     _preview_order,
-                    cfg.get("from_name") or "Your Store",
+                    cfg.get("from_name") or "Your VEI Firm",
                     template=_tpl_input.strip() or None,
                 )
 
