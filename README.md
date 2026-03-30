@@ -274,6 +274,9 @@ In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / C
 - Add orders one at a time, in bulk via a data table, or by importing a CSV/TSV
 - Custom HTML email templates with live preview
 - Sends via Gmail SMTP with a progress bar and per-email status log
+- **Automatic inventory deduction** — after every send, stock is subtracted for each matched product across all configured databases
+- **Inventory Impact chart** — after the send completes, a before/after bar chart shows how stock changed for every affected product
+- Unmatched product warnings if a typed product name has no match in your catalog
 
 ### Products
 - Add single or bulk products with images
@@ -282,9 +285,11 @@ In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / C
 - Catalog view with per-product edit and image replacement
 
 ### Inventory
+- **Overview dashboard** — metrics for total products, total stock units, low-stock count, and out-of-stock count with a stock-level bar chart
 - Real-time stock tracking (adjust by delta or set absolute value)
 - Bulk add products with initial stock
 - Bulk edit all fields including stock
+- Replace product images from the Bulk Edit and Edit Product tabs
 - Delete products across all databases simultaneously
 
 ### Settings

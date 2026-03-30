@@ -1271,6 +1271,26 @@ elif page == "Inventory":
 
     _inv_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if not inv_df.empty and "item_name" in inv_df.columns else {}
 
+    # ── Inventory Overview ────────────────────────────────────────────
+    if not inv_df.empty and "stock_left" in inv_df.columns:
+        _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
+        _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
+        _ov_c1.metric("Products",         len(inv_df))
+        _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
+        _ov_c3.metric("Low Stock",         int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
+        _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
+
+        if "item_name" in inv_df.columns:
+            _ov_chart = (
+                inv_df[["item_name", "stock_left"]]
+                .copy()
+                .rename(columns={"item_name": "Product", "stock_left": "Stock"})
+                .sort_values("Stock", ascending=False)
+                .set_index("Product")
+            )
+            st.bar_chart(_ov_chart["Stock"])
+        st.divider()
+
     if inv_df.empty:
         st.info("No products in inventory yet. Use **Add Products** below to add your first product.")
 
@@ -2192,7 +2212,8 @@ elif page == "Email Sender":
     st.caption("Build a queue of orders and send personalised confirmation emails in bulk.")
 
     # Build catalog lookup once — used for image-match warnings and inventory deduction
-    _catalog_products = load_products()
+    # Load from cloud/SQLite so deductions work even when cfg["products"] is stale
+    _catalog_products = load_products_for_catalog(cfg)
     _catalog_name_lower: set[str] = {
         str(p.get("item_name", "")).lower().strip()
         for p in _catalog_products if p.get("item_name")
@@ -2460,7 +2481,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
     # Build product image lookup for the queue preview and email sending
     _products_lookup: dict[str, str] = {
         p["item_name"]: p["image_url"]
-        for p in load_products()
+        for p in _catalog_products
         if p.get("image_url") and p["image_url"] not in ("N/A", "")
     }
 
@@ -2523,6 +2544,13 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             from_name     = cfg["from_name"]
             smtp_email    = cfg["smtp_email"]
             smtp_password = cfg["smtp_password"]
+
+            # Capture pre-send inventory snapshot for impact chart
+            _presend_inv_df = load_inventory_preferring_cloud(cfg)
+            _presend_stock: dict[str, int] = {}
+            if not _presend_inv_df.empty and "sku" in _presend_inv_df.columns and "stock_left" in _presend_inv_df.columns:
+                for _, _ps_row in _presend_inv_df.iterrows():
+                    _presend_stock[str(_ps_row["sku"])] = int(_ps_row.get("stock_left", 0))
 
             prog   = st.progress(0, text="Connecting to Gmail...")
             log_ph = st.empty()
@@ -2602,6 +2630,14 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     if _has_sb_send:    adjust_inventory_supabase(_dsku, -_dqty, cfg)
                 _clear_data_caches()
 
+            # Persist deduction data for impact chart (survives st.rerun)
+            st.session_state["_last_deductions"]   = _deductions
+            st.session_state["_presend_stock"]     = _presend_stock
+            st.session_state["_sku_name_map_send"] = {
+                str(p.get("sku", "")): str(p.get("item_name", ""))
+                for p in _catalog_products if p.get("sku")
+            }
+
             if failed_n == 0:
                 _inv_note = f" · Deducted stock for {sum(_deductions.values())} item(s)" if _deductions else ""
                 st.success(f"All {sent_n} emails sent successfully.{_inv_note}")
@@ -2623,6 +2659,33 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             use_container_width=True,
             hide_index=True,
         )
+
+        # ── Inventory Impact Chart ────────────────────────────────────
+        _ld = st.session_state.get("_last_deductions", {})
+        if _ld:
+            st.divider()
+            st.subheader("Inventory Impact")
+            _ps  = st.session_state.get("_presend_stock", {})
+            _snm = st.session_state.get("_sku_name_map_send", {})
+            _impact_rows = []
+            for _d_sku, _d_qty in _ld.items():
+                _d_name   = _snm.get(_d_sku, _d_sku)
+                _d_before = _ps.get(_d_sku, 0)
+                _d_after  = max(0, _d_before - _d_qty)
+                _impact_rows.append({
+                    "Product":   _d_name,
+                    "SKU":       _d_sku,
+                    "Deducted":  _d_qty,
+                    "Before":    _d_before,
+                    "After":     _d_after,
+                })
+            _impact_df = pd.DataFrame(_impact_rows)
+            st.dataframe(_impact_df, use_container_width=True, hide_index=True)
+            _chart_df = _impact_df.set_index("Product")[["Before", "After"]]
+            st.bar_chart(_chart_df)
+
         if st.button("Clear Log", key="clear_log"):
             st.session_state.send_log = []
+            for _k in ("_last_deductions", "_presend_stock", "_sku_name_map_send"):
+                st.session_state.pop(_k, None)
             st.rerun()
