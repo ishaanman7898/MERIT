@@ -178,7 +178,7 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     """Upsert one product into ALL configured databases. Always saves to SQLite."""
     _stock = int(product.get("stock_left", 0))
     _status = str(product.get("status") or (
-        "Out of stock" if _stock == 0 else ("Low stock" if _stock <= 10 else "In stock")
+        "Backordered" if _stock < 0 else ("Out of stock" if _stock == 0 else ("Low stock" if _stock <= 10 else "In stock"))
     ))
     row = {
         "sku":        product["sku"],
@@ -283,7 +283,7 @@ def adjust_inventory_sqlite(sku: str, delta: int, note: str = "") -> tuple[bool,
         if row is None:
             conn.close()
             return False, "SKU not found"
-        new_stock = max(0, row["stock_left"] + delta)
+        new_stock = row["stock_left"] + delta
         if new_stock < 0:
             status = "Backordered"
         elif new_stock == 0:
@@ -310,8 +310,8 @@ def adjust_inventory_neon(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
                 row = cur.fetchone()
                 if row is None:
                     return False, "SKU not found in Neon"
-                new_stock = max(0, row[0] + delta)
-                status = "Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock")
+                new_stock = row[0] + delta
+                status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
                 cur.execute("UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s", (new_stock, status, sku))
         conn.close()
         return True, f"Neon stock → {new_stock}"
@@ -330,8 +330,8 @@ def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, st
         if not res.data:
             return False, "SKU not found in Supabase"
         current = res.data[0]["stock_left"] or 0
-        new_stock = max(0, current + delta)
-        status = "Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock")
+        new_stock = current + delta
+        status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
         client.table("inventory").update({"stock_left": new_stock, "status": status}).eq("sku", sku).execute()
         return True, f"Supabase stock → {new_stock}"
     except Exception as exc:
@@ -391,7 +391,7 @@ def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
 
 def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
     """Set stock to an absolute value across all configured databases."""
-    status = "Out of stock" if stock == 0 else ("Low stock" if stock <= 10 else "In stock")
+    status = "Backordered" if stock < 0 else ("Out of stock" if stock == 0 else ("Low stock" if stock <= 10 else "In stock"))
     results = []
 
     # SQLite
@@ -1431,7 +1431,7 @@ elif page == "Inventory":
                 st.number_input("price", key=f"ia_price_{_rid}", min_value=0.0,
                                 step=0.01, format="%.2f", label_visibility="collapsed")
             with _ic[4]:
-                st.number_input("stock", key=f"ia_stock_{_rid}", min_value=0,
+                st.number_input("stock", key=f"ia_stock_{_rid}",
                                 step=1, label_visibility="collapsed")
             with _ic[5]:
                 st.file_uploader("img", key=f"ia_img_{_rid}",
@@ -1566,7 +1566,7 @@ elif page == "Inventory":
                     "item_name":  st.column_config.TextColumn("Name"),
                     "category":   st.column_config.TextColumn("Category"),
                     "price":      st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
-                    "stock_left": st.column_config.NumberColumn("Stock",     min_value=0),
+                    "stock_left": st.column_config.NumberColumn("Stock"),
                     "image_url":  st.column_config.TextColumn("Image URL"),
                 },
                 use_container_width=True,
@@ -1587,7 +1587,7 @@ elif page == "Inventory":
                         "price":      round(float(_iberow.get("price", 0.0)), 2),
                         "stock_left": _ibestock,
                         "image_url":  str(_iberow.get("image_url", "N/A")).strip() or "N/A",
-                        "status":     "Out of stock" if _ibestock == 0 else ("Low stock" if _ibestock <= 10 else "In stock"),
+                        "status":     "Backordered" if _ibestock < 0 else ("Out of stock" if _ibestock == 0 else ("Low stock" if _ibestock <= 10 else "In stock")),
                     }
                     save_product_to_db(_ibeupd, cfg)
                     set_stock_all_dbs(_ibesku, _ibestock, cfg)
@@ -1679,7 +1679,7 @@ elif page == "Inventory":
                         _ec = st.text_input("Category",       value=str(_edit_row.get("category", "")))
                     with _ec2:
                         _ep = st.number_input("Price ($)", value=float(_edit_row.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
-                        _es = st.number_input("Set Stock To", value=int(_edit_row.get("stock_left", 0)), min_value=0, step=1,
+                        _es = st.number_input("Set Stock To", value=int(_edit_row.get("stock_left", 0)), step=1,
                                               help="Sets stock to this exact value across all databases")
                     _ei = st.text_input("Image URL", value=str(_edit_row.get("image_url", "N/A")))
                     if st.form_submit_button("Save All Changes", type="primary"):
@@ -1690,7 +1690,7 @@ elif page == "Inventory":
                             "price":      round(_ep, 2),
                             "stock_left": _es,
                             "image_url":  _ei.strip() or "N/A",
-                            "status":     "Out of stock" if _es == 0 else ("Low stock" if _es <= 10 else "In stock"),
+                            "status":     "Backordered" if _es < 0 else ("Out of stock" if _es == 0 else ("Low stock" if _es <= 10 else "In stock")),
                         }
                         _ok, _msg = save_product_to_db(_upd_prod, cfg)
                         set_stock_all_dbs(_edit_sku_sel, _es, cfg)
@@ -2671,7 +2671,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             for _d_sku, _d_qty in _ld.items():
                 _d_name   = _snm.get(_d_sku, _d_sku)
                 _d_before = _ps.get(_d_sku, 0)
-                _d_after  = max(0, _d_before - _d_qty)
+                _d_after  = _d_before - _d_qty
                 _impact_rows.append({
                     "Product":   _d_name,
                     "SKU":       _d_sku,
