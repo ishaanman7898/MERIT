@@ -1068,6 +1068,60 @@ if page == "Products":
                 _clear_data_caches()
                 st.rerun()
 
+            # ── Replace Images ───────────────────────────────────────
+            st.divider()
+            with st.expander("Replace product images", expanded=False):
+                if not cfg.get("imghippo_api_key"):
+                    st.warning("Add an Imghippo API key in Settings → Image Hosting to upload images.")
+                else:
+                    for _rp in products:
+                        _rp_sku = _rp.get("sku", "")
+                        _rp_img = _rp.get("image_url", "N/A")
+                        _rp_c1, _rp_c2, _rp_c3 = st.columns([1, 4, 2])
+                        with _rp_c1:
+                            if _rp_img and _rp_img not in ("N/A", ""):
+                                st.image(_rp_img, width=56)
+                            else:
+                                st.markdown(
+                                    "<div style='width:56px;height:56px;background:#f4f4f5;"
+                                    "border-radius:8px;display:flex;align-items:center;"
+                                    "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        with _rp_c2:
+                            st.caption(f"**{_rp.get('item_name','')}** · `{_rp_sku}`")
+                            _rp_file = st.file_uploader(
+                                "img", key=f"be_repl_{_rp_sku}",
+                                type=["jpg","jpeg","png","webp"],
+                                label_visibility="collapsed",
+                            )
+                        with _rp_c3:
+                            st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
+                            if _rp_file and st.button("Upload", key=f"be_replbtn_{_rp_sku}",
+                                                       use_container_width=True):
+                                with st.spinner("Uploading…"):
+                                    try:
+                                        _rp_file.seek(0)
+                                        _rp_new_url = upload_to_imghippo(
+                                            _rp_file.read(), cfg["imghippo_api_key"],
+                                            name=_rp.get("item_name",""),
+                                        )
+                                        _rp_upd = dict(_rp)
+                                        _rp_upd["image_url"] = _rp_new_url
+                                        save_product_to_db(_rp_upd, cfg)
+                                        cfg["products"] = [
+                                            _rp_upd if p.get("sku") == _rp_sku else p
+                                            for p in cfg.get("products", [])
+                                        ]
+                                        save_config(cfg)
+                                        st.session_state.cfg = cfg
+                                        st.success(f"Image updated for {_rp.get('item_name','')}.")
+                                        _clear_data_caches()
+                                        st.rerun()
+                                    except Exception as _re:
+                                        st.error(f"Upload failed: {_re}")
+                        st.divider()
+
     # ══ BULK DELETE ═════════════════════════════
     with tab_bulk_del:
         if not products:
@@ -1528,6 +1582,61 @@ elif page == "Inventory":
                 _clear_data_caches()
                 st.rerun()
 
+            # ── Replace Images ───────────────────────────────────────
+            st.divider()
+            with st.expander("Replace product images", expanded=False):
+                if not cfg.get("imghippo_api_key"):
+                    st.warning("Add an Imghippo API key in Settings → Image Hosting to upload images.")
+                else:
+                    for _, _irp_row in inv_df.iterrows():
+                        _irp = _irp_row.to_dict()
+                        _irp_sku = str(_irp.get("sku", ""))
+                        _irp_img = str(_irp.get("image_url", "N/A"))
+                        _irp_c1, _irp_c2, _irp_c3 = st.columns([1, 4, 2])
+                        with _irp_c1:
+                            if _irp_img and _irp_img not in ("N/A", ""):
+                                st.image(_irp_img, width=56)
+                            else:
+                                st.markdown(
+                                    "<div style='width:56px;height:56px;background:#f4f4f5;"
+                                    "border-radius:8px;display:flex;align-items:center;"
+                                    "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        with _irp_c2:
+                            st.caption(f"**{_irp.get('item_name','')}** · `{_irp_sku}`")
+                            _irp_file = st.file_uploader(
+                                "img", key=f"ibe_repl_{_irp_sku}",
+                                type=["jpg","jpeg","png","webp"],
+                                label_visibility="collapsed",
+                            )
+                        with _irp_c3:
+                            st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
+                            if _irp_file and st.button("Upload", key=f"ibe_replbtn_{_irp_sku}",
+                                                        use_container_width=True):
+                                with st.spinner("Uploading…"):
+                                    try:
+                                        _irp_file.seek(0)
+                                        _irp_new_url = upload_to_imghippo(
+                                            _irp_file.read(), cfg["imghippo_api_key"],
+                                            name=_irp.get("item_name",""),
+                                        )
+                                        _irp_upd = dict(_irp)
+                                        _irp_upd["image_url"] = _irp_new_url
+                                        save_product_to_db(_irp_upd, cfg)
+                                        cfg["products"] = [
+                                            _irp_upd if p.get("sku") == _irp_sku else p
+                                            for p in cfg.get("products", [])
+                                        ]
+                                        save_config(cfg)
+                                        st.session_state.cfg = cfg
+                                        st.success(f"Image updated for {_irp.get('item_name','')}.")
+                                        _clear_data_caches()
+                                        st.rerun()
+                                    except Exception as _ire:
+                                        st.error(f"Upload failed: {_ire}")
+                        st.divider()
+
     # ══ EDIT PRODUCT (single) ═══════════════════════
     with inv_tab_edit:
         if inv_df.empty:
@@ -1574,6 +1683,55 @@ elif page == "Inventory":
                         st.success(f"Updated · {_msg}")
                         _clear_data_caches()
                         st.rerun()
+
+                # ── Replace Image (outside form) ─────────────────────
+                st.divider()
+                st.markdown("**Replace Image**")
+                _ei_cur_img = str(_edit_row.get("image_url", "N/A"))
+                _ei_c1, _ei_c2, _ei_c3 = st.columns([1, 4, 2])
+                with _ei_c1:
+                    if _ei_cur_img and _ei_cur_img not in ("N/A", ""):
+                        st.image(_ei_cur_img, width=56)
+                    else:
+                        st.markdown(
+                            "<div style='width:56px;height:56px;background:#f4f4f5;"
+                            "border-radius:8px;display:flex;align-items:center;"
+                            "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
+                            unsafe_allow_html=True,
+                        )
+                with _ei_c2:
+                    st.caption(f"**{_edit_row.get('item_name','')}** · `{_edit_sku_sel}`  "
+                               f"Current: `{_ei_cur_img}`")
+                    _ei_repl_file = st.file_uploader(
+                        "img", key=f"ie_repl_{_edit_sku_sel}",
+                        type=["jpg","jpeg","png","webp"],
+                        label_visibility="collapsed",
+                    )
+                with _ei_c3:
+                    st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
+                    if _ei_repl_file and st.button("Upload Image", key=f"ie_replbtn_{_edit_sku_sel}",
+                                                    use_container_width=True):
+                        with st.spinner("Uploading…"):
+                            try:
+                                _ei_repl_file.seek(0)
+                                _ei_new_url = upload_to_imghippo(
+                                    _ei_repl_file.read(), cfg["imghippo_api_key"],
+                                    name=_edit_row.get("item_name",""),
+                                )
+                                _ei_upd = dict(_edit_row)
+                                _ei_upd["image_url"] = _ei_new_url
+                                save_product_to_db(_ei_upd, cfg)
+                                cfg["products"] = [
+                                    _ei_upd if p.get("sku") == _edit_sku_sel else p
+                                    for p in cfg.get("products", [])
+                                ]
+                                save_config(cfg)
+                                st.session_state.cfg = cfg
+                                st.success(f"Image updated for {_edit_row.get('item_name','')}.")
+                                _clear_data_caches()
+                                st.rerun()
+                            except Exception as _eie:
+                                st.error(f"Upload failed: {_eie}")
 
     # ══ DELETE PRODUCTS (bulk) ═══════════════════════
     with inv_tab_delete:
