@@ -89,6 +89,19 @@ def _init_sqlite():
         );
     """)
     conn.commit()
+
+    # Migration for existing outbound_logs (add subtotal, tax, shipping)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(outbound_logs)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "subtotal" not in cols:
+            conn.execute("ALTER TABLE outbound_logs ADD COLUMN subtotal REAL NOT NULL DEFAULT 0.0")
+            conn.execute("ALTER TABLE outbound_logs ADD COLUMN tax REAL NOT NULL DEFAULT 0.0")
+            conn.execute("ALTER TABLE outbound_logs ADD COLUMN shipping REAL NOT NULL DEFAULT 0.0")
+            conn.commit()
+    except Exception: pass
+
     conn.close()
 
 _init_sqlite()
@@ -151,6 +164,16 @@ CREATE TABLE IF NOT EXISTS outbound_logs (
     total_cost      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
+
+-- Migrations for existing users
+DO $$ 
+BEGIN 
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='outbound_logs' AND column_name='subtotal') THEN
+    ALTER TABLE outbound_logs ADD COLUMN subtotal NUMERIC(10,2) NOT NULL DEFAULT 0.00;
+    ALTER TABLE outbound_logs ADD COLUMN tax NUMERIC(10,2) NOT NULL DEFAULT 0.00;
+    ALTER TABLE outbound_logs ADD COLUMN shipping NUMERIC(10,2) NOT NULL DEFAULT 0.00;
+  END IF;
+END $$;
 
 -- Add your own tables below this line ──────────────────────────────────────
 """
