@@ -1079,9 +1079,18 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
         for _, obj in df_items.iterrows():
             t_no = str(obj.get('transaction_no', '')).strip()
             item = str(obj.get('item_name', '')).strip()
+            qty  = obj.get('quantity', 1)
+            
             if t_no:
                 if t_no not in tx_items: tx_items[t_no] = []
-                tx_items[t_no].append(item)
+                try:
+                    q_val = int(float(qty or 1))
+                    if q_val > 1:
+                        tx_items[t_no].append(f"{item} x {q_val}")
+                    else:
+                        tx_items[t_no].append(item)
+                except:
+                    tx_items[t_no].append(item)
         
         rows = []
         # Normalize columns for the transactions sheet
