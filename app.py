@@ -785,7 +785,7 @@ with st.sidebar:
     st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
     page = st.radio(
         "page",
-        ["Email Sender", "Outbound Information", "Products", "Adjust Stock", "Inventory", "Settings"],
+        ["Email Sender", "Products", "Inventory", "Settings"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1348,169 +1348,191 @@ if page == "Products":
                         st.rerun()
 
 
-# ═════════════════════════════════════════════
-# ADJUST STOCK PAGE
-# ═════════════════════════════════════════════
-
-elif page == "Adjust Stock":
-    cfg = st.session_state.cfg
-    st.title("Adjust Stock")
-    
-    # Load inventory data
-    if "_inv_cache" not in st.session_state:
-        with st.spinner("Loading inventory…"):
-            st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
-    inv_df = st.session_state["_inv_cache"]
-
-    if inv_df.empty:
-        st.info("No products found. Add products in the **Products** page first.")
-    else:
-        _has_supabase = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
-        _has_neon = bool(cfg.get("neon_connection_string"))
-        _sync_targets = ["SQLite"]
-        if _has_neon:   _sync_targets.append("Neon")
-        if _has_supabase: _sync_targets.append("Supabase")
-
-        st.caption(
-            f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
-            f"Synced to: **{' + '.join(_sync_targets)}**"
-        )
-
-        # ── Apply All Changes ──────────────────────────────────────
-        if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
-            with st.spinner("Applying adjustments..."):
-                _adj_applied = 0
-                for _, _arow in inv_df.iterrows():
-                    _asku   = str(_arow["sku"])
-                    _adelta = int(st.session_state.get(f"adj_{_asku}", 0))
-                    if _adelta == 0:
-                        continue
-                    adjust_inventory_sqlite(_asku, _adelta)
-                    if _has_neon:     adjust_inventory_neon(_asku, _adelta, cfg)
-                    if _has_supabase: adjust_inventory_supabase(_asku, _adelta, cfg)
-                    _adj_applied += 1
-                if _adj_applied:
-                    st.toast("Stock updated successfully.", icon="✅")
-                    st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
-                    _clear_data_caches()
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.warning("All deltas are 0 — set a non-zero amount first.")
-
-        st.divider()
-
-        # ── Per-product rows ───────────────────────────────────────
-        _img_col_exists = "image_url" in inv_df.columns
-        for _, _pr in inv_df.iterrows():
-            _psku   = str(_pr.get("sku", ""))
-            _pname  = str(_pr.get("item_name", _psku))
-            _pstock = int(_pr.get("stock_left", 0))
-            _pstat  = str(_pr.get("status", ""))
-            _pcat   = str(_pr.get("category", ""))
-            _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
-
-            _stat_color = (
-                "#7c3aed" if "Backordered" in _pstat
-                else "#dc2626" if "Out" in _pstat
-                else "#f59e0b" if "Low" in _pstat
-                else "#16a34a"
-            )
-
-            # Updated layout: 5 columns with better vertical alignment
-            _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
-
-            with _rc1:
-                if _pimg and _pimg not in ("N/A", "", "nan"):
-                    st.image(_pimg, width=56)
-                else:
-                    st.markdown(
-                        "<div style='width:56px;height:56px;background:#f4f4f5;"
-                        "border-radius:8px;display:flex;align-items:center;"
-                        "justify-content:center;color:#bbb;font-size:10px;'>"
-                        "No img</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            with _rc2:
-                st.markdown(f"**{_pname}**")
-                st.caption(f"{_psku}  ·  {_pcat}")
-
-            with _rc3:
-                st.markdown(
-                    f"<div style='display:flex; align-items:center;'>"
-                    f"<span style='font-size:24px;font-weight:700;color:#ffffff;line-height:1;'>{_pstock}</span>"
-                    f"<span style='font-size:10px;margin-left:8px;color:{_stat_color};white-space:nowrap;'>{_pstat}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-            with _rc4:
-                _delta_val = st.number_input(
-                    "±", step=1, value=0, key=f"adj_{_psku}",
-                    label_visibility="collapsed",
-                    help="+5 adds stock, -3 removes stock",
-                )
-
-            with _rc5:
-                if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
-                    with st.spinner("Updating..."):
-                        if _delta_val == 0:
-                            st.toast(f"{_pname}: delta is 0, nothing changed.")
-                        else:
-                            ok, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
-                            if not ok:
-                                st.toast("Something went wrong. Please try again.", icon="❌")
-                            if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
-                            if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
-                            st.toast(f"Stock updated: {_pname}", icon="✅")
-                            _clear_data_caches()
-                            time.sleep(0.5)
-                            st.rerun()
-
-            st.divider()
 
 # ═════════════════════════════════════════════
-# INVENTORY OVERVIEW PAGE
+# INVENTORY PAGE
 # ═════════════════════════════════════════════
 
 elif page == "Inventory":
     cfg = st.session_state.cfg
-    st.title("Inventory Overview")
-    st.caption("Visual overview of your stock levels across all products.")
+    st.title("Inventory")
+    st.caption("Manage stock overview, adjustments, and outbound logs in one place.")
 
-    # Load from best available source: Supabase > Neon > SQLite
+    tab_overview, tab_adjust, tab_outbound = st.tabs(
+        ["Overview", "Adjust Stock", "Outbound Information"]
+    )
+
+    # Load shared data
     if "_inv_cache" not in st.session_state:
         with st.spinner("Loading inventory…"):
             st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
     inv_df = st.session_state["_inv_cache"]
 
-    if inv_df.empty:
-        st.info("No products found. Add products in the **Products** page first.")
-    else:
-        # ── Metrics ───────────────────────────────────────────────────
-        _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
-        _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
-        _ov_c1.metric("Total Products",    len(inv_df))
-        _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
-        _ov_c3.metric("Low Stock Items",   int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
-        _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
+    # ── OVERVIEW ────────────────────────────────
+    with tab_overview:
+        if inv_df.empty:
+            st.info("No products found. Add products in the **Products** page first.")
+        else:
+            # ── Metrics ─────────────────────────────
+            _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
+            _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
+            _ov_c1.metric("Total Products",    len(inv_df))
+            _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
+            _ov_c3.metric("Low Stock Items",   int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
+            _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
 
-        st.divider()
+            st.divider()
 
-        # ── Stock Chart ───────────────────────────────────────────────
-        if "item_name" in inv_df.columns:
-            _ov_chart = (
-                inv_df[["item_name", "stock_left"]]
-                .copy()
-                .rename(columns={"item_name": "Product", "stock_left": "Stock Level"})
-                .sort_values("Stock Level", ascending=False)
-                .set_index("Product")
+            # ── Stock Chart ──────────────────────────
+            if "item_name" in inv_df.columns:
+                _ov_chart = (
+                    inv_df[["item_name", "stock_left"]]
+                    .copy()
+                    .rename(columns={"item_name": "Product", "stock_left": "Stock Level"})
+                    .sort_values("Stock Level", ascending=False)
+                    .set_index("Product")
+                )
+                st.bar_chart(_ov_chart["Stock Level"], color="#4F46E5")
+
+            st.divider()
+            st.info("To modify stock levels, use the **Adjust Stock** tab above. To add or edit product details, go to the **Products** page.")
+
+    # ── ADJUST STOCK ────────────────────────────
+    with tab_adjust:
+        if inv_df.empty:
+            st.info("No products found. Add products in the **Products** page first.")
+        else:
+            _has_supabase = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+            _has_neon = bool(cfg.get("neon_connection_string"))
+            _sync_targets = ["SQLite"]
+            if _has_neon:   _sync_targets.append("Neon")
+            if _has_supabase: _sync_targets.append("Supabase")
+
+            st.caption(
+                f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
+                f"Synced to: **{' + '.join(_sync_targets)}**"
             )
-            st.bar_chart(_ov_chart["Stock Level"], color="#4F46E5")
 
-        st.divider()
-        st.info("To modify stock levels, go to the **Adjust Stock** page. To add or edit product details, go to the **Products** page.")
+            # ── Apply All Changes ───────────────────
+            if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
+                with st.spinner("Applying adjustments..."):
+                    _adj_applied = 0
+                    for _, _arow in inv_df.iterrows():
+                        _asku   = str(_arow["sku"])
+                        _adelta = int(st.session_state.get(f"adj_{_asku}", 0))
+                        if _adelta == 0:
+                            continue
+                        adjust_inventory_sqlite(_asku, _adelta)
+                        if _has_neon:     adjust_inventory_neon(_asku, _adelta, cfg)
+                        if _has_supabase: adjust_inventory_supabase(_asku, _adelta, cfg)
+                        _adj_applied += 1
+                    if _adj_applied:
+                        st.toast("Stock updated successfully.", icon="✅")
+                        st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
+                        _clear_data_caches()
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.warning("All deltas are 0 — set a non-zero amount first.")
+
+            st.divider()
+
+            # ── Per-product rows ────────────────────
+            _img_col_exists = "image_url" in inv_df.columns
+            for _, _pr in inv_df.iterrows():
+                _psku   = str(_pr.get("sku", ""))
+                _pname  = str(_pr.get("item_name", _psku))
+                _pstock = int(_pr.get("stock_left", 0))
+                _pstat  = str(_pr.get("status", ""))
+                _pcat   = str(_pr.get("category", ""))
+                _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
+
+                _stat_color = (
+                    "#7c3aed" if "Backordered" in _pstat
+                    else "#dc2626" if "Out" in _pstat
+                    else "#f59e0b" if "Low" in _pstat
+                    else "#16a34a"
+                )
+
+                _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
+
+                with _rc1:
+                    if _pimg and _pimg not in ("N/A", "", "nan"):
+                        st.image(_pimg, width=56)
+                    else:
+                        st.markdown("<div style='width:56px;height:56px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:10px;'>No img</div>", unsafe_allow_html=True)
+
+                with _rc2:
+                    st.markdown(f"**{_pname}**")
+                    st.caption(f"{_psku}  ·  {_pcat}")
+
+                with _rc3:
+                    st.markdown(
+                        f"<div style='display:flex; align-items:center;'>"
+                        f"<span style='font-size:24px;font-weight:700;color:#ffffff;line-height:1;'>{_pstock}</span>"
+                        f"<span style='font-size:10px;margin-left:8px;color:{_stat_color};white-space:nowrap;'>{_pstat}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                with _rc4:
+                    _delta_val = st.number_input("±", step=1, value=0, key=f"adj_{_psku}", label_visibility="collapsed")
+
+                with _rc5:
+                    if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
+                        with st.spinner("Updating..."):
+                            if _delta_val == 0:
+                                st.toast(f"{_pname}: delta is 0, nothing changed.")
+                            else:
+                                ok, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
+                                if not ok:
+                                    st.toast("Something went wrong. Please try again.", icon="❌")
+                                if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
+                                if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
+                                st.toast(f"Stock updated: {_pname}", icon="✅")
+                                _clear_data_caches()
+                                time.sleep(0.5)
+                                st.rerun()
+                st.divider()
+
+    # ── OUTBOUND INFORMATION ────────────────────
+    with tab_outbound:
+        st.subheader("Sent History")
+        st.caption("View a history of all emails sent and their impact on inventory.")
+        logs = load_outbound_logs(cfg)
+
+        if logs.empty:
+            st.info("No outbound emails found. Start sending emails from the **Email Sender** page.")
+        else:
+            # Format the table for display
+            display_df = logs.copy()
+            if "recipient_name" in display_df.columns:
+                display_df = display_df.rename(columns={
+                    "recipient_name": "Name",
+                    "recipient_email": "Email",
+                    "order_number": "Order #",
+                    "products_list": "Products",
+                    "total_cost": "Cost ($)",
+                    "timestamp": "Sent At"
+                })
+            
+            cols = ["Sent At", "Name", "Email", "Order #", "Products", "Cost ($)"]
+            display_df = display_df[[c for c in cols if c in display_df.columns]]
+            
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "Sent At": st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
+                    "Products": st.column_config.TextColumn(width="large")
+                }
+            )
+
+            if st.button("Clear View Cache", use_container_width=True):
+                _clear_data_caches()
+                st.rerun()
 
 
 # ═════════════════════════════════════════════
@@ -2088,53 +2110,6 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
         st.success("Settings saved.")
 
 
-# ═════════════════════════════════════════════
-# OUTBOUND INFORMATION PAGE
-# ═════════════════════════════════════════════
-
-elif page == "Outbound Information":
-
-    st.title("Outbound Information")
-    st.caption("View a history of all emails sent and their impact on inventory.")
-
-    cfg = st.session_state.cfg
-    logs = load_outbound_logs(cfg)
-
-    if logs.empty:
-        st.info("No outbound emails found. Start sending emails from the **Email Sender** page.")
-    else:
-        st.subheader(f"Sent History ({len(logs)})")
-        
-        # Format the table for display
-        display_df = logs.copy()
-        if "recipient_name" in display_df.columns:
-            display_df = display_df.rename(columns={
-                "recipient_name": "Name",
-                "recipient_email": "Email",
-                "order_number": "Order #",
-                "products_list": "Products",
-                "total_cost": "Cost ($)",
-                "timestamp": "Sent At"
-            })
-        
-        # Reorder columns if possible
-        cols = ["Sent At", "Name", "Email", "Order #", "Products", "Cost ($)"]
-        display_df = display_df[[c for c in cols if c in display_df.columns]]
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
-                "Sent At": st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
-                "Products": st.column_config.TextColumn(width="large")
-            }
-        )
-
-        if st.button("Clear Local View Cache", use_container_width=True):
-            _clear_data_caches()
-            st.rerun()
 
 
 # ═════════════════════════════════════════════
