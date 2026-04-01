@@ -18,6 +18,29 @@ import pandas as pd
 import streamlit as st
 import sqlite3
 
+# ─────────────────────────────────────────────
+# Custom CSS for UI enhancements
+# ─────────────────────────────────────────────
+
+st.markdown("""
+<style>
+/* Make toasts stay visible longer / slower fade out */
+[data-testid="stToast"] {
+    animation: toast-fade-in 0.5s, toast-fade-out 0.5s 5.5s forwards !important;
+    width: auto !important;
+    max-width: 400px !important;
+}
+@keyframes toast-fade-in { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toast-fade-out { from { opacity: 1; } to { opacity: 0; } }
+
+/* Button hover effects */
+.stButton > button:hover {
+    border-color: #4F46E5 !important;
+    color: #4F46E5 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 _SQLITE_DB = Path(__file__).parent / "data.db"
 
 def _get_sqlite_conn():
@@ -45,6 +68,15 @@ def _init_sqlite():
             status     TEXT NOT NULL DEFAULT 'In stock',
             image_url  TEXT NOT NULL DEFAULT 'N/A',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS outbound_logs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipient_name TEXT NOT NULL,
+            recipient_email TEXT NOT NULL,
+            order_number   TEXT NOT NULL,
+            products_list  TEXT NOT NULL,
+            total_cost     REAL NOT NULL DEFAULT 0.0,
+            timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
         );
     """)
     conn.commit()
@@ -95,6 +127,17 @@ CREATE TABLE IF NOT EXISTS products (
     active      BOOLEAN        NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     CONSTRAINT products_sku_unique UNIQUE (sku)
+);
+
+-- ── Outbound logs (email history) ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS outbound_logs (
+    id              BIGSERIAL      PRIMARY KEY,
+    recipient_name  TEXT           NOT NULL,
+    recipient_email TEXT           NOT NULL,
+    order_number    TEXT           NOT NULL,
+    products_list   TEXT           NOT NULL,
+    total_cost      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
+    created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
 
 -- Add your own tables below this line ──────────────────────────────────────
@@ -629,6 +672,92 @@ def load_products_for_catalog(cfg: dict) -> list[dict]:
     return cfg.get("products", [])
 
 
+def save_outbound_log(log: dict, cfg: dict):
+    """Save an email record to all configured databases."""
+    row = {
+        "name": log.get("name", "Customer"),
+        "email": log.get("email", ""),
+        "order": log.get("order_number", "N/A"),
+        "prods": log.get("products", ""),
+        "cost": float(log.get("total_cost", 0.0) or 0.0)
+    }
+    # SQLite
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("""
+            INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, total_cost)
+            VALUES (?, ?, ?, ?, ?)
+        """, (row["name"], row["email"], row["order"], row["prods"], row["cost"]))
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+    # Neon
+    conn_pg = _get_db_conn(cfg)
+    if conn_pg:
+        try:
+            with conn_pg:
+                with conn_pg.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, total_cost)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (row["name"], row["email"], row["order"], row["prods"], row["cost"]))
+            conn_pg.close()
+        except Exception: pass
+
+    # Supabase
+    sb_url = cfg.get("supabase_url","").strip()
+    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
+    if sb_url and sb_key:
+        try:
+            from supabase import create_client
+            client = create_client(sb_url, sb_key)
+            client.table("outbound_logs").insert({
+                "recipient_name": row["name"],
+                "recipient_email": row["email"],
+                "order_number": row["order"],
+                "products_list": row["prods"],
+                "total_cost": row["cost"]
+            }).execute()
+        except Exception: pass
+
+
+def load_outbound_logs(cfg: dict) -> pd.DataFrame:
+    """Load outbound logs from cloud (preferring Supabase > Neon) or local SQLite."""
+    sb_url = cfg.get("supabase_url","").strip()
+    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
+    if sb_url and sb_key:
+        try:
+            from supabase import create_client
+            client = create_client(sb_url, sb_key)
+            res = client.table("outbound_logs").select("*").order("created_at", desc=True).limit(500).execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+                # Rename columns to match local if needed
+                df = df.rename(columns={"created_at": "timestamp"})
+                return df
+        except Exception: pass
+
+    conn_str = cfg.get("neon_connection_string", "").strip()
+    if conn_str:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(conn_str, connect_timeout=10)
+            df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
+            conn.close()
+            df = df.rename(columns={"created_at": "timestamp"})
+            return df
+        except Exception: pass
+
+    try:
+        conn = _get_sqlite_conn()
+        df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY timestamp DESC LIMIT 500", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 # ─────────────────────────────────────────────
 # Page setup
 # ─────────────────────────────────────────────
@@ -656,7 +785,7 @@ with st.sidebar:
     st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
     page = st.radio(
         "page",
-        ["Email Sender", "Products", "Inventory", "Settings"],
+        ["Email Sender", "Outbound Information", "Products", "Adjust Stock", "Inventory", "Settings"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -690,7 +819,7 @@ def validate_email(e: str) -> bool:
     return bool(e and "@" in e and "." in e.split("@")[-1])
 
 
-def add_to_queue(name: str, email: str, order_number: str, products: str) -> bool:
+def add_to_queue(name: str, email: str, order_number: str, products: str, total_cost: float = 0.0) -> bool:
     if not name.strip():
         st.error("Name is required.")
         return False
@@ -698,10 +827,11 @@ def add_to_queue(name: str, email: str, order_number: str, products: str) -> boo
         st.error(f"Invalid email: '{email}'")
         return False
     st.session_state.queue.append({
-        "name":         name.strip(),
-        "email":        email.strip(),
-        "order_number": order_number.strip() or "N/A",
-        "products":     products.strip(),
+        "name":          name.strip(),
+        "email":         email.strip(),
+        "order_number":  order_number.strip() or "N/A",
+        "products":      products.strip(),
+        "total_cost":    round(float(total_cost), 2)
     })
     return True
 
@@ -790,6 +920,12 @@ _DEFAULT_EMAIL_TEMPLATE = """\
             <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:28px;">
               {{items_html}}
             </table>
+            <table cellpadding="0" cellspacing="0" style="width:100%;border-top:2px solid #f4f4f5;padding-top:16px;margin-bottom:24px;">
+              <tr>
+                <td style="font-size:14px;color:#888;font-weight:600;text-transform:uppercase;">Total Amount</td>
+                <td align="right" style="font-size:20px;font-weight:700;color:#18181b;">${{total_cost}}</td>
+              </tr>
+            </table>
             <p style="margin:0;font-size:13px;color:#888;line-height:1.6;">
               Questions? Just reply to this email and we will be happy to help.
             </p>
@@ -816,6 +952,7 @@ def build_html(
     name      = order.get("name", "Customer")
     order_num = order.get("order_number", "N/A")
     prods     = split_products(order.get("products", ""))
+    cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     items     = _build_items_html(prods, products_lookup)
     tpl = (template.strip() if template and template.strip() else _DEFAULT_EMAIL_TEMPLATE)
     return (
@@ -824,6 +961,7 @@ def build_html(
         .replace("{{order_number}}", order_num)
         .replace("{{from_name}}", from_name)
         .replace("{{items_html}}", items)
+        .replace("{{total_cost}}", cost)
     )
 
 
@@ -831,11 +969,13 @@ def build_text(order: dict, from_name: str) -> str:
     name      = order.get("name", "Customer")
     order_num = order.get("order_number", "N/A")
     prods     = split_products(order.get("products", ""))
+    cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     lines     = "\n".join(f"  - {p}" for p in prods) if prods else "  - N/A"
     return (
         f"Hi {name},\n\n"
         f"Thank you for your order.\n\n"
-        f"Order Number: #{order_num}\n\n"
+        f"Order Number: #{order_num}\n"
+        f"Total Amount: ${cost}\n\n"
         f"Items Ordered:\n{lines}\n\n"
         f"Questions? Reply to this email.\n\n"
         f"{from_name}"
@@ -853,6 +993,7 @@ _ALIASES = {
                      "orderid", "ordernumber", "transaction_no", "transaction"],
     "products":     ["products", "items", "product_list", "product",
                      "item", "description", "ordered_items"],
+    "total_cost":   ["total_cost", "total", "cost", "total_price", "amount", "price", "order_total"],
 }
 
 
@@ -896,10 +1037,11 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
             warns.append(f"Row {i}: skipped — bad email '{email}'")
             continue
         rows.append({
-            "name":         mapped.get("name", "Customer"),
-            "email":        email,
-            "order_number": mapped.get("order_number", "N/A"),
-            "products":     mapped.get("products", ""),
+            "name":          mapped.get("name", "Customer"),
+            "email":         email,
+            "order_number":  mapped.get("order_number", "N/A"),
+            "products":      mapped.get("products", ""),
+            "total_cost":    float(mapped.get("total_cost", 0.0) or 0.0),
         })
     if not rows:
         warns.append("No valid rows found.")
@@ -935,508 +1077,308 @@ if page == "Products":
     _p_sync = ["SQLite"] + (["Neon"] if _p_has_neon else []) + (["Supabase"] if _p_has_sb else [])
     _p_sync_str = " + ".join(_p_sync)
 
-    tab_add_single, tab_bulk_add, tab_bulk_edit, tab_bulk_del, tab_catalog = st.tabs(
-        ["Add Single", "Bulk Add", "Bulk Edit", "Bulk Delete", "Catalog"]
+    tab_catalog, tab_add, tab_edit, tab_delete = st.tabs(
+        ["Catalog", "Add Products", "Edit Products", "Delete Products"]
     )
-
-    # ══ ADD SINGLE ══════════════════════════════
-    with tab_add_single:
-        col_left, col_right = st.columns([3, 2])
-        with col_left:
-            p_sku      = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
-            p_name     = st.text_input("Product Name *", placeholder="Blue T-Shirt", key="p_name")
-            p_category = st.text_input("Category",       placeholder="Clothing",     key="p_category")
-            p_price    = st.number_input("Price ($)", min_value=0.0, step=0.01, format="%.2f", key="p_price")
-        with col_right:
-            p_image = st.file_uploader(
-                "Product Image",
-                type=["jpg", "jpeg", "png", "webp"],
-                key="p_image",
-                help="Compressed and uploaded to Imghippo automatically.",
-            )
-            if p_image:
-                st.image(p_image, use_container_width=True)
-
-        if st.button("Add Product", type="primary", use_container_width=True, key="btn_add_product"):
-            if not p_sku.strip():
-                st.error("SKU is required.")
-            elif not p_name.strip():
-                st.error("Product Name is required.")
-            else:
-                image_url = "N/A"
-                if p_image:
-                    if not _has_image_host(cfg):
-                        st.warning("Image skipped — add an image hosting key in Settings first.")
-                    else:
-                        with st.spinner("Uploading image..."):
-                            try:
-                                image_url = upload_image(
-                                    p_image.read(), cfg, name=p_name.strip()
-                                )
-                            except Exception as _img_err:
-                                st.error(f"Image upload failed: {_img_err}")
-                product = {
-                    "sku":        p_sku.strip().upper(),
-                    "item_name":  p_name.strip(),
-                    "category":   p_category.strip() or "General",
-                    "price":      round(float(p_price), 2),
-                    "stock_left": 0,
-                    "status":     "In stock",
-                    "image_url":  image_url,
-                }
-                ok, saved_to = save_product_to_db(product, cfg)
-                if not ok:
-                    st.toast("Something went wrong. Please try again.", icon="❌")
-                _cp = cfg.get("products", [])
-                cfg["products"] = [p for p in _cp if p.get("sku") != product["sku"]]
-                cfg["products"].append(product)
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.toast("Product added successfully.", icon="✅")
-                st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
-                _clear_data_caches()
-                st.rerun()
-
-    # ══ BULK ADD ════════════════════════════════
-    with tab_bulk_add:
-        st.caption(f"Add multiple products at once. Synced to: **{_p_sync_str}**")
-
-        # ── Row state ────────────────────────────────────────────────
-        if "pb_ids" not in st.session_state:
-            st.session_state.pb_ids   = list(range(4))
-            st.session_state.pb_next  = 4
-
-        _PB_COLS = [1.5, 2.5, 1.5, 1.2, 2.8, 0.45]
-
-        # Header labels
-        _pbh = st.columns(_PB_COLS)
-        for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Image", ""], _pbh):
-            _col.caption(_lbl)
-
-        # Per-row inputs
-        for _rid in list(st.session_state.pb_ids):
-            _pc = st.columns(_PB_COLS)
-            with _pc[0]:
-                st.text_input("sku", key=f"pb_sku_{_rid}", placeholder="SKU-001",
-                              label_visibility="collapsed")
-            with _pc[1]:
-                st.text_input("name", key=f"pb_name_{_rid}", placeholder="Blue T-Shirt",
-                              label_visibility="collapsed")
-            with _pc[2]:
-                st.text_input("cat", key=f"pb_cat_{_rid}", placeholder="General",
-                              label_visibility="collapsed")
-            with _pc[3]:
-                st.number_input("price", key=f"pb_price_{_rid}", min_value=0.0,
-                                step=0.01, format="%.2f", label_visibility="collapsed")
-            with _pc[4]:
-                st.file_uploader("img", key=f"pb_img_{_rid}",
-                                 type=["jpg","jpeg","png","webp"],
-                                 label_visibility="collapsed")
-            with _pc[5]:
-                st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
-                if st.button("×", key=f"pb_del_{_rid}", use_container_width=True,
-                             help="Remove this row"):
-                    st.session_state.pb_ids.remove(_rid)
-                    st.rerun()
-
-        # Add row + CSV import
-        _pbadd_c1, _pbadd_c2 = st.columns([1, 3])
-        with _pbadd_c1:
-            if st.button("+ Add Row", use_container_width=True, key="pb_add_row"):
-                st.session_state.pb_ids.append(st.session_state.pb_next)
-                st.session_state.pb_next += 1
-                st.rerun()
-        with _pbadd_c2:
-            _bulk_csv = st.file_uploader(
-                "Or import CSV (SKU, Name, Category, Price)",
-                type=["csv"], key="bulk_csv",
-            )
-
-        if st.button("Add All to Products", type="primary", use_container_width=True, key="btn_bulk_add"):
-            # Collect manual rows from session state
-            _pb_rows: list[dict] = []
-            for _rid in st.session_state.pb_ids:
-                _bsku  = str(st.session_state.get(f"pb_sku_{_rid}", "")).strip().upper()
-                _bname = str(st.session_state.get(f"pb_name_{_rid}", "")).strip()
-                if not _bsku or not _bname:
-                    continue
-                try: _bprice = round(float(st.session_state.get(f"pb_price_{_rid}", 0.0)), 2)
-                except: _bprice = 0.0
-                _pb_rows.append({
-                    "sku":   _bsku,
-                    "name":  _bname,
-                    "cat":   str(st.session_state.get(f"pb_cat_{_rid}", "")).strip() or "General",
-                    "price": _bprice,
-                    "img":   st.session_state.get(f"pb_img_{_rid}"),
-                })
-
-            # Merge CSV rows (no per-row image for CSV rows)
-            if _bulk_csv:
-                _csv_df = pd.read_csv(_bulk_csv)
-                _csv_df.columns = _csv_df.columns.str.strip()
-                _col_map = {}
-                for _c in _csv_df.columns:
-                    _cl = _c.lower()
-                    if "sku" in _cl: _col_map[_c] = "SKU"
-                    elif "name" in _cl or "product" in _cl: _col_map[_c] = "Name"
-                    elif "cat" in _cl: _col_map[_c] = "Category"
-                    elif "price" in _cl: _col_map[_c] = "Price"
-                _csv_df = _csv_df.rename(columns=_col_map)
-                for _need in ["SKU", "Name"]:
-                    if _need not in _csv_df.columns: _csv_df[_need] = ""
-                if "Category" not in _csv_df.columns: _csv_df["Category"] = "General"
-                if "Price"    not in _csv_df.columns: _csv_df["Price"]    = 0.0
-                for _, _cr in _csv_df.iterrows():
-                    _csku = str(_cr["SKU"]).strip().upper()
-                    _cname = str(_cr["Name"]).strip()
-                    if _csku and _cname:
-                        try: _cprice = round(float(_cr["Price"]), 2)
-                        except: _cprice = 0.0
-                        _pb_rows.append({
-                            "sku": _csku, "name": _cname,
-                            "cat": str(_cr.get("Category","General")).strip() or "General",
-                            "price": _cprice, "img": None,
-                        })
-
-            added = 0
-            _img_uploaded = 0
-            for _pbr in _pb_rows:
-                _image_url = "N/A"
-                if _pbr["img"] and _has_image_host(cfg):
-                    try:
-                        _pbr["img"].seek(0)
-                        _image_url = upload_image(
-                            _pbr["img"].read(), cfg, name=_pbr["name"]
-                        )
-                        _img_uploaded += 1
-                    except Exception:
-                        pass
-                _product = {
-                    "sku": _pbr["sku"], "item_name": _pbr["name"],
-                    "category": _pbr["cat"], "price": _pbr["price"],
-                    "stock_left": 0, "status": "In stock", "image_url": _image_url,
-                }
-                save_product_to_db(_product, cfg)
-                _cp = cfg.get("products", [])
-                cfg["products"] = [p for p in _cp if p.get("sku") != _pbr["sku"]]
-                cfg["products"].append(_product)
-                added += 1
-
-            save_config(cfg)
-            st.session_state.cfg = cfg
-            # Reset rows
-            st.session_state.pb_ids  = list(range(4))
-            st.session_state.pb_next = 4
-            _img_note = f" · {_img_uploaded} image(s) uploaded" if _img_uploaded else ""
-            st.toast("Products added successfully.", icon="✅")
-            st.success(f"Added {added} products{_img_note} · Synced to: {_p_sync_str}")
-            _clear_data_caches()
-            st.rerun()
-
-    # ══ BULK EDIT ═══════════════════════════════
-    with tab_bulk_edit:
-        if not products:
-            st.info("No products yet — add some first.")
-        else:
-            st.caption(f"Edit any field inline, then Save All. Synced to: **{_p_sync_str}**")
-            _be_df = pd.DataFrame([{
-                "sku":       str(p.get("sku", "")),
-                "item_name": str(p.get("item_name", "")),
-                "category":  str(p.get("category", "")),
-                "price":     float(p.get("price", 0.0)),
-                "image_url": str(p.get("image_url", "N/A")),
-            } for p in products if p.get("sku")])
-            _be_edited = st.data_editor(
-                _be_df,
-                column_config={
-                    "sku":       st.column_config.TextColumn("SKU",       disabled=True),
-                    "item_name": st.column_config.TextColumn("Name"),
-                    "category":  st.column_config.TextColumn("Category"),
-                    "price":     st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
-                    "image_url": st.column_config.TextColumn("Image URL"),
-                },
-                use_container_width=True,
-                num_rows="fixed",
-                key="bulk_edit_products",
-            )
-            if st.button("Save All Changes", type="primary", use_container_width=True, key="btn_bulk_edit_save"):
-                _orig_map = {p.get("sku"): p for p in products}
-                saved = 0
-                for _, _erow in _be_edited.iterrows():
-                    _esku  = str(_erow.get("sku", "")).strip()
-                    _ename = str(_erow.get("item_name", "")).strip()
-                    if not _esku or not _ename: continue
-                    _orig  = _orig_map.get(_esku, {})
-                    _upd   = {
-                        "sku":        _esku,
-                        "item_name":  _ename,
-                        "category":   str(_erow.get("category", "General")).strip() or "General",
-                        "price":      round(float(_erow.get("price", 0.0)), 2),
-                        "image_url":  str(_erow.get("image_url", "N/A")).strip() or "N/A",
-                        "stock_left": int(_orig.get("stock_left", 0)),
-                        "status":     str(_orig.get("status", "In stock")),
-                    }
-                    save_product_to_db(_upd, cfg)
-                    _cp = cfg.get("products", [])
-                    cfg["products"] = [_upd if p.get("sku") == _esku else p for p in _cp]
-                    if not any(p.get("sku") == _esku for p in _cp):
-                        cfg["products"].append(_upd)
-                    saved += 1
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.toast("Products updated successfully.", icon="✅")
-                st.success(f"Saved {saved} products · Synced to: {_p_sync_str}")
-                _clear_data_caches()
-                st.rerun()
-
-            # ── Replace Images ───────────────────────────────────────
-            st.divider()
-            with st.expander("Replace product images", expanded=False):
-                if not _has_image_host(cfg):
-                    st.warning("Add an image hosting key in Settings → Image Hosting to upload images.")
-                else:
-                    for _rp in products:
-                        _rp_sku = _rp.get("sku", "")
-                        _rp_img = _rp.get("image_url", "N/A")
-                        _rp_c1, _rp_c2, _rp_c3 = st.columns([1, 4, 2])
-                        with _rp_c1:
-                            if _rp_img and _rp_img not in ("N/A", ""):
-                                st.image(_rp_img, width=56)
-                            else:
-                                st.markdown(
-                                    "<div style='width:56px;height:56px;background:#f4f4f5;"
-                                    "border-radius:8px;display:flex;align-items:center;"
-                                    "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        with _rp_c2:
-                            st.caption(f"**{_rp.get('item_name','')}** · `{_rp_sku}`")
-                            _rp_file = st.file_uploader(
-                                "img", key=f"be_repl_{_rp_sku}",
-                                type=["jpg","jpeg","png","webp"],
-                                label_visibility="collapsed",
-                            )
-                        with _rp_c3:
-                            st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
-                            if _rp_file and st.button("Upload", key=f"be_replbtn_{_rp_sku}",
-                                                       use_container_width=True):
-                                with st.spinner("Uploading…"):
-                                    try:
-                                        _rp_file.seek(0)
-                                        _rp_new_url = upload_image(
-                                            _rp_file.read(), cfg,
-                                            name=_rp.get("item_name",""),
-                                        )
-                                        _rp_upd = dict(_rp)
-                                        _rp_upd["image_url"] = _rp_new_url
-                                        save_product_to_db(_rp_upd, cfg)
-                                        cfg["products"] = [
-                                            _rp_upd if p.get("sku") == _rp_sku else p
-                                            for p in cfg.get("products", [])
-                                        ]
-                                        save_config(cfg)
-                                        st.session_state.cfg = cfg
-                                        st.success(f"Image updated for {_rp.get('item_name','')}.")
-                                        _clear_data_caches()
-                                        st.rerun()
-                                    except Exception as _re:
-                                        st.error(f"Upload failed: {_re}")
-                        st.divider()
-
-    # ══ BULK DELETE ═════════════════════════════
-    with tab_bulk_del:
-        if not products:
-            st.info("No products yet.")
-        else:
-            st.caption(f"Select products to permanently remove from all databases: **{_p_sync_str}**")
-            _bd_map = {
-                p["sku"]: f"{p.get('item_name', p['sku'])} ({p['sku']})"
-                for p in products if p.get("sku")
-            }
-            _bd_selected = st.multiselect(
-                "Select products to delete",
-                options=list(_bd_map.keys()),
-                format_func=lambda s: _bd_map[s],
-                key="bulk_del_select",
-            )
-            if _bd_selected:
-                st.warning(f"**{len(_bd_selected)} product(s) selected** for permanent deletion from {_p_sync_str}.")
-                _bd_confirm = st.checkbox("I confirm permanent deletion", key="bulk_del_confirm")
-                if st.button("Delete Selected", type="primary", key="btn_bulk_del", disabled=not _bd_confirm):
-                    for _bdsku in _bd_selected:
-                        delete_product_from_db(_bdsku, cfg)
-                    cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _bd_selected]
-                    save_config(cfg)
-                    st.session_state.cfg = cfg
-                    st.toast("Products deleted successfully.", icon="✅")
-                    st.success(f"Deleted {len(_bd_selected)} product(s) from {_p_sync_str}.")
-                    _clear_data_caches()
-                    st.rerun()
 
     # ══ CATALOG ═════════════════════════════════
     with tab_catalog:
         if not products:
-            st.info("No products yet. Use Add Single or Bulk Add above.")
+            st.info("No products yet. Go to the **Add Products** tab to get started.")
         else:
-            if _has_cloud_db:
+            if _p_has_sb or _p_has_neon:
                 if st.button("Sync All to Cloud Databases", use_container_width=True, key="btn_sync_all"):
-                    _ok_n, _fail_n = 0, 0
-                    for prod in products:
-                        _ok, _ = save_product_to_db(prod, cfg)
-                        if _ok: _ok_n += 1
-                        else: _fail_n += 1
-                    st.success(f"Synced {_ok_n} products." if not _fail_n else f"{_ok_n} synced, {_fail_n} failed.")
+                    with st.spinner("Syncing all products to cloud..."):
+                        _ok_n, _fail_n = 0, 0
+                        for prod in products:
+                            _ok, _ = save_product_to_db(prod, cfg)
+                            if _ok: _ok_n += 1
+                            else: _fail_n += 1
+                        if _ok_n: st.toast("Sync complete.", icon="🌥️")
+                        st.success(f"Synced {_ok_n} products." if not _fail_n else f"{_ok_n} synced, {_fail_n} failed.")
 
-            st.caption(f"{len(products)} product{'s' if len(products) != 1 else ''}")
+            st.caption(f"Showing {len(products)} product{'s' if len(products) != 1 else ''}. Syncing to: **{_p_sync_str}**")
+            
             for i, prod in enumerate(products):
-                img_url = prod.get("image_url", "N/A")
-                has_img = bool(img_url and img_url not in ("N/A", ""))
-                col_img, col_info, col_del = st.columns([1, 6, 1])
-                with col_img:
+                _sku = prod.get("sku", "N/A")
+                _name = prod.get("item_name", "Unknown")
+                _img = prod.get("image_url", "N/A")
+                has_img = bool(_img and _img not in ("N/A", ""))
+
+                _c_img, _c_txt, _c_act = st.columns([1, 5, 2], vertical_alignment="center")
+                with _c_img:
                     if has_img:
-                        st.image(img_url, width=80)
+                        st.image(_img, width=80)
                     else:
                         st.markdown("<div style='width:80px;height:80px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:11px;'>No image</div>", unsafe_allow_html=True)
-                with col_info:
-                    img_badge = "<span style='font-size:11px;background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:12px;margin-left:6px;'>image</span>" if has_img else "<span style='font-size:11px;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:12px;margin-left:6px;'>no image</span>"
-                    st.markdown(f"**{prod['item_name']}** <code style='font-size:11px;background:#f4f4f5;padding:2px 8px;border-radius:12px;color:#555;'>{prod['sku']}</code>{img_badge}", unsafe_allow_html=True)
-                    st.caption(f"{prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
-                    _up = st.file_uploader("Replace image", type=["jpg","jpeg","png","webp"], key=f"reup_{prod['sku']}_{i}", label_visibility="collapsed")
-                    if _up and _has_image_host(cfg):
-                        if st.button("Upload image", key=f"upbtn_{prod['sku']}_{i}"):
-                            with st.spinner("Uploading..."):
-                                try:
-                                    _new_url = upload_image(_up.read(), cfg, name=prod["item_name"])
-                                    prod["image_url"] = _new_url
-                                    save_product_to_db(prod, cfg)
-                                    _cfg_prods = [dict(p) for p in cfg.get("products", [])]
-                                    for _cpc in _cfg_prods:
-                                        if _cpc.get("sku") == prod["sku"]:
-                                            _cpc["image_url"] = _new_url
-                                    cfg["products"] = _cfg_prods
-                                    save_config(cfg)
-                                    st.session_state.cfg = cfg
-                                    st.success(f"Image updated across {_p_sync_str}.")
-                                    _clear_data_caches()
-                                    st.rerun()
-                                except Exception as _e:
-                                    st.error(f"Upload failed: {_e}")
-                with col_del:
-                    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-                    if st.button("Delete", key=f"del_prod_{i}", use_container_width=True):
-                        _del_sku = prod["sku"]
-                        ok, _del_msg = delete_product_from_db(_del_sku, cfg)
-                        if not ok:
-                            st.toast("Something went wrong. Please try again.", icon="❌")
-                        cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") != _del_sku]
-                        save_config(cfg)
-                        st.session_state.cfg = cfg
-                        st.toast(f"Deleted {_del_sku} · {_del_msg}")
-                        _clear_data_caches()
-                        st.rerun()
-                with st.expander(f"Edit {prod.get('item_name', prod['sku'])}"):
-                    with st.form(key=f"edit_prod_{prod['sku']}_{i}"):
-                        _e_c1, _e_c2 = st.columns(2)
-                        with _e_c1:
-                            _e_name  = st.text_input("Product Name *", value=str(prod.get("item_name", "")))
-                            _e_cat   = st.text_input("Category",       value=str(prod.get("category", "")))
-                        with _e_c2:
-                            _e_price = st.number_input("Price ($)", value=float(prod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
-                            _e_img   = st.text_input("Image URL",   value=str(prod.get("image_url", "N/A")))
-                        if st.form_submit_button("Save Changes", type="primary"):
-                            _upd = {
-                                "sku":        prod["sku"],
-                                "item_name":  _e_name.strip() or prod.get("item_name", ""),
-                                "category":   _e_cat.strip() or prod.get("category", "General"),
-                                "price":      round(_e_price, 2),
-                                "image_url":  _e_img.strip() or "N/A",
-                                "stock_left": prod.get("stock_left", 0),
-                                "status":     prod.get("status", "In stock"),
-                            }
-                            _ok, _msg = save_product_to_db(_upd, cfg)
-                            if not _ok:
-                                st.toast("Something went wrong. Please try again.", icon="❌")
-                            _cfg_prods = cfg.get("products", [])
-                            cfg["products"] = [_upd if p.get("sku") == _upd["sku"] else p for p in _cfg_prods]
-                            if not any(p.get("sku") == _upd["sku"] for p in _cfg_prods):
-                                cfg["products"].append(_upd)
-                            save_config(cfg)
-                            st.session_state.cfg = cfg
-                            st.toast("Product updated successfully.", icon="✅")
-                            st.success(f"Updated · {_msg}")
-                            _clear_data_caches()
-                            st.rerun()
+                with _c_txt:
+                    st.markdown(f"**{_name}**")
+                    st.caption(f"`{_sku}`  ·  {prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
+                
+                with _c_act:
+                    with st.popover("Replace Image", use_container_width=True):
+                        st.markdown("##### Upload New Image")
+                        _new_file = st.file_uploader("img", type=["jpg","jpeg","png","webp"], key=f"cat_repl_{_sku}_{i}", label_visibility="collapsed")
+                        if _new_file and _has_image_host(cfg):
+                            if st.button("Upload & Save", key=f"cat_repl_btn_{_sku}_{i}", type="primary", use_container_width=True):
+                                with st.spinner("Uploading..."):
+                                    try:
+                                        _new_url = upload_image(_new_file.read(), cfg, name=_name)
+                                        prod["image_url"] = _new_url
+                                        save_product_to_db(prod, cfg)
+                                        _cfg_prods = [dict(p) for p in cfg.get("products", [])]
+                                        for _cpc in _cfg_prods:
+                                            if _cpc.get("sku") == _sku:
+                                                _cpc["image_url"] = _new_url
+                                        cfg["products"] = _cfg_prods
+                                        save_config(cfg)
+                                        st.session_state.cfg = cfg
+                                        st.toast("Image updated.", icon="✅")
+                                        _clear_data_caches()
+                                        time.sleep(0.5)
+                                        st.rerun()
+                                    except Exception as _e:
+                                        st.error(f"Upload failed: {_e}")
+                        elif _new_file:
+                            st.warning("Configure image hosting in Settings first.")
                 st.divider()
 
+    # ══ ADD PRODUCTS ════════════════════════════
+    with tab_add:
+        st.subheader("Add Products")
+        st.caption(f"Add products individually or in bulk. Syncing to: **{_p_sync_str}**")
+        
+        _add_single_exp = st.expander("Add Single Product", expanded=True)
+        with _add_single_exp:
+            col_left, col_right = st.columns([3, 2])
+            with col_left:
+                p_sku      = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
+                p_name     = st.text_input("Product Name *", placeholder="Blue T-Shirt", key="p_name")
+                p_category = st.text_input("Category",       placeholder="Clothing",     key="p_category")
+                p_price    = st.number_input("Price ($)", min_value=0.0, step=0.01, format="%.2f", key="p_price")
+            with col_right:
+                p_image = st.file_uploader(
+                    "Product Image",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="p_image",
+                    help="Compressed and uploaded to Imghippo automatically.",
+                )
+                if p_image:
+                    st.image(p_image, use_container_width=True)
+
+            if st.button("Add Product", type="primary", use_container_width=True, key="btn_add_product"):
+                if not p_sku.strip():
+                    st.error("SKU is required.")
+                elif not p_name.strip():
+                    st.error("Product Name is required.")
+                else:
+                    image_url = "N/A"
+                    if p_image:
+                        if not _has_image_host(cfg):
+                            st.warning("Image skipped — add an image hosting key in Settings first.")
+                        else:
+                            with st.spinner("Processing image and adding product..."):
+                                try:
+                                    image_url = upload_image(p_image.read(), cfg, name=p_name.strip())
+                                except Exception as _img_err:
+                                    st.error(f"Image upload failed: {_img_err}")
+                    product = {
+                        "sku":        p_sku.strip().upper(),
+                        "item_name":  p_name.strip(),
+                        "category":   p_category.strip() or "General",
+                        "price":      round(float(p_price), 2),
+                        "stock_left": 0,
+                        "status":     "In stock",
+                        "image_url":  image_url,
+                    }
+                    ok, saved_to = save_product_to_db(product, cfg)
+                    if not ok:
+                        st.toast("Something went wrong. Please try again.", icon="❌")
+                    _cp = cfg.get("products", [])
+                    cfg["products"] = [p for p in _cp if p.get("sku") != product["sku"]]
+                    cfg["products"].append(product)
+                    save_config(cfg)
+                    st.session_state.cfg = cfg
+                    st.toast("Product added successfully.", icon="✅")
+                    st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
+                    _clear_data_caches()
+                    time.sleep(0.5)
+                    st.rerun()
+
+        _add_bulk_exp = st.expander("Add Bulk Products", expanded=False)
+        with _add_bulk_exp:
+            st.caption("Enter multiple products in the table below or upload a CSV.")
+            if "pb_ids" not in st.session_state:
+                st.session_state.pb_ids   = list(range(4))
+                st.session_state.pb_next  = 4
+            _PB_COLS = [1.5, 2.5, 1.5, 1.2, 2.8, 0.45]
+            _pbh = st.columns(_PB_COLS)
+            for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Image", ""], _pbh):
+                _col.caption(_lbl)
+            for _rid in list(st.session_state.pb_ids):
+                _pc = st.columns(_PB_COLS)
+                with _pc[0]: st.text_input("sku", key=f"pb_sku_{_rid}", placeholder="SKU-001", label_visibility="collapsed")
+                with _pc[1]: st.text_input("name", key=f"pb_name_{_rid}", placeholder="Blue T-Shirt", label_visibility="collapsed")
+                with _pc[2]: st.text_input("cat", key=f"pb_cat_{_rid}", placeholder="General", label_visibility="collapsed")
+                with _pc[3]: st.number_input("price", key=f"pb_price_{_rid}", min_value=0.0, step=0.01, format="%.2f", label_visibility="collapsed")
+                with _pc[4]: st.file_uploader("img", key=f"pb_img_{_rid}", type=["jpg","jpeg","png","webp"], label_visibility="collapsed")
+                with _pc[5]:
+                    if st.button("×", key=f"pb_del_{_rid}", use_container_width=True):
+                        st.session_state.pb_ids.remove(_rid)
+                        st.rerun()
+            _idx_c1, _idx_c2 = st.columns([1, 3])
+            with _idx_c1:
+                if st.button("+ Add Row", use_container_width=True, key="pb_add_row"):
+                    st.session_state.pb_ids.append(st.session_state.pb_next)
+                    st.session_state.pb_next += 1
+                    st.rerun()
+            with _idx_c2:
+                _bulk_csv = st.file_uploader("Import CSV (SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
+
+            if st.button("Add All to Products", type="primary", use_container_width=True, key="btn_bulk_add"):
+                with st.spinner("Processing products..."):
+                    _pb_rows = []
+                    for _rid in st.session_state.pb_ids:
+                        _bsku = str(st.session_state.get(f"pb_sku_{_rid}", "")).strip().upper()
+                        _bname = str(st.session_state.get(f"pb_name_{_rid}", "")).strip()
+                        if _bsku and _bname:
+                            _pb_rows.append({
+                                "sku": _bsku, "name": _bname,
+                                "cat": str(st.session_state.get(f"pb_cat_{_rid}", "")).strip() or "General",
+                                "price": round(float(st.session_state.get(f"pb_price_{_rid}", 0.0)), 2),
+                                "img": st.session_state.get(f"pb_img_{_rid}")
+                            })
+                    if _bulk_csv:
+                        _df = pd.read_csv(_bulk_csv)
+                        _df.columns = _df.columns.str.strip()
+                        _cmap = {c: "SKU" if "sku" in c.lower() else "Name" if "name" in c.lower() or "prod" in c.lower() else "Category" if "cat" in c.lower() else "Price" if "price" in c.lower() else c for c in _df.columns}
+                        _df = _df.rename(columns=_cmap)
+                        for _, _r in _df.iterrows():
+                            if str(_r.get("SKU","")).strip() and str(_r.get("Name","")).strip():
+                                _pb_rows.append({"sku": str(_r["SKU"]).strip().upper(), "name": str(_r["Name"]).strip(), "cat": str(_r.get("Category","General")).strip() or "General", "price": round(float(_r.get("Price",0)), 2), "img": None})
+                    
+                    added, uploaded = 0, 0
+                    for _r in _pb_rows:
+                        _url = "N/A"
+                        if _r["img"] and _has_image_host(cfg):
+                            try:
+                                _r["img"].seek(0)
+                                _url = upload_image(_r["img"].read(), cfg, name=_r["name"])
+                                uploaded += 1
+                            except: pass
+                        _p = {"sku": _r["sku"], "item_name": _r["name"], "category": _r["cat"], "price": _r["price"], "stock_left": 0, "status": "In stock", "image_url": _url}
+                        save_product_to_db(_p, cfg)
+                        _cp = cfg.get("products", [])
+                        cfg["products"] = [x for x in _cp if x.get("sku") != _r["sku"]]
+                        cfg["products"].append(_p)
+                        added += 1
+                    save_config(cfg)
+                    st.session_state.cfg = cfg
+                    st.session_state.pb_ids, st.session_state.pb_next = list(range(4)), 4
+                    st.toast(f"Added {added} products.", icon="✅")
+                    st.success(f"Successfully added {added} products.")
+                    _clear_data_caches()
+                    time.sleep(0.5)
+                    st.rerun()
+
+    # ══ EDIT PRODUCTS ════════════════════════════
+    with tab_edit:
+        st.subheader("Edit Products")
+        if not products:
+            st.info("No products yet.")
+        else:
+            _edit_sku = st.selectbox(
+                "Select a product to edit",
+                options=[p["sku"] for p in products if p.get("sku")],
+                format_func=lambda s: f"{next((p['item_name'] for p in products if p['sku'] == s), s)} ({s})",
+                key="prod_edit_select"
+            )
+            _eprod = next((p for p in products if p["sku"] == _edit_sku), None)
+            if _eprod:
+                with st.form(key=f"edit_form_{_edit_sku}"):
+                    _e_c1, _e_c2 = st.columns(2)
+                    with _e_c1:
+                        _e_name  = st.text_input("Product Name *", value=str(_eprod.get("item_name", "")))
+                        _e_cat   = st.text_input("Category",       value=str(_eprod.get("category", "")))
+                    with _e_c2:
+                        _e_price = st.number_input("Price ($)", value=float(_eprod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
+                        _e_img   = st.text_input("Image URL",   value=str(_eprod.get("image_url", "N/A")))
+                    if st.form_submit_button("Save Changes", type="primary", use_container_width=True):
+                        with st.spinner("Saving..."):
+                            _upd = {
+                                "sku": _edit_sku, "item_name": _e_name.strip() or _eprod.get("item_name", ""),
+                                "category": _e_cat.strip() or _eprod.get("category", "General"),
+                                "price": round(_e_price, 2), "image_url": _e_img.strip() or "N/A",
+                                "stock_left": _eprod.get("stock_left", 0), "status": _eprod.get("status", "In stock")
+                            }
+                            _ok, _msg = save_product_to_db(_upd, cfg)
+                            if not _ok: st.toast("Error saving to database.", icon="❌")
+                            _cp = cfg.get("products", [])
+                            cfg["products"] = [_upd if p.get("sku") == _edit_sku else p for p in _cp]
+                            if not any(p.get("sku") == _edit_sku for p in _cp): cfg["products"].append(_upd)
+                            save_config(cfg)
+                            st.session_state.cfg = cfg
+                            st.toast("Product updated.", icon="✅")
+                            _clear_data_caches()
+                            time.sleep(0.5)
+                            st.rerun()
+
+    # ══ DELETE PRODUCTS ══════════════════════════
+    with tab_delete:
+        st.subheader("Delete Products")
+        if not products:
+            st.info("No products yet.")
+        else:
+            st.caption(f"Permanently remove products from: **{_p_sync_str}**")
+            _bd_map = {p["sku"]: f"{p.get('item_name', p['sku'])} ({p['sku']})" for p in products if p.get("sku")}
+            _bd_selected = st.multiselect("Select products to delete", options=list(_bd_map.keys()), format_func=lambda s: _bd_map[s])
+            if _bd_selected:
+                st.warning(f"**{len(_bd_selected)} product(s)** will be deleted.")
+                _bd_confirm = st.checkbox("Confirm permanent deletion", key="p_del_confirm")
+                if st.button("Delete Selected", type="primary", key="btn_p_del", disabled=not _bd_confirm, use_container_width=True):
+                    with st.spinner("Deleting..."):
+                        for _sku in _bd_selected:
+                            delete_product_from_db(_sku, cfg)
+                        cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _bd_selected]
+                        save_config(cfg)
+                        st.session_state.cfg = cfg
+                        st.toast(f"Deleted {len(_bd_selected)} items.", icon="✅")
+                        _clear_data_caches()
+                        time.sleep(0.5)
+                        st.rerun()
+
 
 # ═════════════════════════════════════════════
-# INVENTORY PAGE
+# ADJUST STOCK PAGE
 # ═════════════════════════════════════════════
 
-elif page == "Inventory":
+elif page == "Adjust Stock":
     cfg = st.session_state.cfg
-    st.title("Inventory")
-    st.caption("All changes sync across every configured database simultaneously.")
-
-    # Load from best available source: Supabase > Neon > SQLite
+    st.title("Adjust Stock")
+    
+    # Load inventory data
     if "_inv_cache" not in st.session_state:
         with st.spinner("Loading inventory…"):
             st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
     inv_df = st.session_state["_inv_cache"]
 
-    # ── DB source / sync badges ───────────────────────────────────────
-    _sb_url = cfg.get("supabase_url", "").strip()
-    _sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    _has_supabase = bool(_sb_url and _sb_key)
-    _has_neon = bool(cfg.get("neon_connection_string"))
-
-    _source_label = "Supabase" if _has_supabase else ("Neon" if _has_neon else "SQLite (local)")
-    _sync_targets = ["SQLite"]
-    if _has_neon:   _sync_targets.append("Neon")
-    if _has_supabase: _sync_targets.append("Supabase")
-
-    _inv_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if not inv_df.empty and "item_name" in inv_df.columns else {}
-
-    # ── Inventory Overview ────────────────────────────────────────────
-    if not inv_df.empty and "stock_left" in inv_df.columns:
-        st.caption(f"Reading from: **{_source_label}** · Writing to: **{' + '.join(_sync_targets)}**")
-        _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
-        _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
-        _ov_c1.metric("Products",         len(inv_df))
-        _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
-        _ov_c3.metric("Low Stock",         int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
-        _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
-
-        if "item_name" in inv_df.columns:
-            _ov_chart = (
-                inv_df[["item_name", "stock_left"]]
-                .copy()
-                .rename(columns={"item_name": "Product", "stock_left": "Stock"})
-                .sort_values("Stock", ascending=False)
-                .set_index("Product")
-            )
-            st.bar_chart(_ov_chart["Stock"])
-        st.divider()
-
     if inv_df.empty:
-        st.info("No products in inventory yet. Use **Add Products** below to add your first product.")
+        st.info("No products found. Add products in the **Products** page first.")
+    else:
+        _has_supabase = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+        _has_neon = bool(cfg.get("neon_connection_string"))
+        _sync_targets = ["SQLite"]
+        if _has_neon:   _sync_targets.append("Neon")
+        if _has_supabase: _sync_targets.append("Supabase")
 
-    inv_tab_adjust, inv_tab_add, inv_tab_bulk_edit, inv_tab_edit, inv_tab_delete = st.tabs(
-        ["Adjust Stock", "Add Products", "Bulk Edit", "Edit Product", "Delete Products"]
-    )
+        st.caption(
+            f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
+            f"Synced to: **{' + '.join(_sync_targets)}**"
+        )
 
-    # ══ ADJUST STOCK ════════════════════════════════
-    with inv_tab_adjust:
-        if inv_df.empty:
-            st.info("Add products first.")
-        else:
-            st.caption(
-                f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
-                f"Synced to: **{' + '.join(_sync_targets)}**"
-            )
-
-            # ── Apply All Changes ──────────────────────────────────────
-            if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
+        # ── Apply All Changes ──────────────────────────────────────
+        if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
+            with st.spinner("Applying adjustments..."):
                 _adj_applied = 0
                 for _, _arow in inv_df.iterrows():
                     _asku   = str(_arow["sku"])
@@ -1451,74 +1393,68 @@ elif page == "Inventory":
                     st.toast("Stock updated successfully.", icon="✅")
                     st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
                     _clear_data_caches()
+                    time.sleep(0.5)
                     st.rerun()
                 else:
                     st.warning("All deltas are 0 — set a non-zero amount first.")
 
-            st.divider()
+        st.divider()
 
-            # ── Per-product rows ───────────────────────────────────────
-            _img_col_exists = "image_url" in inv_df.columns
-            for _, _pr in inv_df.iterrows():
-                _psku   = str(_pr.get("sku", ""))
-                _pname  = str(_pr.get("item_name", _psku))
-                _pstock = int(_pr.get("stock_left", 0))
-                _pstat  = str(_pr.get("status", ""))
-                _pcat   = str(_pr.get("category", ""))
-                _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
+        # ── Per-product rows ───────────────────────────────────────
+        _img_col_exists = "image_url" in inv_df.columns
+        for _, _pr in inv_df.iterrows():
+            _psku   = str(_pr.get("sku", ""))
+            _pname  = str(_pr.get("item_name", _psku))
+            _pstock = int(_pr.get("stock_left", 0))
+            _pstat  = str(_pr.get("status", ""))
+            _pcat   = str(_pr.get("category", ""))
+            _pimg   = str(_pr.get("image_url", "")) if _img_col_exists else ""
 
-                _stat_color = (
-                    "#7c3aed" if "Backordered" in _pstat
-                    else "#dc2626" if "Out" in _pstat
-                    else "#f59e0b" if "Low" in _pstat
-                    else "#16a34a"
-                )
+            _stat_color = (
+                "#7c3aed" if "Backordered" in _pstat
+                else "#dc2626" if "Out" in _pstat
+                else "#f59e0b" if "Low" in _pstat
+                else "#16a34a"
+            )
 
-                _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5])
+            # Updated layout: 5 columns with better vertical alignment
+            _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
 
-                with _rc1:
-                    if _pimg and _pimg not in ("N/A", "", "nan"):
-                        st.image(_pimg, width=56)
-                    else:
-                        st.markdown(
-                            "<div style='width:56px;height:56px;background:#f4f4f5;"
-                            "border-radius:8px;display:flex;align-items:center;"
-                            "justify-content:center;color:#bbb;font-size:10px;'>"
-                            "No img</div>",
-                            unsafe_allow_html=True,
-                        )
-
-                with _rc2:
-                    st.markdown(f"**{_pname}**")
-                    st.caption(f"{_psku}  ·  {_pcat}")
-                    if _pimg and _pimg not in ("N/A", "", "nan"):
-                        _short = _pimg if len(_pimg) <= 50 else _pimg[:47] + "…"
-                        st.markdown(
-                            f"<a href='{_pimg}' target='_blank' style='font-size:11px;color:#888;'>{_short}</a>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.caption("_no image_")
-
-                with _rc3:
+            with _rc1:
+                if _pimg and _pimg not in ("N/A", "", "nan"):
+                    st.image(_pimg, width=56)
+                else:
                     st.markdown(
-                        f"<div style='margin-top:4px;'>"
-                        f"<span style='font-size:26px;font-weight:700;color:#ffffff;'>{_pstock}</span>"
-                        f"<span style='font-size:11px;margin-left:6px;color:{_stat_color};'>{_pstat}</span>"
-                        f"</div>",
+                        "<div style='width:56px;height:56px;background:#f4f4f5;"
+                        "border-radius:8px;display:flex;align-items:center;"
+                        "justify-content:center;color:#bbb;font-size:10px;'>"
+                        "No img</div>",
                         unsafe_allow_html=True,
                     )
 
-                with _rc4:
-                    _delta_val = st.number_input(
-                        "±", step=1, value=0, key=f"adj_{_psku}",
-                        label_visibility="collapsed",
-                        help="+5 adds stock, -3 removes stock",
-                    )
+            with _rc2:
+                st.markdown(f"**{_pname}**")
+                st.caption(f"{_psku}  ·  {_pcat}")
 
-                with _rc5:
-                    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-                    if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
+            with _rc3:
+                st.markdown(
+                    f"<div style='display:flex; align-items:center;'>"
+                    f"<span style='font-size:24px;font-weight:700;color:#ffffff;line-height:1;'>{_pstock}</span>"
+                    f"<span style='font-size:10px;margin-left:8px;color:{_stat_color};white-space:nowrap;'>{_pstat}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with _rc4:
+                _delta_val = st.number_input(
+                    "±", step=1, value=0, key=f"adj_{_psku}",
+                    label_visibility="collapsed",
+                    help="+5 adds stock, -3 removes stock",
+                )
+
+            with _rc5:
+                if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
+                    with st.spinner("Updating..."):
                         if _delta_val == 0:
                             st.toast(f"{_pname}: delta is 0, nothing changed.")
                         else:
@@ -1527,404 +1463,54 @@ elif page == "Inventory":
                                 st.toast("Something went wrong. Please try again.", icon="❌")
                             if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
                             if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
-                            st.toast(f"{_pname}: {_am}")
+                            st.toast(f"Stock updated: {_pname}", icon="✅")
                             _clear_data_caches()
+                            time.sleep(0.5)
                             st.rerun()
 
-                st.divider()
-
-    # ══ ADD PRODUCTS (Bulk Add with Stock) ══════════
-    with inv_tab_add:
-        st.subheader("Add Products to Inventory")
-
-        # ── Row state ────────────────────────────────────────────────
-        if "ia_ids" not in st.session_state:
-            st.session_state.ia_ids  = list(range(4))
-            st.session_state.ia_next = 4
-
-        _IA_COLS = [1.4, 2.2, 1.4, 1.1, 1.0, 2.8, 0.45]
-
-        # Header labels
-        _iah = st.columns(_IA_COLS)
-        for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Stock", "Image", ""], _iah):
-            _col.caption(_lbl)
-
-        # Per-row inputs
-        for _rid in list(st.session_state.ia_ids):
-            _ic = st.columns(_IA_COLS)
-            with _ic[0]:
-                st.text_input("sku", key=f"ia_sku_{_rid}", placeholder="SKU-001",
-                              label_visibility="collapsed")
-            with _ic[1]:
-                st.text_input("name", key=f"ia_name_{_rid}", placeholder="Blue T-Shirt",
-                              label_visibility="collapsed")
-            with _ic[2]:
-                st.text_input("cat", key=f"ia_cat_{_rid}", placeholder="General",
-                              label_visibility="collapsed")
-            with _ic[3]:
-                st.number_input("price", key=f"ia_price_{_rid}", min_value=0.0,
-                                step=0.01, format="%.2f", label_visibility="collapsed")
-            with _ic[4]:
-                st.number_input("stock", key=f"ia_stock_{_rid}",
-                                step=1, label_visibility="collapsed")
-            with _ic[5]:
-                st.file_uploader("img", key=f"ia_img_{_rid}",
-                                 type=["jpg","jpeg","png","webp"],
-                                 label_visibility="collapsed")
-            with _ic[6]:
-                st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
-                if st.button("×", key=f"ia_del_{_rid}", use_container_width=True,
-                             help="Remove this row"):
-                    st.session_state.ia_ids.remove(_rid)
-                    st.rerun()
-
-        # Add row + CSV import
-        _iaadd_c1, _iaadd_c2 = st.columns([1, 3])
-        with _iaadd_c1:
-            if st.button("+ Add Row", use_container_width=True, key="ia_add_row"):
-                st.session_state.ia_ids.append(st.session_state.ia_next)
-                st.session_state.ia_next += 1
-                st.rerun()
-        with _iaadd_c2:
-            _ia_csv = st.file_uploader(
-                "Or import CSV (SKU, Name, Category, Price, Stock)",
-                type=["csv"], key="inv_add_csv",
-            )
-
-        if st.button("Add All to Inventory", type="primary", use_container_width=True, key="btn_inv_add"):
-            # Collect manual rows
-            _ia_rows: list[dict] = []
-            for _rid in st.session_state.ia_ids:
-                _iasku  = str(st.session_state.get(f"ia_sku_{_rid}", "")).strip().upper()
-                _ianame = str(st.session_state.get(f"ia_name_{_rid}", "")).strip()
-                if not _iasku or not _ianame:
-                    continue
-                try: _iaprice = round(float(st.session_state.get(f"ia_price_{_rid}", 0.0)), 2)
-                except: _iaprice = 0.0
-                try: _iastock = int(st.session_state.get(f"ia_stock_{_rid}", 0))
-                except: _iastock = 0
-                _ia_rows.append({
-                    "sku":   _iasku,
-                    "name":  _ianame,
-                    "cat":   str(st.session_state.get(f"ia_cat_{_rid}", "")).strip() or "General",
-                    "price": _iaprice,
-                    "stock": _iastock,
-                    "img":   st.session_state.get(f"ia_img_{_rid}"),
-                })
-
-            # Merge CSV rows
-            if _ia_csv:
-                _idf = pd.read_csv(_ia_csv)
-                _idf.columns = _idf.columns.str.strip()
-                _icol_map = {}
-                for _ic2 in _idf.columns:
-                    _icl = _ic2.lower()
-                    if "sku" in _icl: _icol_map[_ic2] = "SKU"
-                    elif "name" in _icl or "product" in _icl: _icol_map[_ic2] = "Name"
-                    elif "cat" in _icl: _icol_map[_ic2] = "Category"
-                    elif "price" in _icl: _icol_map[_ic2] = "Price"
-                    elif "stock" in _icl or "qty" in _icl or "quantity" in _icl: _icol_map[_ic2] = "Stock"
-                _idf = _idf.rename(columns=_icol_map)
-                for _ineed in ["SKU", "Name"]:
-                    if _ineed not in _idf.columns: _idf[_ineed] = ""
-                if "Category" not in _idf.columns: _idf["Category"] = "General"
-                if "Price"    not in _idf.columns: _idf["Price"]    = 0.0
-                if "Stock"    not in _idf.columns: _idf["Stock"]    = 0
-                for _, _cr in _idf.iterrows():
-                    _csku = str(_cr["SKU"]).strip().upper()
-                    _cname = str(_cr["Name"]).strip()
-                    if _csku and _cname:
-                        try: _cprice = round(float(_cr["Price"]), 2)
-                        except: _cprice = 0.0
-                        try: _cstock = int(_cr["Stock"])
-                        except: _cstock = 0
-                        _ia_rows.append({
-                            "sku": _csku, "name": _cname,
-                            "cat": str(_cr.get("Category","General")).strip() or "General",
-                            "price": _cprice, "stock": _cstock, "img": None,
-                        })
-
-            _ia_added = 0
-            _ia_imgs_uploaded = 0
-            for _iar in _ia_rows:
-                _ia_image_url = "N/A"
-                if _iar["img"] and _has_image_host(cfg):
-                    try:
-                        _iar["img"].seek(0)
-                        _ia_image_url = upload_image(
-                            _iar["img"].read(), cfg, name=_iar["name"]
-                        )
-                        _ia_imgs_uploaded += 1
-                    except Exception:
-                        pass
-                _iaprod = {
-                    "sku":        _iar["sku"],
-                    "item_name":  _iar["name"],
-                    "category":   _iar["cat"],
-                    "price":      _iar["price"],
-                    "stock_left": _iar["stock"],
-                    "status":     "Out of stock" if _iar["stock"] == 0 else ("Low stock" if _iar["stock"] <= 10 else "In stock"),
-                    "image_url":  _ia_image_url,
-                }
-                save_product_to_db(_iaprod, cfg)
-                set_stock_all_dbs(_iar["sku"], _iar["stock"], cfg)
-                _cp = cfg.get("products", [])
-                cfg["products"] = [p for p in _cp if p.get("sku") != _iar["sku"]]
-                cfg["products"].append(_iaprod)
-                _ia_added += 1
-
-            save_config(cfg)
-            st.session_state.cfg = cfg
-            # Reset rows
-            st.session_state.ia_ids  = list(range(4))
-            st.session_state.ia_next = 4
-            _ia_img_note = f" · {_ia_imgs_uploaded} image(s) uploaded" if _ia_imgs_uploaded else ""
-            st.toast("Products added successfully.", icon="✅")
-            st.success(f"Added {_ia_added} product(s){_ia_img_note} · Synced to: {' + '.join(_sync_targets)}")
-            _clear_data_caches()
-            st.rerun()
-
-    # ══ BULK EDIT ═══════════════════════════════════
-    with inv_tab_bulk_edit:
-        if inv_df.empty:
-            st.info("Add products first.")
-        else:
-            st.subheader("Bulk Edit Products")
-            st.caption("Edit any field inline, then click Save All.")
-            _ibe_cols = ["sku", "item_name", "category", "price", "stock_left", "image_url"]
-            _ibe_show = [c for c in _ibe_cols if c in inv_df.columns]
-            _ibe_df   = inv_df[_ibe_show].copy()
-            _ibe_edited = st.data_editor(
-                _ibe_df,
-                column_config={
-                    "sku":        st.column_config.TextColumn("SKU",       disabled=True),
-                    "item_name":  st.column_config.TextColumn("Name"),
-                    "category":   st.column_config.TextColumn("Category"),
-                    "price":      st.column_config.NumberColumn("Price ($)", min_value=0.0, format="$%.2f"),
-                    "stock_left": st.column_config.NumberColumn("Stock"),
-                    "image_url":  st.column_config.TextColumn("Image URL"),
-                },
-                use_container_width=True,
-                num_rows="fixed",
-                key="inv_bulk_edit",
-            )
-            if st.button("Save All Changes", type="primary", use_container_width=True, key="btn_inv_bulk_edit"):
-                _ibe_saved = 0
-                for _, _iberow in _ibe_edited.iterrows():
-                    _ibesku  = str(_iberow.get("sku", "")).strip()
-                    _ibename = str(_iberow.get("item_name", "")).strip()
-                    if not _ibesku or not _ibename: continue
-                    _ibestock = int(_iberow.get("stock_left", 0))
-                    _ibeupd = {
-                        "sku":        _ibesku,
-                        "item_name":  _ibename,
-                        "category":   str(_iberow.get("category", "General")).strip() or "General",
-                        "price":      round(float(_iberow.get("price", 0.0)), 2),
-                        "stock_left": _ibestock,
-                        "image_url":  str(_iberow.get("image_url", "N/A")).strip() or "N/A",
-                        "status":     "Backordered" if _ibestock < 0 else ("Out of stock" if _ibestock == 0 else ("Low stock" if _ibestock <= 10 else "In stock")),
-                    }
-                    save_product_to_db(_ibeupd, cfg)
-                    set_stock_all_dbs(_ibesku, _ibestock, cfg)
-                    _cp = cfg.get("products", [])
-                    cfg["products"] = [_ibeupd if p.get("sku") == _ibesku else p for p in _cp]
-                    if not any(p.get("sku") == _ibesku for p in _cp):
-                        cfg["products"].append(_ibeupd)
-                    _ibe_saved += 1
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.toast("Products updated successfully.", icon="✅")
-                st.success(f"Saved {_ibe_saved} products · Synced to: {' + '.join(_sync_targets)}")
-                _clear_data_caches()
-                st.rerun()
-
-            # ── Replace Images ───────────────────────────────────────
             st.divider()
-            with st.expander("Replace product images", expanded=False):
-                if not _has_image_host(cfg):
-                    st.warning("Add an image hosting key in Settings → Image Hosting to upload images.")
-                else:
-                    for _, _irp_row in inv_df.iterrows():
-                        _irp = _irp_row.to_dict()
-                        _irp_sku = str(_irp.get("sku", ""))
-                        _irp_img = str(_irp.get("image_url", "N/A"))
-                        _irp_c1, _irp_c2, _irp_c3 = st.columns([1, 4, 2])
-                        with _irp_c1:
-                            if _irp_img and _irp_img not in ("N/A", ""):
-                                st.image(_irp_img, width=56)
-                            else:
-                                st.markdown(
-                                    "<div style='width:56px;height:56px;background:#f4f4f5;"
-                                    "border-radius:8px;display:flex;align-items:center;"
-                                    "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        with _irp_c2:
-                            st.caption(f"**{_irp.get('item_name','')}** · `{_irp_sku}`")
-                            _irp_file = st.file_uploader(
-                                "img", key=f"ibe_repl_{_irp_sku}",
-                                type=["jpg","jpeg","png","webp"],
-                                label_visibility="collapsed",
-                            )
-                        with _irp_c3:
-                            st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
-                            if _irp_file and st.button("Upload", key=f"ibe_replbtn_{_irp_sku}",
-                                                        use_container_width=True):
-                                with st.spinner("Uploading…"):
-                                    try:
-                                        _irp_file.seek(0)
-                                        _irp_new_url = upload_image(
-                                            _irp_file.read(), cfg,
-                                            name=_irp.get("item_name",""),
-                                        )
-                                        _irp_upd = dict(_irp)
-                                        _irp_upd["image_url"] = _irp_new_url
-                                        save_product_to_db(_irp_upd, cfg)
-                                        cfg["products"] = [
-                                            _irp_upd if p.get("sku") == _irp_sku else p
-                                            for p in cfg.get("products", [])
-                                        ]
-                                        save_config(cfg)
-                                        st.session_state.cfg = cfg
-                                        st.success(f"Image updated for {_irp.get('item_name','')}.")
-                                        _clear_data_caches()
-                                        st.rerun()
-                                    except Exception as _ire:
-                                        st.error(f"Upload failed: {_ire}")
-                        st.divider()
 
-    # ══ EDIT PRODUCT (single) ═══════════════════════
-    with inv_tab_edit:
-        if inv_df.empty:
-            st.info("Add products first.")
-        else:
-            st.subheader("Edit Product Details")
-            st.caption(f"Synced to: **{' + '.join(_sync_targets)}**")
-            _edit_sku_sel = st.selectbox(
-                "Select product",
-                inv_df["sku"].tolist(),
-                format_func=lambda s: f"{_inv_name_map.get(s, s)} ({s})",
-                key="edit_inv_sku",
+# ═════════════════════════════════════════════
+# INVENTORY OVERVIEW PAGE
+# ═════════════════════════════════════════════
+
+elif page == "Inventory":
+    cfg = st.session_state.cfg
+    st.title("Inventory Overview")
+    st.caption("Visual overview of your stock levels across all products.")
+
+    # Load from best available source: Supabase > Neon > SQLite
+    if "_inv_cache" not in st.session_state:
+        with st.spinner("Loading inventory…"):
+            st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
+    inv_df = st.session_state["_inv_cache"]
+
+    if inv_df.empty:
+        st.info("No products found. Add products in the **Products** page first.")
+    else:
+        # ── Metrics ───────────────────────────────────────────────────
+        _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
+        _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
+        _ov_c1.metric("Total Products",    len(inv_df))
+        _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
+        _ov_c3.metric("Low Stock Items",   int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
+        _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
+
+        st.divider()
+
+        # ── Stock Chart ───────────────────────────────────────────────
+        if "item_name" in inv_df.columns:
+            _ov_chart = (
+                inv_df[["item_name", "stock_left"]]
+                .copy()
+                .rename(columns={"item_name": "Product", "stock_left": "Stock Level"})
+                .sort_values("Stock Level", ascending=False)
+                .set_index("Product")
             )
-            if _edit_sku_sel:
-                _edit_row = inv_df[inv_df["sku"] == _edit_sku_sel].iloc[0].to_dict()
-                with st.form(key="edit_inv_form"):
-                    _ec1, _ec2 = st.columns(2)
-                    with _ec1:
-                        _en = st.text_input("Product Name *", value=str(_edit_row.get("item_name", "")))
-                        _ec = st.text_input("Category",       value=str(_edit_row.get("category", "")))
-                    with _ec2:
-                        _ep = st.number_input("Price ($)", value=float(_edit_row.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
-                        _es = st.number_input("Set Stock To", value=int(_edit_row.get("stock_left", 0)), step=1,
-                                              help="Sets stock to this exact value across all databases")
-                    _ei = st.text_input("Image URL", value=str(_edit_row.get("image_url", "N/A")))
-                    if st.form_submit_button("Save All Changes", type="primary"):
-                        _upd_prod = {
-                            "sku":        _edit_sku_sel,
-                            "item_name":  _en.strip() or _edit_row.get("item_name", ""),
-                            "category":   _ec.strip() or _edit_row.get("category", "General"),
-                            "price":      round(_ep, 2),
-                            "stock_left": _es,
-                            "image_url":  _ei.strip() or "N/A",
-                            "status":     "Backordered" if _es < 0 else ("Out of stock" if _es == 0 else ("Low stock" if _es <= 10 else "In stock")),
-                        }
-                        _ok, _msg = save_product_to_db(_upd_prod, cfg)
-                        if not _ok:
-                            st.toast("Something went wrong. Please try again.", icon="❌")
-                        set_stock_all_dbs(_edit_sku_sel, _es, cfg)
-                        _cfg_prods = cfg.get("products", [])
-                        cfg["products"] = [_upd_prod if p.get("sku") == _edit_sku_sel else p for p in _cfg_prods]
-                        if not any(p.get("sku") == _edit_sku_sel for p in _cfg_prods):
-                            cfg["products"].append(_upd_prod)
-                        save_config(cfg)
-                        st.session_state.cfg = cfg
-                        st.toast("Product updated successfully.", icon="✅")
-                        st.success(f"Updated · {_msg}")
-                        _clear_data_caches()
-                        st.rerun()
+            st.bar_chart(_ov_chart["Stock Level"], color="#4F46E5")
 
-                # ── Replace Image (outside form) ─────────────────────
-                st.divider()
-                st.markdown("**Replace Image**")
-                _ei_cur_img = str(_edit_row.get("image_url", "N/A"))
-                _ei_c1, _ei_c2, _ei_c3 = st.columns([1, 4, 2])
-                with _ei_c1:
-                    if _ei_cur_img and _ei_cur_img not in ("N/A", ""):
-                        st.image(_ei_cur_img, width=56)
-                    else:
-                        st.markdown(
-                            "<div style='width:56px;height:56px;background:#f4f4f5;"
-                            "border-radius:8px;display:flex;align-items:center;"
-                            "justify-content:center;color:#bbb;font-size:10px;'>No img</div>",
-                            unsafe_allow_html=True,
-                        )
-                with _ei_c2:
-                    st.caption(f"**{_edit_row.get('item_name','')}** · `{_edit_sku_sel}`  "
-                               f"Current: `{_ei_cur_img}`")
-                    _ei_repl_file = st.file_uploader(
-                        "img", key=f"ie_repl_{_edit_sku_sel}",
-                        type=["jpg","jpeg","png","webp"],
-                        label_visibility="collapsed",
-                    )
-                with _ei_c3:
-                    st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
-                    if _ei_repl_file and st.button("Upload Image", key=f"ie_replbtn_{_edit_sku_sel}",
-                                                    use_container_width=True):
-                        with st.spinner("Uploading…"):
-                            try:
-                                _ei_repl_file.seek(0)
-                                _ei_new_url = upload_image(
-                                    _ei_repl_file.read(), cfg,
-                                    name=_edit_row.get("item_name",""),
-                                )
-                                _ei_upd = dict(_edit_row)
-                                _ei_upd["image_url"] = _ei_new_url
-                                save_product_to_db(_ei_upd, cfg)
-                                cfg["products"] = [
-                                    _ei_upd if p.get("sku") == _edit_sku_sel else p
-                                    for p in cfg.get("products", [])
-                                ]
-                                save_config(cfg)
-                                st.session_state.cfg = cfg
-                                st.success(f"Image updated for {_edit_row.get('item_name','')}.")
-                                _clear_data_caches()
-                                st.rerun()
-                            except Exception as _eie:
-                                st.error(f"Upload failed: {_eie}")
-
-    # ══ DELETE PRODUCTS (bulk) ═══════════════════════
-    with inv_tab_delete:
-        if inv_df.empty:
-            st.info("No products to delete.")
-        else:
-            st.subheader("Delete Products")
-            st.caption(f"Permanently removes selected products from: **{' + '.join(_sync_targets)}** and the Products catalog.")
-            _del_map = {
-                str(r.get("sku")): f"{r.get('item_name', r.get('sku'))} ({r.get('sku')})"
-                for _, r in inv_df.iterrows() if r.get("sku")
-            }
-            _del_selected = st.multiselect(
-                "Select products to delete",
-                options=list(_del_map.keys()),
-                format_func=lambda s: _del_map[s],
-                key="del_inv_multi",
-            )
-            if _del_selected:
-                st.warning(
-                    f"**{len(_del_selected)} product(s) selected** will be permanently deleted "
-                    f"from {' + '.join(_sync_targets)} and the Products catalog."
-                )
-                _del_confirm = st.checkbox("I understand this cannot be undone", key="del_inv_confirm")
-                if st.button("Delete Selected Products", type="primary", key="del_inv_btn", disabled=not _del_confirm):
-                    for _dsku in _del_selected:
-                        delete_product_from_db(_dsku, cfg)
-                    cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _del_selected]
-                    save_config(cfg)
-                    st.session_state.cfg = cfg
-                    st.toast("Products deleted successfully.", icon="✅")
-                    st.success(f"Deleted {len(_del_selected)} product(s) from {' + '.join(_sync_targets)}.")
-                    _clear_data_caches()
-                    st.rerun()
+        st.divider()
+        st.info("To modify stock levels, go to the **Adjust Stock** page. To add or edit product details, go to the **Products** page.")
 
 
 # ═════════════════════════════════════════════
@@ -2064,14 +1650,16 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
     can_test = bool(inp_smtp_email.strip() and inp_smtp_pass.strip())
     if st.button("Test SMTP Connection", use_container_width=True, disabled=not can_test):
-        try:
-            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-            server.starttls()
-            server.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
-            server.quit()
-            st.success("SMTP connection successful.")
-        except Exception as exc:
-            st.error(f"Connection failed: {exc}")
+        with st.spinner("Testing connection to Gmail SMTP..."):
+            try:
+                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+                server.starttls()
+                server.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
+                server.quit()
+                st.toast("SMTP connection success!", icon="📧")
+                st.success("SMTP connection successful.")
+            except Exception as exc:
+                st.error(f"Connection failed: {exc}")
 
     # ── Image Hosting ─────────────────────────────
     st.divider()
@@ -2104,27 +1692,29 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with _fi_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
             if st.button("Test Key", use_container_width=True, key="btn_test_fi", disabled=not inp_freeimage_key):
-                try:
-                    import requests  # type: ignore
-                    _test_path = Path(__file__).parent / "TESTPRODUCT.png"
-                    if _test_path.exists():
-                        _fi_raw = _test_path.read_bytes()
-                    else:
-                        import base64 as _b64
-                        _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                    _fi_resp = requests.post(
-                        "https://freeimage.host/api/1/upload",
-                        data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
-                        files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
-                        timeout=20,
-                    )
-                    _fi_body = _fi_resp.json() if _fi_resp.content else {}
-                    if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
-                        st.success("Freeimage.host key works!")
-                    else:
-                        st.error(f"Error: {_fi_body.get('status_txt', _fi_resp.text[:150])}")
-                except Exception as exc:
-                    st.error(f"Test failed: {exc}")
+                with st.spinner("Testing Freeimage.host API..."):
+                    try:
+                        import requests  # type: ignore
+                        _test_path = Path(__file__).parent / "TESTPRODUCT.png"
+                        if _test_path.exists():
+                            _fi_raw = _test_path.read_bytes()
+                        else:
+                            import base64 as _b64
+                            _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                        _fi_resp = requests.post(
+                            "https://freeimage.host/api/1/upload",
+                            data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
+                            files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
+                            timeout=20,
+                        )
+                        _fi_body = _fi_resp.json() if _fi_resp.content else {}
+                        if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
+                            st.toast("Freeimage.host key verified!", icon="🖼️")
+                            st.success("Freeimage.host key works!")
+                        else:
+                            st.error(f"Error: {_fi_body.get('status_txt', _fi_resp.text[:150])}")
+                    except Exception as exc:
+                        st.error(f"Test failed: {exc}")
 
     with _img_tab_ih:
         with st.expander("How to get an Imghippo API key", expanded=False):
@@ -2154,31 +1744,33 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with _ib_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
             if st.button("Test Key", use_container_width=True, key="btn_test_imgbb", disabled=not inp_imgbb_key):
-                try:
-                    import requests  # type: ignore
-                    _test_path = Path(__file__).parent / "TESTPRODUCT.png"
-                    if _test_path.exists():
-                        _raw = _test_path.read_bytes()
-                    else:
-                        import base64 as _b64
-                        _raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                    _resp = requests.post(
-                        "https://api.imghippo.com/v1/upload",
-                        data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
-                        files={"file": ("test.jpg", io.BytesIO(_raw), "image/jpeg")},
-                        timeout=20,
-                    )
-                    _body = _resp.json() if _resp.content else {}
-                    if _resp.status_code == 200 and _body.get("success"):
-                        st.success("Imghippo key works!")
-                    elif _resp.status_code == 401:
-                        st.error("Invalid API key — check for typos.")
-                    elif _resp.status_code == 429:
-                        st.warning("Rate limited — wait a minute and try again.")
-                    else:
-                        st.error(f"Error {_resp.status_code}: {_body.get('message', _resp.text[:150])}")
-                except Exception as exc:
-                    st.error(f"Test failed: {exc}")
+                with st.spinner("Testing Imghippo API..."):
+                    try:
+                        import requests  # type: ignore
+                        _test_path = Path(__file__).parent / "TESTPRODUCT.png"
+                        if _test_path.exists():
+                            _raw = _test_path.read_bytes()
+                        else:
+                            import base64 as _b64
+                            _raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                        _resp = requests.post(
+                            "https://api.imghippo.com/v1/upload",
+                            data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
+                            files={"file": ("test.jpg", io.BytesIO(_raw), "image/jpeg")},
+                            timeout=20,
+                        )
+                        _body = _resp.json() if _resp.content else {}
+                        if _resp.status_code == 200 and _body.get("success"):
+                            st.toast("Imghippo key verified!", icon="🖼️")
+                            st.success("Imghippo key works!")
+                        elif _resp.status_code == 401:
+                            st.error("Invalid API key — check for typos.")
+                        elif _resp.status_code == 429:
+                            st.warning("Rate limited — wait a minute and try again.")
+                        else:
+                            st.error(f"Error {_resp.status_code}: {_body.get('message', _resp.text[:150])}")
+                    except Exception as exc:
+                        st.error(f"Test failed: {exc}")
 
     # ── Database Connections ────────────────────
     st.divider()
@@ -2282,18 +1874,20 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
                 key="btn_test_sb",
                 disabled=not (inp_sb_url and _test_key),
             ):
-                try:
-                    from supabase import create_client  # type: ignore
-                    client = create_client(inp_sb_url.strip(), _test_key)
-                    client.table("inventory").select("id").limit(1).execute()
-                    st.success("Connected to Supabase successfully.")
-                except ImportError:
-                    st.error("Run: pip install supabase")
-                except Exception as exc:
-                    if "PGRST205" in str(exc) or "does not exist" in str(exc).lower() or "relation" in str(exc).lower():
-                        st.success("Connected. Tables not created yet — click **Setup Tables** below.")
-                    else:
-                        st.error(f"Connection failed: {exc}")
+                with st.spinner("Connecting to Supabase..."):
+                    try:
+                        from supabase import create_client  # type: ignore
+                        client = create_client(inp_sb_url.strip(), _test_key)
+                        client.table("inventory").select("id").limit(1).execute()
+                        st.toast("Supabase connection success!", icon="☁️")
+                        st.success("Connected to Supabase successfully.")
+                    except ImportError:
+                        st.error("Run: pip install supabase")
+                    except Exception as exc:
+                        if "PGRST205" in str(exc) or "does not exist" in str(exc).lower() or "relation" in str(exc).lower():
+                            st.success("Connected. Tables not created yet — click **Setup Tables** below.")
+                        else:
+                            st.error(f"Connection failed: {exc}")
 
         with col_sb_setup:
             if st.button(
@@ -2333,9 +1927,34 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
                     if not _fail:
                         st.success(f"Tables created successfully.")
                     else:
-                        st.warning(f"{_ok} OK, {len(_fail)} failed:")
-                        for _f in _fail:
-                            st.caption(_f)
+                        _ref = _project_ref.group(1)
+                        # Split on semicolons, skip blank/comment-only chunks
+                        _statements = [
+                            s.strip() for s in SETUP_SQL.split(";")
+                            if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
+                        ]
+                        _ok, _fail = 0, []
+                        for _stmt in _statements:
+                            _r = _req.post(
+                                f"https://api.supabase.com/v1/projects/{_ref}/database/query",
+                                headers={
+                                    "Authorization": f"Bearer {inp_sb_pat.strip()}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={"query": _stmt},
+                                timeout=20,
+                            )
+                            if _r.status_code in (200, 201):
+                                _ok += 1
+                            else:
+                                _fail.append(f"{_stmt[:60]}… → {_r.text[:120]}")
+                        if not _fail:
+                            st.toast("Supabase tables ready!", icon="📦")
+                            st.success(f"Tables created successfully.")
+                        else:
+                            st.warning(f"{_ok} OK, {len(_fail)} failed:")
+                            for _f in _fail:
+                                st.caption(_f)
 
     with db_tab_neon:
         with st.expander("Where do I find the Neon connection string?", expanded=False):
@@ -2418,25 +2037,27 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                 key="btn_setup_neon",
                 disabled=not _neon_is_valid_dsn,
             ):
-                try:
-                    import psycopg2  # type: ignore
-                except ImportError:
-                    import subprocess, sys
-                    with st.spinner("Installing psycopg2-binary…"):
-                        subprocess.check_call(
-                            [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                    import psycopg2  # type: ignore
-                try:
-                    _run_sql = st.session_state.get("neon_sql_editor", SETUP_SQL)
-                    with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(_run_sql)
-                        conn.commit()
-                    st.success("Tables created successfully (or already exist).")
-                except Exception as exc:
-                    st.error(f"Setup failed: {exc}")
+                with st.spinner("Setting up Neon tables..."):
+                    try:
+                        import psycopg2  # type: ignore
+                    except ImportError:
+                        import subprocess, sys
+                        with st.spinner("Installing psycopg2-binary…"):
+                            subprocess.check_call(
+                                [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            )
+                        import psycopg2  # type: ignore
+                    try:
+                        _run_sql = st.session_state.get("neon_sql_editor", SETUP_SQL)
+                        with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(_run_sql)
+                            conn.commit()
+                        st.toast("Neon tables ready!", icon="📦")
+                        st.success("Tables created successfully (or already exist).")
+                    except Exception as exc:
+                        st.error(f"Setup failed: {exc}")
 
     # ── Save Settings ───────────────────────────
     st.divider()
@@ -2465,6 +2086,55 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
         st.session_state.cfg = new_cfg
         cfg = new_cfg
         st.success("Settings saved.")
+
+
+# ═════════════════════════════════════════════
+# OUTBOUND INFORMATION PAGE
+# ═════════════════════════════════════════════
+
+elif page == "Outbound Information":
+
+    st.title("Outbound Information")
+    st.caption("View a history of all emails sent and their impact on inventory.")
+
+    cfg = st.session_state.cfg
+    logs = load_outbound_logs(cfg)
+
+    if logs.empty:
+        st.info("No outbound emails found. Start sending emails from the **Email Sender** page.")
+    else:
+        st.subheader(f"Sent History ({len(logs)})")
+        
+        # Format the table for display
+        display_df = logs.copy()
+        if "recipient_name" in display_df.columns:
+            display_df = display_df.rename(columns={
+                "recipient_name": "Name",
+                "recipient_email": "Email",
+                "order_number": "Order #",
+                "products_list": "Products",
+                "total_cost": "Cost ($)",
+                "timestamp": "Sent At"
+            })
+        
+        # Reorder columns if possible
+        cols = ["Sent At", "Name", "Email", "Order #", "Products", "Cost ($)"]
+        display_df = display_df[[c for c in cols if c in display_df.columns]]
+        
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
+                "Sent At": st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
+                "Products": st.column_config.TextColumn(width="large")
+            }
+        )
+
+        if st.button("Clear Local View Cache", use_container_width=True):
+            _clear_data_caches()
+            st.rerun()
 
 
 # ═════════════════════════════════════════════
@@ -2519,6 +2189,7 @@ elif page == "Email Sender":
             s_email = st.text_input("Email",   key="s_email", placeholder="jane@example.com")
         with c2:
             s_order = st.text_input("Order #", key="s_order", placeholder="ORD-1001")
+            s_cost  = st.number_input("Total Cost ($)", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
         with c3:
             s_prods = st.text_area(
                 "Products", key="s_prods", height=108,
@@ -2536,9 +2207,12 @@ elif page == "Email Sender":
                 )
 
         if st.button("Add to Queue", key="single_add", type="primary"):
-            if add_to_queue(s_name, s_email, s_order, s_prods):
-                st.success(f"Added {s_name} to the queue.")
-                st.rerun()
+            with st.spinner("Adding to queue..."):
+                if add_to_queue(s_name, s_email, s_order, s_prods, s_cost):
+                    st.toast(f"Added {s_name} to queue.", icon="👤")
+                    st.success(f"Added {s_name} to the queue.")
+                    time.sleep(0.5)
+                    st.rerun()
 
     # ─ Bulk ─────────────────────────────────────
     with tab_bulk:
@@ -2546,10 +2220,11 @@ elif page == "Email Sender":
         st.caption("Type directly in the table. Use the + icon to add rows. Separate multiple products with |")
 
         _BULK_BASE = pd.DataFrame({
-            "Name":     pd.Series([], dtype=str),
-            "Email":    pd.Series([], dtype=str),
-            "Order #":  pd.Series([], dtype=str),
-            "Products": pd.Series([], dtype=str),
+            "Name":       pd.Series([], dtype=str),
+            "Email":      pd.Series([], dtype=str),
+            "Order #":    pd.Series([], dtype=str),
+            "Products":   pd.Series([], dtype=str),
+            "Total Cost": pd.Series([], dtype=float),
         })
 
         edited = st.data_editor(
@@ -2565,6 +2240,7 @@ elif page == "Email Sender":
                     width="large",
                     help="Separate multiple products with |",
                 ),
+                "Total Cost": st.column_config.NumberColumn(width="small", format="$%.2f"),
             },
         )
 
@@ -2595,14 +2271,17 @@ elif page == "Email Sender":
                     em = str(row.get("Email",    "")).strip()
                     on = str(row.get("Order #",  "")).strip()
                     pr = str(row.get("Products", "")).strip()
+                    co = float(row.get("Total Cost", 0.0) or 0.0)
                     if not nm or nm == "nan" or not em or em == "nan":
                         continue
-                    if add_to_queue(nm, em, on, pr):
+                    if add_to_queue(nm, em, on, pr, co):
                         added += 1
                 if added:
+                    st.toast(f"Added {added} orders to queue.", icon="📋")
                     st.success(f"Added {added} order(s) to the queue.")
                     if "bulk_editor" in st.session_state:
                         del st.session_state["bulk_editor"]
+                    time.sleep(0.5)
                     st.rerun()
                 else:
                     st.warning("No valid rows found. Make sure Name and Email are filled in.")
@@ -2618,7 +2297,7 @@ elif page == "Email Sender":
         st.markdown("#### Import from a CSV or TSV file")
         st.caption(
             "Required column: **email**. "
-            "Optional: **name**, **order_number**, **products**. "
+            "Optional: **name**, **order_number**, **products**, **total_cost**. "
             "Column names are flexible — most variations are recognised automatically."
         )
 
@@ -2654,9 +2333,12 @@ elif page == "Email Sender":
             for w in warns:
                 st.warning(w)
             if rows:
-                st.session_state.queue.extend(rows)
-                st.success(f"Imported {len(rows)} orders into the queue.")
-                st.rerun()
+                with st.spinner("Importing orders..."):
+                    st.session_state.queue.extend(rows)
+                    st.toast(f"Imported {len(rows)} orders.", icon="📥")
+                    st.success(f"Imported {len(rows)} orders into the queue.")
+                    time.sleep(0.5)
+                    st.rerun()
 
     # ─ Email Template ───────────────────────────
     with tab_template:
@@ -2712,10 +2394,12 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
         with _tpl_c1:
             if st.button("Save Template", type="primary", use_container_width=True, key="btn_save_tpl"):
-                cfg["email_html_template"] = _tpl_input.strip()
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.success("Template saved.")
+                with st.spinner("Saving template..."):
+                    cfg["email_html_template"] = _tpl_input.strip()
+                    save_config(cfg)
+                    st.session_state.cfg = cfg
+                    st.toast("Template saved.", icon="💾")
+                    st.success("Template saved.")
         with _tpl_c2:
             if st.button("Reset to Default", use_container_width=True, key="btn_reset_tpl"):
                 cfg["email_html_template"] = ""
@@ -2764,8 +2448,11 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             st.subheader(f"Queue  —  {len(queue)} order{'s' if len(queue) != 1 else ''}")
         with action_col:
             if st.button("Clear All", key="clear_queue"):
-                st.session_state.queue = []
-                st.rerun()
+                with st.spinner("Clearing queue..."):
+                    st.session_state.queue = []
+                    st.toast("Queue cleared.", icon="🧹")
+                    time.sleep(0.5)
+                    st.rerun()
 
         for i, order in enumerate(queue):
             prods    = split_products(order.get("products", ""))
@@ -2780,8 +2467,11 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 )
             with row_r:
                 if st.button("Delete", key=f"del_{i}", use_container_width=True):
-                    st.session_state.queue.pop(i)
-                    st.rerun()
+                    with st.spinner("Deleting..."):
+                        st.session_state.queue.pop(i)
+                        st.toast("Order removed.", icon="🗑️")
+                        time.sleep(0.5)
+                        st.rerun()
 
         # Show image match summary
         if _products_lookup:
@@ -2856,17 +2546,21 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     server.send_message(msg)
                     status = "Sent"
                     sent_n += 1
+                    # Log the successfully sent email to the database
+                    save_outbound_log(order, cfg)
                 except Exception as exc:
                     status = f"Failed: {str(exc)[:80]}"
                     failed_n += 1
 
                 results.append({
-                    "#":       idx + 1,
-                    "Name":    order["name"],
-                    "Email":   order["email"],
-                    "Order #": order["order_number"],
-                    "Status":  status,
+                    "#":idx + 1,
+                    "Name":order["name"],
+                    "Email":order["email"],
+                    "Order #":order["order_number"],
+                    "Status":status,
                 })
+                # Update session state for the persistent log
+                st.session_state.send_log = results
                 log_ph.dataframe(
                     pd.DataFrame(results),
                     use_container_width=True,
@@ -2914,8 +2608,8 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             else:
                 st.warning(f"{sent_n} sent, {failed_n} failed. See the results table above.")
 
-            st.session_state.send_log = results
             st.session_state.queue    = []
+            st.toast("All emails sent!", icon="🚀")
             time.sleep(1)
             st.rerun()
 

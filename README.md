@@ -20,6 +20,9 @@ MERIT is a browser-based app built specifically for **Virtual Enterprise Interna
 5. [Using Email Sender](#5-using-email-sender)
 6. [Using Products](#6-using-products)
 7. [Using Inventory](#7-using-inventory)
+   - [7.1 Overview dashboard](#71-overview-dashboard)
+   - [7.2 Adjusting stock](#72-adjusting-stock)
+   - [7.3 Outbound Information — email tracking](#73-outbound-information--email-tracking)
 8. [How databases work (offline fallback + sync)](#8-how-databases-work-offline-fallback--sync)
 9. [Error messages explained](#9-error-messages-explained)
 10. [Frequently asked questions](#10-frequently-asked-questions)
@@ -325,6 +328,18 @@ In the **Adjust Stock** tab, each product has a **±** box. Enter a positive num
 | Yellow — **Low stock** | 1 to 10 units left — order more soon |
 | Red — **Out of stock** | 0 units — nothing left |
 | Purple — **Backordered** | Negative number — more have been sold than exist (a VEI scenario where you confirm orders ahead of restocking) |
+
+---
+
+### 7.3 Outbound Information — email tracking
+
+The **Outbound Information** page keeps a history of every email you have successfully sent.
+
+- **Recipient logs:** View the name, email, and order number for every customer you have contacted.
+- **Product tracking:** See exactly which products were included in the email.
+- **Total Cost:** See the total amount of each order.
+- **Inventory effect:** After every send, inventory is reduced for those items. The "Outbound Information" page acts as a ledger for these deductions.
+- **Deduction chart:** In the Email Sender page, a live chart appears after sending a batch, showing exactly how many items were deducted from stock.
 
 ---
 
