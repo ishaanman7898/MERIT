@@ -144,7 +144,7 @@ These two fields appear at the very top of Settings:
 5. Log back into [freeimage.host](https://freeimage.host)
 6. Click the **menu icon (☰)** in the **top-left corner** of the page — it looks like three horizontal lines
 7. Click **API** in the menu that appears
-8. You will see a page titled "API version 1" with your **API Key** shown (it is a long string of letters and numbers like `6d207e02198a847aa98d0a2a901485a5`)
+8. You will see a page titled "API version 1" with your **API Key** shown (it is a long string of letters and numbers like `your_freeimage_host_api_key_here`)
 9. Copy that key
 10. Go to MERIT → **Settings → Image Hosting → Freeimage.host** tab
 11. Paste it into the **Freeimage.host API Key** field

@@ -2034,6 +2034,18 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             help="The 16-character app password from your Google account",
         )
 
+    st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
+    can_test = bool(inp_smtp_email.strip() and inp_smtp_pass.strip())
+    if st.button("Test SMTP Connection", use_container_width=True, disabled=not can_test):
+        try:
+            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+            server.starttls()
+            server.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
+            server.quit()
+            st.success("SMTP connection successful.")
+        except Exception as exc:
+            st.error(f"Connection failed: {exc}")
+
     # ── Image Hosting ─────────────────────────────
     st.divider()
     st.subheader("Image Hosting")
@@ -2058,7 +2070,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
                 "Freeimage.host API Key",
                 value=cfg.get("freeimage_api_key", ""),
                 type="password",
-                placeholder="6d207e02198a847aa98d0a2a901485a5",
+                placeholder="your_api_key_here",
                 help="freeimage.host → Menu → API → copy your key",
                 key="inp_freeimage_key",
             )
@@ -2394,47 +2406,33 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                 except Exception as exc:
                     st.error(f"Setup failed: {exc}")
 
-    # ── Save + Test SMTP ────────────────────────
+    # ── Save Settings ───────────────────────────
     st.divider()
-    save_col, test_col = st.columns([1, 1])
 
-    with save_col:
-        if st.button("Save Settings", type="primary", use_container_width=True):
-            # Preserve products list and email template when saving settings
-            existing_products = cfg.get("products", [])
-            new_cfg = {
-                "from_name":                inp_from_name.strip(),
-                "subject":                  inp_subject.strip(),
-                "smtp_email":               inp_smtp_email.strip(),
-                "smtp_password":            re.sub(r"\s+", "", inp_smtp_pass.strip()),
-                "freeimage_api_key":         inp_freeimage_key.strip(),
-                "imghippo_api_key":         inp_imgbb_key.strip(),
-                "supabase_url":             inp_sb_url.strip(),
-                "supabase_pat":             inp_sb_pat.strip(),
-                "supabase_key":             inp_sb_anon.strip(),
-                "supabase_publishable_key": inp_sb_publishable.strip(),
-                "supabase_service_role_key": inp_sb_service.strip(),
-                "supabase_db_password":     cfg.get("supabase_db_password", ""),
-                "neon_connection_string":   inp_neon.strip(),
-                "email_html_template":      cfg.get("email_html_template", ""),
-                "products":                 existing_products,
-            }
-            save_config(new_cfg)
-            st.session_state.cfg = new_cfg
-            cfg = new_cfg
-            st.success("Settings saved.")
-
-    with test_col:
-        can_test = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
-        if st.button("Test SMTP Connection", use_container_width=True, disabled=not can_test):
-            try:
-                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-                server.starttls()
-                server.login(cfg["smtp_email"], cfg["smtp_password"])
-                server.quit()
-                st.success("SMTP connection successful.")
-            except Exception as exc:
-                st.error(f"Connection failed: {exc}")
+    if st.button("Save Settings", type="primary", use_container_width=True):
+        # Preserve products list and email template when saving settings
+        existing_products = cfg.get("products", [])
+        new_cfg = {
+            "from_name":                inp_from_name.strip(),
+            "subject":                  inp_subject.strip(),
+            "smtp_email":               inp_smtp_email.strip(),
+            "smtp_password":            re.sub(r"\s+", "", inp_smtp_pass.strip()),
+            "freeimage_api_key":         inp_freeimage_key.strip(),
+            "imghippo_api_key":         inp_imgbb_key.strip(),
+            "supabase_url":             inp_sb_url.strip(),
+            "supabase_pat":             inp_sb_pat.strip(),
+            "supabase_key":             inp_sb_anon.strip(),
+            "supabase_publishable_key": inp_sb_publishable.strip(),
+            "supabase_service_role_key": inp_sb_service.strip(),
+            "supabase_db_password":     cfg.get("supabase_db_password", ""),
+            "neon_connection_string":   inp_neon.strip(),
+            "email_html_template":      cfg.get("email_html_template", ""),
+            "products":                 existing_products,
+        }
+        save_config(new_cfg)
+        st.session_state.cfg = new_cfg
+        cfg = new_cfg
+        st.success("Settings saved.")
 
 
 # ═════════════════════════════════════════════
