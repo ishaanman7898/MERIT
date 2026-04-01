@@ -157,16 +157,19 @@ These two fields appear at the very top of Settings:
 
 If you prefer Imghippo instead of Freeimage.host, use this guide. You only need **one** image hosting service.
 
-1. Go to [imghippo.com](https://imghippo.com) and click **Sign Up** (free, no credit card, 500 MB storage)
-2. Enter your email and verify it
-3. Log in to your Imghippo account
-4. Click **Settings** in your dashboard
-5. Click **API Keys**
-6. Click **Generate API Key** and copy the key that appears
-7. Go to MERIT → **Settings → Image Hosting → Imghippo** tab
-8. Paste the key into the **Imghippo API Key** field
-9. Click **Test Key** — green message means success
-10. Click **Save Settings**
+1. Sign up at [https://www.imghippo.com/](https://www.imghippo.com/)
+2. Navigate to API Keys at [https://www.imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
+3. Complete the API access form (5 steps):
+   - **Step 1 – Primary Use Case:** Select Website/Web Application
+   - **Step 2 – Expected Usage Volume:** Select Less than 1,000
+   - **Step 3 – Main Feature Needed:** Select Image upload and sharing
+   - **Step 4 – Business Email:** Skip (optional)
+   - **Step 5 – Acceptable Use Confirmation:** Select Yes, I agree
+4. Copy the generated API key
+5. Go to MERIT → **Settings → Image Hosting → Imghippo** tab
+6. Paste the API key into the Streamlit app when prompted and test
+7. Click the **Save Settings** button at the end of the settings page when making everything work.
+8. If the key does not work, then retry the steps or try with a different account.
 
 ---
 

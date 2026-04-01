@@ -985,11 +985,14 @@ if page == "Products":
                     "image_url":  image_url,
                 }
                 ok, saved_to = save_product_to_db(product, cfg)
+                if not ok:
+                    st.toast("Something went wrong. Please try again.", icon="❌")
                 _cp = cfg.get("products", [])
                 cfg["products"] = [p for p in _cp if p.get("sku") != product["sku"]]
                 cfg["products"].append(product)
                 save_config(cfg)
                 st.session_state.cfg = cfg
+                st.toast("Product added successfully.", icon="✅")
                 st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
                 _clear_data_caches()
                 st.rerun()
@@ -1125,6 +1128,7 @@ if page == "Products":
             st.session_state.pb_ids  = list(range(4))
             st.session_state.pb_next = 4
             _img_note = f" · {_img_uploaded} image(s) uploaded" if _img_uploaded else ""
+            st.toast("Products added successfully.", icon="✅")
             st.success(f"Added {added} products{_img_note} · Synced to: {_p_sync_str}")
             _clear_data_caches()
             st.rerun()
@@ -1180,6 +1184,7 @@ if page == "Products":
                     saved += 1
                 save_config(cfg)
                 st.session_state.cfg = cfg
+                st.toast("Products updated successfully.", icon="✅")
                 st.success(f"Saved {saved} products · Synced to: {_p_sync_str}")
                 _clear_data_caches()
                 st.rerun()
@@ -1263,6 +1268,7 @@ if page == "Products":
                     cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _bd_selected]
                     save_config(cfg)
                     st.session_state.cfg = cfg
+                    st.toast("Products deleted successfully.", icon="✅")
                     st.success(f"Deleted {len(_bd_selected)} product(s) from {_p_sync_str}.")
                     _clear_data_caches()
                     st.rerun()
@@ -1319,7 +1325,9 @@ if page == "Products":
                     st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
                     if st.button("Delete", key=f"del_prod_{i}", use_container_width=True):
                         _del_sku = prod["sku"]
-                        _, _del_msg = delete_product_from_db(_del_sku, cfg)
+                        ok, _del_msg = delete_product_from_db(_del_sku, cfg)
+                        if not ok:
+                            st.toast("Something went wrong. Please try again.", icon="❌")
                         cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") != _del_sku]
                         save_config(cfg)
                         st.session_state.cfg = cfg
@@ -1346,12 +1354,15 @@ if page == "Products":
                                 "status":     prod.get("status", "In stock"),
                             }
                             _ok, _msg = save_product_to_db(_upd, cfg)
+                            if not _ok:
+                                st.toast("Something went wrong. Please try again.", icon="❌")
                             _cfg_prods = cfg.get("products", [])
                             cfg["products"] = [_upd if p.get("sku") == _upd["sku"] else p for p in _cfg_prods]
                             if not any(p.get("sku") == _upd["sku"] for p in _cfg_prods):
                                 cfg["products"].append(_upd)
                             save_config(cfg)
                             st.session_state.cfg = cfg
+                            st.toast("Product updated successfully.", icon="✅")
                             st.success(f"Updated · {_msg}")
                             _clear_data_caches()
                             st.rerun()
@@ -1437,6 +1448,7 @@ elif page == "Inventory":
                     if _has_supabase: adjust_inventory_supabase(_asku, _adelta, cfg)
                     _adj_applied += 1
                 if _adj_applied:
+                    st.toast("Stock updated successfully.", icon="✅")
                     st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
                     _clear_data_caches()
                     st.rerun()
@@ -1510,7 +1522,9 @@ elif page == "Inventory":
                         if _delta_val == 0:
                             st.toast(f"{_pname}: delta is 0, nothing changed.")
                         else:
-                            _, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
+                            ok, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
+                            if not ok:
+                                st.toast("Something went wrong. Please try again.", icon="❌")
                             if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
                             if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
                             st.toast(f"{_pname}: {_am}")
@@ -1665,6 +1679,7 @@ elif page == "Inventory":
             st.session_state.ia_ids  = list(range(4))
             st.session_state.ia_next = 4
             _ia_img_note = f" · {_ia_imgs_uploaded} image(s) uploaded" if _ia_imgs_uploaded else ""
+            st.toast("Products added successfully.", icon="✅")
             st.success(f"Added {_ia_added} product(s){_ia_img_note} · Synced to: {' + '.join(_sync_targets)}")
             _clear_data_caches()
             st.rerun()
@@ -1718,6 +1733,7 @@ elif page == "Inventory":
                     _ibe_saved += 1
                 save_config(cfg)
                 st.session_state.cfg = cfg
+                st.toast("Products updated successfully.", icon="✅")
                 st.success(f"Saved {_ibe_saved} products · Synced to: {' + '.join(_sync_targets)}")
                 _clear_data_caches()
                 st.rerun()
@@ -1813,6 +1829,8 @@ elif page == "Inventory":
                             "status":     "Backordered" if _es < 0 else ("Out of stock" if _es == 0 else ("Low stock" if _es <= 10 else "In stock")),
                         }
                         _ok, _msg = save_product_to_db(_upd_prod, cfg)
+                        if not _ok:
+                            st.toast("Something went wrong. Please try again.", icon="❌")
                         set_stock_all_dbs(_edit_sku_sel, _es, cfg)
                         _cfg_prods = cfg.get("products", [])
                         cfg["products"] = [_upd_prod if p.get("sku") == _edit_sku_sel else p for p in _cfg_prods]
@@ -1820,6 +1838,7 @@ elif page == "Inventory":
                             cfg["products"].append(_upd_prod)
                         save_config(cfg)
                         st.session_state.cfg = cfg
+                        st.toast("Product updated successfully.", icon="✅")
                         st.success(f"Updated · {_msg}")
                         _clear_data_caches()
                         st.rerun()
@@ -1902,6 +1921,7 @@ elif page == "Inventory":
                     cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _del_selected]
                     save_config(cfg)
                     st.session_state.cfg = cfg
+                    st.toast("Products deleted successfully.", icon="✅")
                     st.success(f"Deleted {len(_del_selected)} product(s) from {' + '.join(_sync_targets)}.")
                     _clear_data_caches()
                     st.rerun()
@@ -1947,9 +1967,16 @@ Choose **one** of these free services:
 3. Copy your API key and paste it below under **Image Hosting → Freeimage.host**
 
 **Imghippo** (alternative):
-1. Go to [imghippo.com](https://imghippo.com) → **Sign Up** (free, no credit card, 500 MB storage)
-2. Verify your email address → go to **Settings → API Keys** → click **Generate API Key**
-3. Copy the key and paste it below under **Image Hosting → Imghippo**
+1. Sign up at [https://www.imghippo.com/](https://www.imghippo.com/)
+2. Navigate to API Keys at [https://www.imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
+3. Complete the API access form (5 steps):
+   - **Step 1:** Select Website/Web Application
+   - **Step 2:** Select Less than 1,000
+   - **Step 3:** Select Image upload and sharing
+   - **Step 4:** Skip (optional)
+   - **Step 5:** Select Yes, I agree
+4. Copy the generated API key and paste it below under **Image Hosting → Imghippo**
+5. Test the key, click **Save Settings**, and retry if it fails.
 
 ---
 
@@ -2102,11 +2129,16 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     with _img_tab_ih:
         with st.expander("How to get an Imghippo API key", expanded=False):
             st.markdown("""
-1. Go to [imghippo.com](https://imghippo.com) and click **Sign Up** (free, no credit card)
-2. Verify your email address
-3. Go to **Settings → API Keys** in your dashboard
-4. Click **Generate API Key** → copy it
-5. Paste it in the field below and click **Save Settings**
+1. Sign up at [https://www.imghippo.com/](https://www.imghippo.com/)
+2. Navigate to API Keys at [https://www.imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
+3. Complete the API access form (5 steps):
+   - **Step 1:** Select Website/Web Application
+   - **Step 2:** Select Less than 1,000
+   - **Step 3:** Select Image upload and sharing
+   - **Step 4:** Skip (optional)
+   - **Step 5:** Select Yes, I agree
+4. Copy the generated API key, paste it in the field below, and click **Test Key**
+5. If it works, click **Save Settings**. If it fails, retry steps or try a different account.
             """)
 
         _ib_l, _ib_r = st.columns([3, 1])
