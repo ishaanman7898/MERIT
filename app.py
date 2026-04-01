@@ -1,6 +1,6 @@
 """
 MERIT — Mass Email & Inventory Tool for Virtual Enterprise (VEI) firms
-Gmail SMTP · Imghippo image hosting · Supabase / Neon database
+Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase / Neon database
 """
 
 import base64
@@ -153,6 +153,56 @@ def upload_to_imghippo(
         return body["data"]["view_url"]
 
     raise RuntimeError(body.get("message") or f"HTTP {resp.status_code}: {resp.text[:120]}")
+
+
+def upload_to_freeimage(
+    image_bytes: bytes, api_key: str, name: str = "product"
+) -> str:
+    """Compress image with Pillow then upload to Freeimage.host via multipart/form-data.
+    Returns the direct display URL on success."""
+    import requests  # type: ignore
+
+    try:
+        from PIL import Image  # type: ignore
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if max(img.size) > 1200:
+            img.thumbnail((1200, 1200), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82, optimize=True)
+        upload_bytes = buf.getvalue()
+        fname = f"{name}.jpg"
+    except ImportError:
+        upload_bytes = image_bytes
+        fname = f"{name}.jpg"
+
+    resp = requests.post(
+        "https://freeimage.host/api/1/upload",
+        data={"key": api_key, "action": "upload", "format": "json"},
+        files={"source": (fname, io.BytesIO(upload_bytes), "image/jpeg")},
+        timeout=30,
+    )
+
+    body = resp.json()
+    if resp.status_code == 200 and body.get("status_code") == 200:
+        return body["image"]["display_url"]
+
+    raise RuntimeError(body.get("status_txt") or f"HTTP {resp.status_code}: {resp.text[:120]}")
+
+
+def _has_image_host(cfg: dict) -> bool:
+    """Return True if any image hosting API key is configured."""
+    return bool(cfg.get("freeimage_api_key") or cfg.get("imghippo_api_key"))
+
+
+def upload_image(image_bytes: bytes, cfg: dict, name: str = "product") -> str:
+    """Upload using Freeimage.host if configured, otherwise Imghippo."""
+    if cfg.get("freeimage_api_key"):
+        return upload_to_freeimage(image_bytes, cfg["freeimage_api_key"], name=name)
+    if cfg.get("imghippo_api_key"):
+        return upload_to_imghippo(image_bytes, cfg["imghippo_api_key"], name=name)
+    raise RuntimeError("No image hosting configured. Add an API key in Settings → Image Hosting.")
 
 
 # ─────────────────────────────────────────────
@@ -433,6 +483,72 @@ def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
 
     ok = any("failed" not in r for r in results)
     return ok, " · ".join(results) if results else "No databases written"
+
+
+def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
+    """Read every row from SQLite and upsert to all configured cloud databases.
+    Returns (rows_synced, error_list). Call this to push local data to cloud after reconnecting."""
+    errors: list[str] = []
+    synced = 0
+
+    # Read all rows from SQLite
+    try:
+        conn = _get_sqlite_conn()
+        rows = conn.execute("SELECT * FROM inventory").fetchall()
+        conn.close()
+        records = [dict(r) for r in rows]
+    except Exception as exc:
+        return 0, [f"Could not read SQLite: {exc}"]
+
+    if not records:
+        return 0, []
+
+    # ── Neon ──────────────────────────────────────────────────────────
+    conn_pg = _get_db_conn(cfg)
+    if conn_pg is not None:
+        try:
+            with conn_pg:
+                with conn_pg.cursor() as cur:
+                    for rec in records:
+                        cur.execute("""
+                            INSERT INTO inventory (sku, item_name, category, price, stock_left, status, image_url)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT(sku) DO UPDATE SET
+                                item_name=EXCLUDED.item_name, category=EXCLUDED.category,
+                                price=EXCLUDED.price, stock_left=EXCLUDED.stock_left,
+                                status=EXCLUDED.status, image_url=EXCLUDED.image_url
+                        """, (rec.get("sku"), rec.get("item_name"), rec.get("category"),
+                              rec.get("price"), rec.get("stock_left"), rec.get("status"),
+                              rec.get("image_url")))
+            conn_pg.close()
+            synced = len(records)
+        except Exception as exc:
+            errors.append(f"Neon sync failed: {exc}")
+
+    # ── Supabase ──────────────────────────────────────────────────────
+    sb_url = cfg.get("supabase_url", "").strip()
+    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
+    if sb_url and sb_key:
+        try:
+            from supabase import create_client  # type: ignore
+            client = create_client(sb_url, sb_key)
+            for rec in records:
+                row = {
+                    "sku": rec.get("sku"), "item_name": rec.get("item_name"),
+                    "category": rec.get("category"), "price": rec.get("price"),
+                    "stock_left": rec.get("stock_left"), "status": rec.get("status"),
+                    "image_url": rec.get("image_url"),
+                }
+                existing = client.table("inventory").select("sku").eq("sku", row["sku"]).execute()
+                if getattr(existing, "data", None):
+                    client.table("inventory").update(row).eq("sku", row["sku"]).execute()
+                else:
+                    client.table("inventory").insert(row).execute()
+            synced = max(synced, len(records))
+        except Exception as exc:
+            errors.append(f"Supabase sync failed: {exc}")
+
+    return synced, errors
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -799,10 +915,10 @@ if page == "Products":
     st.title("Products")
 
     # ── Status banners ──────────────────────────
-    if not cfg.get("imghippo_api_key"):
+    if not _has_image_host(cfg):
         st.warning(
-            "No Imghippo API key set. Go to **Settings → Image Hosting** to add one. "
-            "Get a free key at [imghippo.com](https://imghippo.com)."
+            "No image hosting key set. Go to **Settings → Image Hosting** to add one. "
+            "Free options: [freeimage.host](https://freeimage.host) or [imghippo.com](https://imghippo.com)."
         )
     _has_cloud_db = cfg.get("neon_connection_string") or (cfg.get("supabase_url") and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key")))
     if not _has_cloud_db:
@@ -849,13 +965,13 @@ if page == "Products":
             else:
                 image_url = "N/A"
                 if p_image:
-                    if not cfg.get("imghippo_api_key"):
-                        st.warning("Image skipped — add an Imghippo API key in Settings first.")
+                    if not _has_image_host(cfg):
+                        st.warning("Image skipped — add an image hosting key in Settings first.")
                     else:
                         with st.spinner("Uploading image..."):
                             try:
-                                image_url = upload_to_imghippo(
-                                    p_image.read(), cfg["imghippo_api_key"], name=p_name.strip()
+                                image_url = upload_image(
+                                    p_image.read(), cfg, name=p_name.strip()
                                 )
                             except Exception as _img_err:
                                 st.error(f"Image upload failed: {_img_err}")
@@ -983,11 +1099,11 @@ if page == "Products":
             _img_uploaded = 0
             for _pbr in _pb_rows:
                 _image_url = "N/A"
-                if _pbr["img"] and cfg.get("imghippo_api_key"):
+                if _pbr["img"] and _has_image_host(cfg):
                     try:
                         _pbr["img"].seek(0)
-                        _image_url = upload_to_imghippo(
-                            _pbr["img"].read(), cfg["imghippo_api_key"], name=_pbr["name"]
+                        _image_url = upload_image(
+                            _pbr["img"].read(), cfg, name=_pbr["name"]
                         )
                         _img_uploaded += 1
                     except Exception:
@@ -1071,8 +1187,8 @@ if page == "Products":
             # ── Replace Images ───────────────────────────────────────
             st.divider()
             with st.expander("Replace product images", expanded=False):
-                if not cfg.get("imghippo_api_key"):
-                    st.warning("Add an Imghippo API key in Settings → Image Hosting to upload images.")
+                if not _has_image_host(cfg):
+                    st.warning("Add an image hosting key in Settings → Image Hosting to upload images.")
                 else:
                     for _rp in products:
                         _rp_sku = _rp.get("sku", "")
@@ -1102,8 +1218,8 @@ if page == "Products":
                                 with st.spinner("Uploading…"):
                                     try:
                                         _rp_file.seek(0)
-                                        _rp_new_url = upload_to_imghippo(
-                                            _rp_file.read(), cfg["imghippo_api_key"],
+                                        _rp_new_url = upload_image(
+                                            _rp_file.read(), cfg,
                                             name=_rp.get("item_name",""),
                                         )
                                         _rp_upd = dict(_rp)
@@ -1180,11 +1296,11 @@ if page == "Products":
                     st.markdown(f"**{prod['item_name']}** <code style='font-size:11px;background:#f4f4f5;padding:2px 8px;border-radius:12px;color:#555;'>{prod['sku']}</code>{img_badge}", unsafe_allow_html=True)
                     st.caption(f"{prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
                     _up = st.file_uploader("Replace image", type=["jpg","jpeg","png","webp"], key=f"reup_{prod['sku']}_{i}", label_visibility="collapsed")
-                    if _up and cfg.get("imghippo_api_key"):
+                    if _up and _has_image_host(cfg):
                         if st.button("Upload image", key=f"upbtn_{prod['sku']}_{i}"):
                             with st.spinner("Uploading..."):
                                 try:
-                                    _new_url = upload_to_imghippo(_up.read(), cfg["imghippo_api_key"], name=prod["item_name"])
+                                    _new_url = upload_image(_up.read(), cfg, name=prod["item_name"])
                                     prod["image_url"] = _new_url
                                     save_product_to_db(prod, cfg)
                                     _cfg_prods = [dict(p) for p in cfg.get("products", [])]
@@ -1267,12 +1383,12 @@ elif page == "Inventory":
     _sync_targets = ["SQLite"]
     if _has_neon:   _sync_targets.append("Neon")
     if _has_supabase: _sync_targets.append("Supabase")
-    st.caption(f"Reading from: **{_source_label}** · Writing to: **{' + '.join(_sync_targets)}**")
 
     _inv_name_map = dict(zip(inv_df["sku"], inv_df["item_name"])) if not inv_df.empty and "item_name" in inv_df.columns else {}
 
     # ── Inventory Overview ────────────────────────────────────────────
     if not inv_df.empty and "stock_left" in inv_df.columns:
+        st.caption(f"Reading from: **{_source_label}** · Writing to: **{' + '.join(_sync_targets)}**")
         _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
         _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
         _ov_c1.metric("Products",         len(inv_df))
@@ -1406,7 +1522,6 @@ elif page == "Inventory":
     # ══ ADD PRODUCTS (Bulk Add with Stock) ══════════
     with inv_tab_add:
         st.subheader("Add Products to Inventory")
-        st.caption(f"Add products with initial stock. Synced to: **{' + '.join(_sync_targets)}**")
 
         # ── Row state ────────────────────────────────────────────────
         if "ia_ids" not in st.session_state:
@@ -1519,11 +1634,11 @@ elif page == "Inventory":
             _ia_imgs_uploaded = 0
             for _iar in _ia_rows:
                 _ia_image_url = "N/A"
-                if _iar["img"] and cfg.get("imghippo_api_key"):
+                if _iar["img"] and _has_image_host(cfg):
                     try:
                         _iar["img"].seek(0)
-                        _ia_image_url = upload_to_imghippo(
-                            _iar["img"].read(), cfg["imghippo_api_key"], name=_iar["name"]
+                        _ia_image_url = upload_image(
+                            _iar["img"].read(), cfg, name=_iar["name"]
                         )
                         _ia_imgs_uploaded += 1
                     except Exception:
@@ -1560,7 +1675,7 @@ elif page == "Inventory":
             st.info("Add products first.")
         else:
             st.subheader("Bulk Edit Products")
-            st.caption(f"Edit any field inline, then Save All. Synced to: **{' + '.join(_sync_targets)}**")
+            st.caption("Edit any field inline, then click Save All.")
             _ibe_cols = ["sku", "item_name", "category", "price", "stock_left", "image_url"]
             _ibe_show = [c for c in _ibe_cols if c in inv_df.columns]
             _ibe_df   = inv_df[_ibe_show].copy()
@@ -1610,8 +1725,8 @@ elif page == "Inventory":
             # ── Replace Images ───────────────────────────────────────
             st.divider()
             with st.expander("Replace product images", expanded=False):
-                if not cfg.get("imghippo_api_key"):
-                    st.warning("Add an Imghippo API key in Settings → Image Hosting to upload images.")
+                if not _has_image_host(cfg):
+                    st.warning("Add an image hosting key in Settings → Image Hosting to upload images.")
                 else:
                     for _, _irp_row in inv_df.iterrows():
                         _irp = _irp_row.to_dict()
@@ -1642,8 +1757,8 @@ elif page == "Inventory":
                                 with st.spinner("Uploading…"):
                                     try:
                                         _irp_file.seek(0)
-                                        _irp_new_url = upload_to_imghippo(
-                                            _irp_file.read(), cfg["imghippo_api_key"],
+                                        _irp_new_url = upload_image(
+                                            _irp_file.read(), cfg,
                                             name=_irp.get("item_name",""),
                                         )
                                         _irp_upd = dict(_irp)
@@ -1739,8 +1854,8 @@ elif page == "Inventory":
                         with st.spinner("Uploading…"):
                             try:
                                 _ei_repl_file.seek(0)
-                                _ei_new_url = upload_to_imghippo(
-                                    _ei_repl_file.read(), cfg["imghippo_api_key"],
+                                _ei_new_url = upload_image(
+                                    _ei_repl_file.read(), cfg,
                                     name=_edit_row.get("item_name",""),
                                 )
                                 _ei_upd = dict(_edit_row)
@@ -1800,6 +1915,19 @@ elif page == "Settings":
     st.title("Settings")
     st.caption("Settings are saved to config.json in the app folder and load automatically on every visit.")
 
+    # ── One-time toast reminder ──────────────────
+    if "_settings_toast_shown" not in st.session_state:
+        st.toast("Tip: after testing your keys, scroll to the bottom and click **Save Settings**!", icon="💾")
+        st.session_state["_settings_toast_shown"] = True
+
+    # ── VEI account note ─────────────────────────
+    st.info(
+        "**VEI Firms:** You must use your VEI account for all settings below. "
+        "Click **Getting Started** (below) to set everything up step by step. "
+        "Your firm coordinator may have already set up a shared Gmail account and firm name — ask them for the details. "
+        "All other keys (image hosting, database) are personal free accounts you create yourself."
+    )
+
     with st.expander("Getting Started — how to set everything up", expanded=False):
         st.markdown("""
 ### 1. Gmail SMTP (required for sending emails)
@@ -1810,11 +1938,18 @@ elif page == "Settings":
 
 ---
 
-### 2. Imghippo — free image hosting (required for product images in emails)
+### 2. Image Hosting — free (required for product images in emails)
+Choose **one** of these free services:
+
+**Freeimage.host** (recommended):
+1. Go to [freeimage.host](https://freeimage.host) → **Sign up**
+2. Log in → click the **menu icon (☰)** in the top-left → click **API**
+3. Copy your API key and paste it below under **Image Hosting → Freeimage.host**
+
+**Imghippo** (alternative):
 1. Go to [imghippo.com](https://imghippo.com) → **Sign Up** (free, no credit card, 500 MB storage)
-2. Verify your email address
-3. Go to **Settings → API Keys** → click **Generate API Key**
-4. Copy the key and paste it below under **Image Hosting**
+2. Verify your email address → go to **Settings → API Keys** → click **Generate API Key**
+3. Copy the key and paste it below under **Image Hosting → Imghippo**
 
 ---
 
@@ -1899,71 +2034,155 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             help="The 16-character app password from your Google account",
         )
 
-    # ── Image Hosting (Imghippo) ─────────────────
+    # ── Image Hosting ─────────────────────────────
     st.divider()
     st.subheader("Image Hosting")
-    st.caption("Imghippo is a free image hosting service (500 MB free storage). Product images are uploaded here automatically.")
+    st.caption("Choose one free image hosting service. Product images are uploaded automatically.")
 
-    with st.expander("How to get an Imghippo API key", expanded=False):
-        st.markdown("""
+    _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
+
+    with _img_tab_fi:
+        with st.expander("How to get a Freeimage.host API key", expanded=False):
+            st.markdown("""
+1. Go to [freeimage.host](https://freeimage.host) and click **Sign up** (free, no credit card)
+2. Verify your email, then log in
+3. Click the **menu icon** (☰) in the top-left corner
+4. Click **API** in the menu
+5. Your API key is shown on that page — copy it
+6. Paste it in the field below and click **Save Settings**
+            """)
+
+        _fi_l, _fi_r = st.columns([3, 1])
+        with _fi_l:
+            inp_freeimage_key = st.text_input(
+                "Freeimage.host API Key",
+                value=cfg.get("freeimage_api_key", ""),
+                type="password",
+                placeholder="6d207e02198a847aa98d0a2a901485a5",
+                help="freeimage.host → Menu → API → copy your key",
+                key="inp_freeimage_key",
+            )
+        with _fi_r:
+            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+            if st.button("Test Key", use_container_width=True, key="btn_test_fi", disabled=not inp_freeimage_key):
+                try:
+                    import requests  # type: ignore
+                    _test_path = Path(__file__).parent / "TESTPRODUCT.png"
+                    if _test_path.exists():
+                        _fi_raw = _test_path.read_bytes()
+                    else:
+                        import base64 as _b64
+                        _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                    _fi_resp = requests.post(
+                        "https://freeimage.host/api/1/upload",
+                        data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
+                        files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
+                        timeout=20,
+                    )
+                    _fi_body = _fi_resp.json() if _fi_resp.content else {}
+                    if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
+                        st.success("Freeimage.host key works!")
+                    else:
+                        st.error(f"Error: {_fi_body.get('status_txt', _fi_resp.text[:150])}")
+                except Exception as exc:
+                    st.error(f"Test failed: {exc}")
+
+    with _img_tab_ih:
+        with st.expander("How to get an Imghippo API key", expanded=False):
+            st.markdown("""
 1. Go to [imghippo.com](https://imghippo.com) and click **Sign Up** (free, no credit card)
 2. Verify your email address
 3. Go to **Settings → API Keys** in your dashboard
 4. Click **Generate API Key** → copy it
 5. Paste it in the field below and click **Save Settings**
-        """)
+            """)
 
-    _ib_l, _ib_r = st.columns([3, 1])
-    with _ib_l:
-        inp_imgbb_key = st.text_input(
-            "Imghippo API Key",
-            value=cfg.get("imghippo_api_key", ""),
-            type="password",
-            placeholder="your_imghippo_api_key",
-            help="imghippo.com → Settings → API Keys → Generate",
-            key="inp_imgbb_key",
-        )
-    with _ib_r:
-        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-        if st.button("Test Key", use_container_width=True, key="btn_test_imgbb", disabled=not inp_imgbb_key):
-            try:
-                import requests  # type: ignore
-                _test_path = Path(__file__).parent / "TESTPRODUCT.png"
-                if _test_path.exists():
-                    _raw = _test_path.read_bytes()
-                else:
-                    # Minimal valid JPEG bytes as fallback
-                    import base64 as _b64
-                    _raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                _resp = requests.post(
-                    "https://api.imghippo.com/v1/upload",
-                    data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
-                    files={"file": ("test.jpg", io.BytesIO(_raw), "image/jpeg")},
-                    timeout=20,
-                )
-                _body = _resp.json() if _resp.content else {}
-                if _resp.status_code == 200 and _body.get("success"):
-                    st.success("Imghippo key works!")
-                elif _resp.status_code == 401:
-                    st.error("Invalid API key — check for typos.")
-                elif _resp.status_code == 429:
-                    st.warning("Rate limited — wait a minute and try again.")
-                else:
-                    st.error(f"Error {_resp.status_code}: {_body.get('message', _resp.text[:150])}")
-            except Exception as exc:
-                st.error(f"Test failed: {exc}")
+        _ib_l, _ib_r = st.columns([3, 1])
+        with _ib_l:
+            inp_imgbb_key = st.text_input(
+                "Imghippo API Key",
+                value=cfg.get("imghippo_api_key", ""),
+                type="password",
+                placeholder="your_imghippo_api_key",
+                help="imghippo.com → Settings → API Keys → Generate",
+                key="inp_imgbb_key",
+            )
+        with _ib_r:
+            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+            if st.button("Test Key", use_container_width=True, key="btn_test_imgbb", disabled=not inp_imgbb_key):
+                try:
+                    import requests  # type: ignore
+                    _test_path = Path(__file__).parent / "TESTPRODUCT.png"
+                    if _test_path.exists():
+                        _raw = _test_path.read_bytes()
+                    else:
+                        import base64 as _b64
+                        _raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                    _resp = requests.post(
+                        "https://api.imghippo.com/v1/upload",
+                        data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
+                        files={"file": ("test.jpg", io.BytesIO(_raw), "image/jpeg")},
+                        timeout=20,
+                    )
+                    _body = _resp.json() if _resp.content else {}
+                    if _resp.status_code == 200 and _body.get("success"):
+                        st.success("Imghippo key works!")
+                    elif _resp.status_code == 401:
+                        st.error("Invalid API key — check for typos.")
+                    elif _resp.status_code == 429:
+                        st.warning("Rate limited — wait a minute and try again.")
+                    else:
+                        st.error(f"Error {_resp.status_code}: {_body.get('message', _resp.text[:150])}")
+                except Exception as exc:
+                    st.error(f"Test failed: {exc}")
 
     # ── Database Connections ────────────────────
     st.divider()
     st.subheader("Database Connections")
     st.caption(
         "Connect Supabase or Neon to persist products and inventory. "
-        "Click **Setup Tables** to create the schema automatically."
+        "Click **Setup Tables** to create the schema automatically. "
+        "If a cloud database goes offline, all writes fall back to local SQLite automatically. "
+        "Use **Sync Local → Cloud** below to push your local data back up once the cloud is reachable again."
     )
+
+    # ── Offline fallback + sync notice ──────────
+    _cfg_now = st.session_state.cfg
+    _cloud_configured = bool(
+        _cfg_now.get("neon_connection_string") or
+        (_cfg_now.get("supabase_url") and (_cfg_now.get("supabase_service_role_key") or _cfg_now.get("supabase_key")))
+    )
+    if _cloud_configured:
+        _sync_col1, _sync_col2 = st.columns([3, 1])
+        with _sync_col1:
+            st.info(
+                "**Cloud database configured.** Writes go to both your cloud database and local SQLite simultaneously. "
+                "If your cloud database is temporarily unreachable, writes continue to local SQLite automatically. "
+                "Use **Sync Local → Cloud** to push any locally-saved data up to the cloud."
+            )
+        with _sync_col2:
+            st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+            if st.button("Sync Local → Cloud", use_container_width=True, key="btn_sync_sqlite"):
+                with st.spinner("Syncing local SQLite data to cloud…"):
+                    _synced, _sync_errs = sync_sqlite_to_cloud(st.session_state.cfg)
+                if _sync_errs:
+                    st.warning(f"Synced {_synced} rows with issues: " + "; ".join(_sync_errs))
+                else:
+                    st.success(f"Synced {_synced} rows to cloud successfully.")
 
     db_tab_sb, db_tab_neon = st.tabs(["Supabase", "Neon"])
 
     with db_tab_sb:
+        with st.expander("Where do I find my Supabase credentials?", expanded=False):
+            st.markdown("""
+1. Open [supabase.com](https://supabase.com) and select your project.
+2. Go to **Settings → API** in the left sidebar.
+3. Copy the **Project URL** (e.g. `https://xxxx.supabase.co`) → paste into **Project URL** below.
+4. Copy the **Anon key** (starts with `eyJ…`) → paste into **Anon Key**.
+5. Copy the **Service role key** (starts with `eyJ…`) → paste into **Service Role Key**. Keep this secret!
+6. For **Personal Access Token**: go to **supabase.com → Account → Access Tokens** → click **Generate new token** → paste into **Personal Access Token**.
+            """)
+
         inp_sb_url = st.text_input(
             "Project URL",
             value=cfg.get("supabase_url", ""),
@@ -2078,9 +2297,10 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with st.expander("Where do I find the Neon connection string?", expanded=False):
             st.markdown("""
 1. Open your **Neon Console** and select your project.
-2. Click **Dashboard** (or **Connection Details**) in the left sidebar.
-3. Under **Connection string**, make sure the dropdown says **psql** or **postgresql**.
-4. Copy the string — it looks like:
+2. Click **Dashboard** in the left sidebar.
+3. Click the **Connect** button in your dashboard, then press **Copy** next to the connection string and paste it in the field below — you're done!
+4. Under **Connection string**, make sure the dropdown says **psql** or **postgresql**.
+5. Copy the string — it looks like:
    `postgresql://neondb_owner:[password]@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require`
 
 **Common mistake:** Do NOT paste the REST API URL (`https://ep-…apirest…`).
@@ -2131,11 +2351,18 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             ):
                 try:
                     import psycopg2  # type: ignore
+                except ImportError:
+                    import subprocess, sys
+                    with st.spinner("Installing psycopg2-binary…"):
+                        subprocess.check_call(
+                            [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                    import psycopg2  # type: ignore
+                try:
                     with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
                         pass
                     st.success("Connected to Neon successfully.")
-                except ImportError:
-                    st.error("Run: pip install psycopg2-binary")
                 except Exception as exc:
                     st.error(f"Connection failed: {exc}")
 
@@ -2149,14 +2376,21 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             ):
                 try:
                     import psycopg2  # type: ignore
+                except ImportError:
+                    import subprocess, sys
+                    with st.spinner("Installing psycopg2-binary…"):
+                        subprocess.check_call(
+                            [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                    import psycopg2  # type: ignore
+                try:
                     _run_sql = st.session_state.get("neon_sql_editor", SETUP_SQL)
                     with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
                         with conn.cursor() as cur:
                             cur.execute(_run_sql)
                         conn.commit()
                     st.success("Tables created successfully (or already exist).")
-                except ImportError:
-                    st.error("Run: pip install psycopg2-binary")
                 except Exception as exc:
                     st.error(f"Setup failed: {exc}")
 
@@ -2173,6 +2407,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                 "subject":                  inp_subject.strip(),
                 "smtp_email":               inp_smtp_email.strip(),
                 "smtp_password":            re.sub(r"\s+", "", inp_smtp_pass.strip()),
+                "freeimage_api_key":         inp_freeimage_key.strip(),
                 "imghippo_api_key":         inp_imgbb_key.strip(),
                 "supabase_url":             inp_sb_url.strip(),
                 "supabase_pat":             inp_sb_pat.strip(),
