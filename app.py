@@ -839,12 +839,6 @@ def split_products(raw: str) -> list[str]:
     return [text]
 
 
-def get_fuzzy_suggestions(pname: str, catalog_names: list[str], cutoff=0.5) -> list[str]:
-    import difflib
-    if not catalog_names: return []
-    return difflib.get_close_matches(pname, catalog_names, n=3, cutoff=cutoff)
-
-
 def validate_email(e: str) -> bool:
     return bool(e and "@" in e and "." in e.split("@")[-1])
 
@@ -2673,16 +2667,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     unsafe_allow_html=True,
                 )
                 if unmatched:
-                    for up in unmatched:
-                        sugs = get_fuzzy_suggestions(up, _cat_names)
-                        if sugs:
-                            _cols = st.columns([1] + [2]*len(sugs) + [4])
-                            _cols[0].caption(f"Fix '{up}':")
-                            for s_idx, sug in enumerate(sugs):
-                                if _cols[s_idx+1].button(sug, key=f"fix_{i}_{up}_{s_idx}", use_container_width=True, type="secondary"):
-                                    new_p_list = [sug if x == up else x for x in prods]
-                                    st.session_state.queue[i]["products"] = " | ".join(new_p_list)
-                                    st.rerun()
+                    st.caption(f"⚠️ Unmatched: {', '.join(unmatched)}")
             with row_r:
                 if st.button("Delete", key=f"del_{i}", use_container_width=True):
                     with st.spinner("Deleting..."):
@@ -2799,11 +2784,6 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     for _spname in split_products(_sorder.get("products", "")):
                         _spl = _spname.lower().strip()
                         _matched_sku = _name_to_sku.get(_spl)
-                        if not _matched_sku:
-                            for _cn, _csku in _name_to_sku.items():
-                                if _spl in _cn or _cn in _spl:
-                                    _matched_sku = _csku
-                                    break
                         if _matched_sku:
                             _deductions[_matched_sku] = _deductions.get(_matched_sku, 0) + 1
             if _deductions:
