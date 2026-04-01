@@ -37,6 +37,12 @@ st.markdown("""
 .stButton > button:hover {
     border-color: #4F46E5 !important;
     color: #4F46E5 !important;
+    transform: translateY(-1.5px);
+    box-shadow: 0 6px 12px rgba(79, 70, 229, 0.15);
+    transition: all 0.2s ease;
+}
+.stButton > button:active {
+    transform: translateY(0px);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -75,6 +81,9 @@ def _init_sqlite():
             recipient_email TEXT NOT NULL,
             order_number   TEXT NOT NULL,
             products_list  TEXT NOT NULL,
+            subtotal       REAL NOT NULL DEFAULT 0.0,
+            tax            REAL NOT NULL DEFAULT 0.0,
+            shipping       REAL NOT NULL DEFAULT 0.0,
             total_cost     REAL NOT NULL DEFAULT 0.0,
             timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -136,6 +145,9 @@ CREATE TABLE IF NOT EXISTS outbound_logs (
     recipient_email TEXT           NOT NULL,
     order_number    TEXT           NOT NULL,
     products_list   TEXT           NOT NULL,
+    subtotal        NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
+    tax             NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
+    shipping        NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     total_cost      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
@@ -679,15 +691,18 @@ def save_outbound_log(log: dict, cfg: dict):
         "email": log.get("email", ""),
         "order": log.get("order_number", "N/A"),
         "prods": log.get("products", ""),
+        "sub": float(log.get("subtotal", 0.0) or 0.0),
+        "tax": float(log.get("tax", 0.0) or 0.0),
+        "ship": float(log.get("shipping", 0.0) or 0.0),
         "cost": float(log.get("total_cost", 0.0) or 0.0)
     }
     # SQLite
     try:
         conn = _get_sqlite_conn()
         conn.execute("""
-            INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, total_cost)
-            VALUES (?, ?, ?, ?, ?)
-        """, (row["name"], row["email"], row["order"], row["prods"], row["cost"]))
+            INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, subtotal, tax, shipping, total_cost)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["name"], row["email"], row["order"], row["prods"], row["sub"], row["tax"], row["ship"], row["cost"]))
         conn.commit()
         conn.close()
     except Exception: pass
@@ -699,9 +714,9 @@ def save_outbound_log(log: dict, cfg: dict):
             with conn_pg:
                 with conn_pg.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, total_cost)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (row["name"], row["email"], row["order"], row["prods"], row["cost"]))
+                        INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, subtotal, tax, shipping, total_cost)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (row["name"], row["email"], row["order"], row["prods"], row["sub"], row["tax"], row["ship"], row["cost"]))
             conn_pg.close()
         except Exception: pass
 
@@ -717,6 +732,9 @@ def save_outbound_log(log: dict, cfg: dict):
                 "recipient_email": row["email"],
                 "order_number": row["order"],
                 "products_list": row["prods"],
+                "subtotal": row["sub"],
+                "tax": row["tax"],
+                "shipping": row["ship"],
                 "total_cost": row["cost"]
             }).execute()
         except Exception: pass
@@ -819,7 +837,8 @@ def validate_email(e: str) -> bool:
     return bool(e and "@" in e and "." in e.split("@")[-1])
 
 
-def add_to_queue(name: str, email: str, order_number: str, products: str, total_cost: float = 0.0) -> bool:
+def add_to_queue(name: str, email: str, order_number: str, products: str, 
+                 sub: float = 0.0, tax: float = 0.0, ship: float = 0.0, total: float = 0.0) -> bool:
     if not name.strip():
         st.error("Name is required.")
         return False
@@ -831,7 +850,10 @@ def add_to_queue(name: str, email: str, order_number: str, products: str, total_
         "email":         email.strip(),
         "order_number":  order_number.strip() or "N/A",
         "products":      products.strip(),
-        "total_cost":    round(float(total_cost), 2)
+        "subtotal":      round(float(sub), 2),
+        "tax":           round(float(tax), 2),
+        "shipping":      round(float(ship), 2),
+        "total_cost":    round(float(total), 2)
     })
     return True
 
@@ -920,10 +942,22 @@ _DEFAULT_EMAIL_TEMPLATE = """\
             <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:28px;">
               {{items_html}}
             </table>
-            <table cellpadding="0" cellspacing="0" style="width:100%;border-top:2px solid #f4f4f5;padding-top:16px;margin-bottom:24px;">
+            <table cellpadding="0" cellspacing="0" style="width:100%;border-top:2px solid #f4f4f5;padding-top:16px;margin-bottom:8px;">
               <tr>
-                <td style="font-size:14px;color:#888;font-weight:600;text-transform:uppercase;">Total Amount</td>
-                <td align="right" style="font-size:20px;font-weight:700;color:#18181b;">${{total_cost}}</td>
+                <td style="font-size:13px;color:#666;">Subtotal</td>
+                <td align="right" style="font-size:13px;color:#111;">${{subtotal}}</td>
+              </tr>
+              <tr>
+                <td style="font-size:13px;color:#666;padding-top:4px;">Tax</td>
+                <td align="right" style="font-size:13px;color:#111;padding-top:4px;">${{tax}}</td>
+              </tr>
+              <tr>
+                <td style="font-size:13px;color:#666;padding-top:4px;">Shipping</td>
+                <td align="right" style="font-size:13px;color:#111;padding-top:4px;">${{shipping}}</td>
+              </tr>
+              <tr>
+                <td style="font-size:14px;color:#888;font-weight:600;text-transform:uppercase;padding-top:12px;">Total Amount</td>
+                <td align="right" style="font-size:20px;font-weight:700;color:#18181b;padding-top:12px;">${{total_cost}}</td>
               </tr>
             </table>
             <p style="margin:0;font-size:13px;color:#888;line-height:1.6;">
@@ -952,6 +986,9 @@ def build_html(
     name      = order.get("name", "Customer")
     order_num = order.get("order_number", "N/A")
     prods     = split_products(order.get("products", ""))
+    sub       = f"{float(order.get('subtotal', 0.0)):.2f}"
+    tax       = f"{float(order.get('tax', 0.0)):.2f}"
+    ship      = f"{float(order.get('shipping', 0.0)):.2f}"
     cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     items     = _build_items_html(prods, products_lookup)
     tpl = (template.strip() if template and template.strip() else _DEFAULT_EMAIL_TEMPLATE)
@@ -961,6 +998,9 @@ def build_html(
         .replace("{{order_number}}", order_num)
         .replace("{{from_name}}", from_name)
         .replace("{{items_html}}", items)
+        .replace("{{subtotal}}", sub)
+        .replace("{{tax}}", tax)
+        .replace("{{shipping}}", ship)
         .replace("{{total_cost}}", cost)
     )
 
@@ -969,12 +1009,18 @@ def build_text(order: dict, from_name: str) -> str:
     name      = order.get("name", "Customer")
     order_num = order.get("order_number", "N/A")
     prods     = split_products(order.get("products", ""))
+    sub       = f"{float(order.get('subtotal', 0.0)):.2f}"
+    tax       = f"{float(order.get('tax', 0.0)):.2f}"
+    ship      = f"{float(order.get('shipping', 0.0)):.2f}"
     cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     lines     = "\n".join(f"  - {p}" for p in prods) if prods else "  - N/A"
     return (
         f"Hi {name},\n\n"
         f"Thank you for your order.\n\n"
         f"Order Number: #{order_num}\n"
+        f"Subtotal: ${sub}\n"
+        f"Tax: ${tax}\n"
+        f"Shipping: ${ship}\n"
         f"Total Amount: ${cost}\n\n"
         f"Items Ordered:\n{lines}\n\n"
         f"Questions? Reply to this email.\n\n"
@@ -987,18 +1033,83 @@ def build_text(order: dict, from_name: str) -> str:
 # ─────────────────────────────────────────────
 
 _ALIASES = {
-    "name":         ["name", "full_name", "customer_name", "customer", "first_name"],
-    "email":        ["email", "email_address", "e_mail", "mail"],
+    "name":         ["name", "full_name", "customer_name", "customer", "first_name", "billing_name"],
+    "email":        ["email", "email_address", "e_mail", "mail", "customer_email"],
     "order_number": ["order_number", "order_no", "order_id", "order",
                      "orderid", "ordernumber", "transaction_no", "transaction"],
     "products":     ["products", "items", "product_list", "product",
                      "item", "description", "ordered_items"],
+    "subtotal":     ["subtotal", "sub_total", "price_subtotal", "sub_total_amount"],
+    "tax":          ["tax", "tax_amount", "taxes", "vat"],
+    "shipping":     ["shipping", "shipping_cost", "freight", "delivery"],
     "total_cost":   ["total_cost", "total", "cost", "total_price", "amount", "price", "order_total"],
 }
 
 
 def _norm(h: str) -> str:
-    return h.strip().lower().replace(" ", "_").replace("-", "_").replace("#", "").replace(".", "_")
+    return h.strip().lower().replace(" ", "_").replace("-", "_").replace("#", "").replace(".", "_").replace("/", "_").replace("(", "").replace(")", "")
+
+
+def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
+    import pandas as pd
+    try:
+        import openpyxl
+    except ImportError:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    warns = []
+    try:
+        xl = pd.ExcelFile(io.BytesIO(file_bytes))
+        sheets = xl.sheet_names
+        # Map sheets (some might have slight name variations)
+        tx_sheet = next((s for s in sheets if "transaction" in s.lower() and "item" not in s.lower()), None)
+        item_sheet = next((s for s in sheets if "transaction" in s.lower() and "item" in s.lower()), None)
+        
+        if not tx_sheet or not item_sheet:
+            return [], [f"Excel file missing required sheets. Found: {sheets}"]
+        
+        df_tx = pd.read_excel(xl, sheet_name=tx_sheet)
+        df_items = pd.read_excel(xl, sheet_name=item_sheet)
+        
+        # Link products to transactions
+        tx_items = {}
+        # Normalize columns for the items sheet
+        df_items.columns = [_norm(c) for c in df_items.columns]
+        for _, obj in df_items.iterrows():
+            t_no = str(obj.get('transaction_no', '')).strip()
+            item = str(obj.get('item_name', '')).strip()
+            if t_no:
+                if t_no not in tx_items: tx_items[t_no] = []
+                tx_items[t_no].append(item)
+        
+        rows = []
+        # Normalize columns for the transactions sheet
+        df_tx.columns = [_norm(c) for c in df_tx.columns]
+        for _, tx in df_tx.iterrows():
+            t_no  = str(tx.get('transaction_no', '')).strip()
+            email = str(tx.get('customer_email', '')).strip()
+            name  = str(tx.get('billing_name', '')).strip() or str(tx.get('shipping_name', 'Customer')).strip()
+            
+            if not t_no or not email or not validate_email(email):
+                continue
+            
+            # Combine items
+            items_list = " | ".join(tx_items.get(t_no, ["N/A"]))
+            
+            rows.append({
+                "name":          name,
+                "email":         email,
+                "order_number":  t_no,
+                "products":      items_list,
+                "subtotal":      round(float(tx.get('subtotal', 0.0) or 0.0), 2),
+                "tax":           round(float(tx.get('tax', 0.0) or 0.0), 2),
+                "shipping":      round(float(tx.get('shipping', 0.0) or 0.0), 2),
+                "total_cost":    round(float(tx.get('total', 0.0) or 0.0), 2),
+            })
+        return rows, warns
+    except Exception as e:
+        return [], [f"Error reading Excel: {e}"]
 
 
 def _map_headers(headers: list[str]) -> dict[str, str]:
@@ -1029,18 +1140,35 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
     hmap = _map_headers(headers)
     if "email" not in hmap.values():
         return [], [f"No email column found. Detected headers: {headers}"]
+    if "products" not in hmap.values():
+        return [], [f"No products column found (items ordered). Detected headers: {headers}"]
+    
     rows = []
+    required_keys = ["name", "email", "order_number", "products", "total_cost"]
     for i, row in enumerate(reader, start=2):
         mapped = {c: (row.get(r) or "").strip() for r, c in hmap.items()}
         email  = mapped.get("email", "")
-        if not validate_email(email):
-            warns.append(f"Row {i}: skipped — bad email '{email}'")
+        if not email or not validate_email(email):
+            warns.append(f"Row {i}: skipped — invalid or missing email")
             continue
+        
+        # Validation for required fields
+        is_missing = False
+        for rk in required_keys:
+            if not mapped.get(rk):
+                warns.append(f"Row {i}: skipped — missing required field '{rk}'")
+                is_missing = True
+                break
+        if is_missing: continue
+
         rows.append({
-            "name":          mapped.get("name", "Customer"),
+            "name":          mapped.get("name", ""),
             "email":         email,
-            "order_number":  mapped.get("order_number", "N/A"),
+            "order_number":  mapped.get("order_number", ""),
             "products":      mapped.get("products", ""),
+            "subtotal":      float(mapped.get("subtotal", 0.0) or 0.0),
+            "tax":           float(mapped.get("tax", 0.0) or 0.0),
+            "shipping":      float(mapped.get("shipping", 0.0) or 0.0),
             "total_cost":    float(mapped.get("total_cost", 0.0) or 0.0),
         })
     if not rows:
@@ -1512,11 +1640,14 @@ elif page == "Inventory":
                     "recipient_email": "Email",
                     "order_number": "Order #",
                     "products_list": "Products",
-                    "total_cost": "Cost ($)",
+                    "subtotal": "Sub ($)",
+                    "tax": "Tax ($)",
+                    "shipping": "Ship ($)",
+                    "total_cost": "Total ($)",
                     "timestamp": "Sent At"
                 })
             
-            cols = ["Sent At", "Name", "Email", "Order #", "Products", "Cost ($)"]
+            cols = ["Sent At", "Name", "Email", "Order #", "Products", "Sub ($)", "Tax ($)", "Ship ($)", "Total ($)"]
             display_df = display_df[[c for c in cols if c in display_df.columns]]
             
             st.dataframe(
@@ -2151,8 +2282,8 @@ elif page == "Email Sender":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_single, tab_bulk, tab_csv, tab_template = st.tabs(
-        ["Single Entry", "Bulk Entry", "CSV Import", "Email Template"]
+    tab_single, tab_bulk, tab_csv, tab_excel, tab_template = st.tabs(
+        ["Single Entry", "Bulk Entry", "CSV Import", "Excel Import", "Email Template"]
     )
 
     # ─ Single ───────────────────────────────────
@@ -2160,17 +2291,23 @@ elif page == "Email Sender":
         st.markdown("#### Add one order")
         c1, c2, c3 = st.columns(3)
         with c1:
-            s_name  = st.text_input("Name",    key="s_name",  placeholder="Jane Smith")
-            s_email = st.text_input("Email",   key="s_email", placeholder="jane@example.com")
+            s_name  = st.text_input("Name *",    key="s_name",  placeholder="Jane Smith")
+            s_email = st.text_input("Email *",   key="s_email", placeholder="jane@example.com")
         with c2:
-            s_order = st.text_input("Order #", key="s_order", placeholder="ORD-1001")
-            s_cost  = st.number_input("Total Cost ($)", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
+            s_order = st.text_input("Order # *", key="s_order", placeholder="ORD-1001")
+            s_sub   = st.number_input("Subtotal ($)", key="s_sub", min_value=0.0, step=0.01, format="%.2f")
+            s_tax   = st.number_input("Tax ($)",      key="s_tax", min_value=0.0, step=0.01, format="%.2f")
         with c3:
-            s_prods = st.text_area(
-                "Products", key="s_prods", height=108,
-                placeholder="Blue T-Shirt\nBlack Jeans\nRunning Shoes",
-                help="One product per line, or separate with | or ;",
-            )
+            s_ship  = st.number_input("Shipping ($)", key="s_ship", min_value=0.0, step=0.01, format="%.2f")
+            s_cost  = st.number_input("Total Cost ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
+            if s_cost == 0 and s_sub > 0:
+                st.caption(f"Suggested Total: ${s_sub + s_tax + s_ship:.2f}")
+
+        s_prods = st.text_area(
+            "Products *", key="s_prods", height=108,
+            placeholder="Blue T-Shirt\nBlack Jeans\nRunning Shoes",
+            help="One product per line, or separate with | or ;",
+        )
 
         if s_prods and _catalog_name_lower:
             _s_unmatched = _unmatched_products(s_prods)
@@ -2182,12 +2319,15 @@ elif page == "Email Sender":
                 )
 
         if st.button("Add to Queue", key="single_add", type="primary"):
-            with st.spinner("Adding to queue..."):
-                if add_to_queue(s_name, s_email, s_order, s_prods, s_cost):
-                    st.toast(f"Added {s_name} to queue.", icon="👤")
-                    st.success(f"Added {s_name} to the queue.")
-                    time.sleep(0.5)
-                    st.rerun()
+            if not s_name.strip() or not s_email.strip() or not s_order.strip() or not s_prods.strip() or s_cost <= 0:
+                st.error("All fields marked with * are required.")
+            else:
+                with st.spinner("Adding to queue..."):
+                    if add_to_queue(s_name, s_email, s_order, s_prods, s_sub, s_tax, s_ship, s_cost):
+                        st.toast(f"Added {s_name} to queue.", icon="👤")
+                        st.success(f"Added {s_name} to the queue.")
+                        time.sleep(0.5)
+                        st.rerun()
 
     # ─ Bulk ─────────────────────────────────────
     with tab_bulk:
@@ -2199,6 +2339,9 @@ elif page == "Email Sender":
             "Email":      pd.Series([], dtype=str),
             "Order #":    pd.Series([], dtype=str),
             "Products":   pd.Series([], dtype=str),
+            "Subtotal":   pd.Series([], dtype=float),
+            "Tax":        pd.Series([], dtype=float),
+            "Shipping":   pd.Series([], dtype=float),
             "Total Cost": pd.Series([], dtype=float),
         })
 
@@ -2246,10 +2389,14 @@ elif page == "Email Sender":
                     em = str(row.get("Email",    "")).strip()
                     on = str(row.get("Order #",  "")).strip()
                     pr = str(row.get("Products", "")).strip()
+                    sb = float(row.get("Subtotal", 0.0) or 0.0)
+                    tx = float(row.get("Tax", 0.0) or 0.0)
+                    sh = float(row.get("Shipping", 0.0) or 0.0)
                     co = float(row.get("Total Cost", 0.0) or 0.0)
-                    if not nm or nm == "nan" or not em or em == "nan":
+                    
+                    if not nm or nm == "nan" or not em or em == "nan" or not pr or pr == "nan" or co <= 0:
                         continue
-                    if add_to_queue(nm, em, on, pr, co):
+                    if add_to_queue(nm, em, on, pr, sb, tx, sh, co):
                         added += 1
                 if added:
                     st.toast(f"Added {added} orders to queue.", icon="📋")
@@ -2267,12 +2414,38 @@ elif page == "Email Sender":
                     del st.session_state["bulk_editor"]
                 st.rerun()
 
+    # ─ Excel ────────────────────────────────────
+    with tab_excel:
+        st.markdown("#### Import from VEI Checkout Excel File")
+        st.caption(
+            "Upload an `.xlsx` file from the VEI Checkout system. "
+            "It must contain 'Sales transactions' and 'Sales transaction items' sheets."
+        )
+
+        xl_file = st.file_uploader("Choose an Excel file", type=["xlsx"], key="excel_upload")
+
+        if st.button("Import Excel", type="primary", key="btn_xl_import"):
+            if not xl_file:
+                st.warning("Upload an Excel file first.")
+            else:
+                with st.spinner("Linking transactions and products..."):
+                    rows, warns = parse_excel_file(xl_file.read())
+                    for w in warns:
+                        st.warning(w)
+                    if rows:
+                        st.session_state.queue.extend(rows)
+                        st.toast(f"Imported {len(rows)} orders.", icon="📊")
+                        st.success(f"Imported {len(rows)} orders from Excel.")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error("No valid orders found in the Excel file.")
     # ─ CSV ──────────────────────────────────────
     with tab_csv:
         st.markdown("#### Import from a CSV or TSV file")
         st.caption(
-            "Required column: **email**. "
-            "Optional: **name**, **order_number**, **products**, **total_cost**. "
+            "Required columns: **Name**, **Email**, **Order #**, **Products**, **Total**. "
+            "Optional: **Subtotal**, **Tax**, **Shipping**. "
             "Column names are flexible — most variations are recognised automatically."
         )
 

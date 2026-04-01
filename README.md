@@ -26,6 +26,7 @@ MERIT is a browser-based app built specifically for **Virtual Enterprise Interna
 8. [How databases work (offline fallback + sync)](#8-how-databases-work-offline-fallback--sync)
 9. [Error messages explained](#9-error-messages-explained)
 10. [Frequently asked questions](#10-frequently-asked-questions)
+11. [Excel Import — VEI Checkout](#11-excel-import--vei-checkout)
 
 ---
 
@@ -333,17 +334,33 @@ In the **Adjust Stock** tab, each product has a **±** box. Enter a positive num
 
 ### 7.3 Outbound Information — email tracking
 
-The **Outbound Information** page keeps a history of every email you have successfully sent.
-
-- **Recipient logs:** View the name, email, and order number for every customer you have contacted.
-- **Product tracking:** See exactly which products were included in the email.
-- **Total Cost:** See the total amount of each order.
-- **Inventory effect:** After every send, inventory is reduced for those items. The "Outbound Information" page acts as a ledger for these deductions.
-- **Deduction chart:** In the Email Sender page, a live chart appears after sending a batch, showing exactly how many items were deducted from stock.
+All sent emails are logged in the **Outbound Information** tab within the Inventory page. This provides a detailed audit trail of:
+- **Recipient Details:** Name and email of the customer.
+- **Order Number:** The unique transaction ID.
+- **Ordered Products:** A list of items included in the order.
+- **Price Breakdown:** Detailed tracking of Subtotal, Tax, Shipping, and Total Cost.
+- **Inventory Impact:** Every successfully sent email automatically deducts the respective items from your live inventory.
 
 ---
 
-## 8. How databases work (offline fallback + sync)
+## 8. Excel Import — VEI Checkout
+
+MERIT supports importing order data directly from the **VEI Checkout** system's Excel export.
+
+### 8.1 Format Requirements
+The Excel file (`.xlsx`) must contain two specific sheets:
+1.  **Sales transactions**: Contains customer info (name, email), order number, subtotal, tax, and shipping.
+2.  **Sales transaction items**: Contains the line items (product names) linked by `Transaction no`.
+
+### 8.2 Steps to Import
+1.  Navigate to **Email Sender** → **Excel Import**.
+2.  Upload your `.xlsx` file.
+3.  Click **Import Excel**.
+4.  MERIT will automatically link the products to the customers, calculate the totals, and add them to your sending queue.
+
+---
+
+## 9. How databases work (offline fallback + sync)
 
 MERIT always writes your data to every database you have configured at the same time. This means your data is backed up in multiple places.
 
@@ -365,7 +382,7 @@ MERIT always writes your data to every database you have configured at the same 
 
 ---
 
-## 9. Error messages explained
+## 10. Error messages explained
 
 This section explains every error or warning you might see in plain English.
 
@@ -570,7 +587,7 @@ What to do:
 
 ---
 
-## 10. Frequently asked questions
+## 11. Frequently asked questions
 
 **Do I need to know how to code?**
 
