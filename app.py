@@ -2455,28 +2455,12 @@ elif page == "Email Sender":
             key="csv_upload",
         )
 
-        with st.expander("Or paste raw text instead"):
-            pasted = st.text_area(
-                "Paste CSV / TSV text",
-                height=160,
-                key="csv_paste",
-                placeholder=(
-                    "name,email,order_number,products\n"
-                    "Jane Smith,jane@example.com,ORD-1001,Blue T-Shirt | Black Jeans\n"
-                    "John Doe,john@example.com,ORD-1002,Running Shoes"
-                ),
-            )
-
         if st.button("Import", type="primary", key="csv_import"):
-            raw = ""
-            if uploaded:
-                raw = uploaded.read().decode("utf-8", errors="replace")
-            elif pasted and pasted.strip():
-                raw = pasted.strip()
-            else:
-                st.warning("Upload a file or paste text first.")
+            if not uploaded:
+                st.warning("Upload a file first.")
                 st.stop()
 
+            raw = uploaded.read().decode("utf-8", errors="replace")
             rows, warns = parse_csv_text(raw)
             for w in warns:
                 st.warning(w)
