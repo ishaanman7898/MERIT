@@ -832,12 +832,32 @@ with st.sidebar:
     st.divider()
     cfg = st.session_state.cfg
     if cfg.get("from_name"):
-        st.caption(f"Sending as: {cfg['from_name']}")
+        st.caption(f"Sending as: **{cfg['from_name']}**")
     if cfg.get("smtp_email"):
         st.caption(f"From: {cfg['smtp_email']}")
     products_count = len(cfg.get("products", []))
     if products_count:
-        st.caption(f"Products: {products_count}")
+        st.caption(f"Catalog Products: {products_count}")
+    
+    # ── Queue Status Indicator in Sidebar ─────
+    _queue_count = len(st.session_state.queue)
+    if _queue_count:
+        st.divider()
+        st.subheader(f"Queue: {_queue_count}")
+        # Check if queue has any unmatched products
+        _cat_names = [p["item_name"].lower().strip() for p in (load_products_for_catalog(cfg))]
+        _has_err = False
+        for _ord in st.session_state.queue:
+            for _p in split_products(_ord.get("products", "")):
+                _pl = _p.lower().strip()
+                if not any(_pl in cn or cn in _pl for cn in _cat_names):
+                    _has_err = True
+                    break
+            if _has_err: break
+        if _has_err:
+            st.error("⚠️ Queue has unmatched items. Fix them in **Email Sender** before sending.")
+        else:
+            st.success("✅ Queue is ready.")
 
 cfg = st.session_state.cfg
 
@@ -849,11 +869,24 @@ def split_products(raw: str) -> list[str]:
     if not raw or str(raw).strip() in ("", "nan", "None", "null"):
         return []
     text = str(raw).strip()
+    # Support multiple separators: |, ;, \n, and comma (if not part of a single item name usually)
+    # We use a prioritized split. 
     for sep in ["|", ";", "\n"]:
         if sep in text:
             return [p.strip() for p in text.split(sep) if p.strip()]
-    parts = [p.strip() for p in text.split(",") if p.strip()]
-    return parts if len(parts) > 1 else [text]
+    
+    if "," in text:
+        return [p.strip() for p in text.split(",") if p.strip()]
+    
+    # Space split is only done if multiple words exist AND none match the catalog (fuzzy)
+    # But usually it's safer to not auto-split by space.
+    return [text]
+
+
+def get_fuzzy_suggestions(pname: str, catalog_names: list[str], cutoff=0.5) -> list[str]:
+    import difflib
+    if not catalog_names: return []
+    return difflib.get_close_matches(pname, catalog_names, n=3, cutoff=cutoff)
 
 
 def validate_email(e: str) -> bool:
@@ -2618,17 +2651,40 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     time.sleep(0.5)
                     st.rerun()
 
+        _cat_names = [p["item_name"] for p in _catalog_products]
+        _cat_names_lower = [n.lower().strip() for n in _cat_names]
+
         for i, order in enumerate(queue):
             prods    = split_products(order.get("products", ""))
-            prod_str = "  |  ".join(prods) if prods else "—"
-            row_l, row_r = st.columns([9, 1])
+            
+            # Find unmatched
+            unmatched = []
+            for p in prods:
+                pl = p.lower().strip()
+                if not any(pl in cn or cn in pl for cn in _cat_names_lower):
+                    unmatched.append(p)
+            
+            prod_str = " | ".join(prods) if prods else "—"
+            row_l, row_r = st.columns([9, 1], vertical_alignment="center")
             with row_l:
+                _color = "#ef4444" if unmatched else "#ffffff"
                 st.markdown(
                     f"**#{order['order_number']}**  —  {order['name']}  "
                     f"<span style='color:#888;font-size:13px;'>{order['email']}</span>  \n"
-                    f"<small style='color:#aaa;'>{prod_str}</small>",
+                    f"<small style='color:{_color};'>{prod_str}</small>",
                     unsafe_allow_html=True,
                 )
+                if unmatched:
+                    for up in unmatched:
+                        sugs = get_fuzzy_suggestions(up, _cat_names)
+                        if sugs:
+                            _cols = st.columns([1] + [2]*len(sugs) + [4])
+                            _cols[0].caption(f"Fix '{up}':")
+                            for s_idx, sug in enumerate(sugs):
+                                if _cols[s_idx+1].button(sug, key=f"fix_{i}_{up}_{s_idx}", use_container_width=True, type="secondary"):
+                                    new_p_list = [sug if x == up else x for x in prods]
+                                    st.session_state.queue[i]["products"] = " | ".join(new_p_list)
+                                    st.rerun()
             with row_r:
                 if st.button("Delete", key=f"del_{i}", use_container_width=True):
                     with st.spinner("Deleting..."):
@@ -2636,6 +2692,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                         st.toast("Order removed.", icon="🗑️")
                         time.sleep(0.5)
                         st.rerun()
+            st.divider()
 
         # Show image match summary
         if _products_lookup:
