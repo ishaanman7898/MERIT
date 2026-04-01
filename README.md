@@ -1,490 +1,609 @@
 # MERIT — Mass Email & Inventory Tool for VEI Firms
 
-MERIT is a self-hosted Streamlit app built specifically for **Virtual Enterprise International (VEI)** firms. It lets you send personalised order-confirmation emails in bulk, manage a product catalog with images, and track live inventory — all from one browser tab, with no code required after setup.
-
-Every write syncs across every database you've configured simultaneously (SQLite always, plus Supabase and/or Neon if connected), so your firm's data is never in just one place.
+MERIT is a browser-based app built specifically for **Virtual Enterprise International (VEI)** firms. It lets you send personalised order-confirmation emails in bulk, manage a product catalog with images, and track live inventory — all from one tab, with no coding required after setup.
 
 ---
 
 ## Table of Contents
 
-1. [Quick Start](#1-quick-start)
-   - [Streamlit Cloud (recommended)](#recommended-deploy-on-streamlit-cloud-no-install-required)
-   - [Run locally](#alternative-run-locally)
-2. [Required Credentials](#2-required-credentials)
-   - [Gmail App Password](#21-gmail-app-password-required)
-   - [Imghippo API Key](#22-imghippo-api-key-required-for-product-images)
-   - [Supabase](#23-supabase-optional-strongly-recommended)
-   - [Neon](#24-neon-optional-alternative-to-supabase)
-3. [First-Run Setup Checklist](#3-first-run-setup-checklist)
-4. [Email Sender — Full Guide](#4-email-sender--full-guide)
-5. [Products — Full Guide](#5-products--full-guide)
-6. [Inventory — Full Guide](#6-inventory--full-guide)
-7. [HTML Email Templates](#7-html-email-templates)
-8. [Database Architecture](#8-database-architecture)
-9. [Troubleshooting](#9-troubleshooting)
+1. [What is MERIT and who is it for?](#1-what-is-merit-and-who-is-it-for)
+2. [The big picture — what accounts you need](#2-the-big-picture--what-accounts-you-need)
+3. [Deploy the app (one-time setup)](#3-deploy-the-app-one-time-setup)
+4. [Settings — step by step](#4-settings--step-by-step)
+   - [4.1 Sender Identity](#41-sender-identity)
+   - [4.2 Gmail App Password](#42-gmail-app-password)
+   - [4.3 Image Hosting — Freeimage.host](#43-image-hosting--freeimagehostcreate-account--get-key)
+   - [4.4 Image Hosting — Imghippo (alternative)](#44-image-hosting--imghippo-alternative)
+   - [4.5 Supabase cloud database](#45-supabase-cloud-database)
+   - [4.6 Neon cloud database (alternative)](#46-neon-cloud-database-alternative)
+   - [4.7 Save Settings reminder](#47-save-settings-reminder)
+5. [Using Email Sender](#5-using-email-sender)
+6. [Using Products](#6-using-products)
+7. [Using Inventory](#7-using-inventory)
+8. [How databases work (offline fallback + sync)](#8-how-databases-work-offline-fallback--sync)
+9. [Error messages explained](#9-error-messages-explained)
+10. [Frequently asked questions](#10-frequently-asked-questions)
 
 ---
 
-## 1. Quick Start
+## 1. What is MERIT and who is it for?
 
-### Recommended: Deploy on Streamlit Cloud (no install required)
+**MERIT** stands for Mass Email & Inventory Tool. It is made for VEI student firms that need to:
 
-This is the fastest path — your app is live in under 2 minutes, nothing to install.
+- Send a batch of order confirmation emails to multiple customers at once (instead of manually writing each one)
+- Keep track of which products they sell, complete with photos and prices
+- Track how many of each item they have left in stock
 
-1. **Fork this repo**
-   - Sign in to GitHub with the account you want to use
-   - Click **Fork** at the top-right of this page
-   - This creates your own private copy under your GitHub account
-
-2. **Create a Streamlit account**
-   - Go to [share.streamlit.io](https://share.streamlit.io) and click **Sign up**
-   - Sign in with the **exact same GitHub account** you used to fork — this is required so Streamlit can see your repos
-
-3. **Deploy the app**
-   - Click **Create app** in your Streamlit dashboard
-   - Select **"Deploy from GitHub"**
-   - Select your forked repository from the list
-   - Set the following fields exactly:
-     - **Branch:** `master`
-     - **Main file path:** `app.py`
-     - **App URL:** type your VEI firm name (e.g. `acme-merit`) — this becomes your public URL at `acme-merit.streamlit.app`
-   - Click **Deploy** — the app will be live in about 60 seconds
-
-4. **Configure credentials inside the app**
-   - Once the app loads, go to **Settings** in the left sidebar
-   - Fill in your Gmail SMTP credentials, Imghippo API key, and optionally Supabase/Neon database details
-   - Click **Save Settings** — credentials are stored in `config.json` and persist across every session
-   - See [Required Credentials](#2-required-credentials) for step-by-step guides on getting each key
-
-> **Critical for Streamlit Cloud users:** Streamlit Cloud resets its local filesystem every time the app restarts or redeploys. This means the local SQLite file (`data.db`) is wiped on every restart. Connect a free Supabase project (see [section 2.3](#23-supabase-optional-strongly-recommended)) so your products and inventory survive restarts. Gmail and Imghippo credentials are stored in `config.json` which also resets — you will need to re-enter them after each restart unless you use Streamlit Secrets (advanced).
+You run MERIT from a web browser — no coding, no spreadsheets, no manually writing emails one by one.
 
 ---
 
-### Alternative: Run locally
+## 2. The big picture — what accounts you need
 
-Clone your fork:
+> **CRITICAL SETUP INSTRUCTION:**
+> Because this is a firm tool, you must sign up for everything and do all of these steps in your **VEI account** given to you by your facilitator or administrator. Do not use your personal accounts for firm operations.
 
-```bash
-git clone https://github.com/YOUR_USERNAME/MERIT.git
-cd MERIT
-```
+Before you can use every feature of MERIT, you need to set up a few free accounts. Here is the full list:
 
-Install dependencies (Python 3.10+ required):
+| What | Why | Cost |
+|---|---|---|
+| **Gmail account** | MERIT sends emails through Gmail | Free |
+| **Freeimage.host account** | Stores your product photos online so they appear in emails | Free |
+| **Supabase account** (recommended) | Saves your products and inventory in the cloud so data is never lost | Free |
+| **GitHub account** | Needed to deploy the app on Streamlit Cloud | Free |
+| **Streamlit account** | Hosts the app in your browser for free | Free |
 
-```bash
-pip install -r requirements.txt
-```
-
-Or in a virtual environment (recommended to avoid package conflicts):
-
-```bash
-python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS / Linux
-source venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-Copy the config template:
-
-```bash
-cp config.template.json config.json
-```
-
-`config.json` stores all your credentials and is in `.gitignore` — it is never committed to git.
-
-Run the app:
-
-```bash
-streamlit run app.py
-```
-
-Open [http://localhost:8501](http://localhost:8501) in your browser, then go to **Settings** to fill in your credentials.
+> **VEI Firm tip:** Your firm may already have a shared Gmail address set up by your teacher or coordinator. Ask them for it. You still need to create a Gmail App Password yourself (the coordinator cannot do this for you — it is tied to whoever is logged in).
 
 ---
 
-## 2. Required Credentials
+## 3. Deploy the app (one-time setup)
 
-### 2.1 Gmail App Password (required)
+This section gets the app running in your browser. You only do this once.
 
-MERIT sends emails through Gmail SMTP. You need a **Gmail App Password** — this is different from your regular Gmail password and is specifically designed for apps like this.
+### Step 1 — Get the code on GitHub
 
-**Why App Passwords exist:** Google blocks direct password sign-in for apps when 2-Step Verification is enabled. App Passwords are 16-character one-time tokens scoped to a single application. You can revoke them at any time from your Google account without changing your actual password.
+1. Make sure you are signed into [github.com](https://github.com)
+2. Go to the MERIT repository page
+3. Click the **Fork** button in the top-right corner
+4. On the "Create a new fork" page, just click **Create fork** — no changes needed
+5. You now have your own personal copy of MERIT under your GitHub account
 
-**Steps:**
+### Step 2 — Create a Streamlit account and deploy
 
-1. Open [myaccount.google.com](https://myaccount.google.com) and sign in to the Gmail account you want to send from
-2. Click **Security** in the left sidebar
-3. Under *How you sign in to Google*, confirm **2-Step Verification** shows **On**
-   - If it is off, click it and follow the prompts to enable it — App Passwords are only available with 2-Step Verification active
-4. In the Google search bar at the top of the page, type **App passwords** and click the result (you may need to re-enter your password)
-5. Under *App name*, type `MERIT` (or any label), then click **Create**
-6. Google displays a 16-character password in a yellow box — **copy it immediately**, it will never be shown again
-7. In MERIT: go to **Settings → Gmail SMTP** and enter:
-   - **Gmail Address** — the full address you signed into (e.g. `you@gmail.com`)
-   - **App Password** — paste the 16-character password with no spaces
+1. Go to [share.streamlit.io](https://share.streamlit.io) and click **Sign up**
+2. Sign in using the **exact same GitHub account** you used to fork — this is important
+3. Click **Create app** on your Streamlit dashboard
+4. Select **"Deploy a public app from GitHub"**
+5. In the **Repository** dropdown, find your forked MERIT repo
+6. Set these fields:
+   - **Branch:** `master`
+   - **Main file path:** `app.py`
+   - **App URL:** type your firm name with no spaces (e.g. `acme-vei-merit`) — this becomes your URL like `acme-vei-merit.streamlit.app`
+7. Click **Deploy** — the app will be live in about 60 seconds
 
-**Common mistakes:**
-- Using your regular Gmail password instead of an App Password → authentication will fail
-- Leaving spaces in the App Password when pasting → remove all spaces, it should be exactly 16 characters
-- 2-Step Verification is off → App Passwords won't appear in your Google account at all
+### Step 3 — Open the app and go to Settings
 
-**Where it's saved:** `config.json` → `smtp_email` and `smtp_password`
+Once the app loads, click **Settings** in the left sidebar. Follow section 4 below to fill everything in.
 
 ---
 
-### 2.2 Imghippo API Key (required for product images)
+## 4. Settings — step by step
 
-Imghippo is a free image hosting service. When you upload a product image in MERIT, it is sent to Imghippo and stored there. The returned public URL is saved with the product and embedded in order confirmation emails so customers can see what they ordered.
+> **Important:** After filling in any section of Settings, always scroll to the bottom of the page and click **Save Settings**. Nothing is saved until you click that button.
 
-**Free tier:** 500 MB storage, no credit card required, no expiry.
+---
 
-**Steps:**
+### 4.1 Sender Identity
 
-1. Go to [imghippo.com](https://imghippo.com) and click **Sign Up**
+These two fields appear at the very top of Settings:
+
+- **From Name** — Type your VEI firm's name exactly as you want it to appear in every email (e.g. `Acme VEI Firm`). This also appears as the browser tab title for the app.
+- **Default Subject Line** — The subject line every customer will see in their inbox (e.g. `Your order #{{order_number}} is confirmed`). You can use `{{order_number}}` and it will be replaced with the actual order number automatically.
+
+---
+
+### 4.2 Gmail App Password
+
+**What this is for:** MERIT sends emails through your Gmail account. Gmail does not allow apps to log in with your regular password for security reasons, so you need to create a special one-time password called an **App Password**.
+
+**An App Password is NOT your Gmail password.** It is a separate 16-character code that only works for one app. You can delete it at any time without changing your real password.
+
+**Step-by-step:**
+
+1. Open a new tab and go to [myaccount.google.com](https://myaccount.google.com)
+2. Make sure you are signed into the Gmail account your firm will send emails from
+3. Click **Security** in the left sidebar
+4. Look for **"How you sign in to Google"** — find **2-Step Verification** and make sure it says **On**
+   - If it says Off, click it and follow the steps to turn it on. This is required before App Passwords will appear.
+5. In the search bar at the top of the Google account page, type `App passwords` and click the result
+   - You may need to sign in again with your password at this step
+6. Under **App name**, type `MERIT` (just a label so you remember what it is for)
+7. Click **Create**
+8. Google shows you a 16-character password in a yellow/grey box — **copy it immediately**. This password is only shown once. It looks like: `abcd efgh ijkl mnop`
+9. Go back to MERIT → **Settings → Gmail SMTP**
+10. In **Gmail Address**, type the full Gmail address you signed into
+11. In **App Password**, paste the 16-character code. Remove any spaces if there are any — it should be exactly 16 letters with no spaces.
+12. Scroll to the bottom and click **Save Settings**
+13. Click **Test Connection** (or send a test email) to confirm it works
+
+> **VEI Firm:** If your teacher gave you a firm Gmail address like `acmevei@gmail.com`, use that address here. But you still need to sign into that Gmail account yourself and create an App Password. The teacher cannot create an App Password for you remotely.
+
+---
+
+### 4.3 Image Hosting — Freeimage.host (create account + get key)
+
+**What this is for:** When you upload a product photo, MERIT needs to store it online so it can appear in customer emails. Freeimage.host does this for free with no credit card.
+
+**Step-by-step:**
+
+1. Open [freeimage.host](https://freeimage.host) in a new tab
+2. Click **Sign up** in the top-right corner
+3. Enter an email address and password, then click **Sign up**
+4. Check your email and click the verification link
+5. Log back into [freeimage.host](https://freeimage.host)
+6. Click the **menu icon (☰)** in the **top-left corner** of the page — it looks like three horizontal lines
+7. Click **API** in the menu that appears
+8. You will see a page titled "API version 1" with your **API Key** shown (it is a long string of letters and numbers like `6d207e02198a847aa98d0a2a901485a5`)
+9. Copy that key
+10. Go to MERIT → **Settings → Image Hosting → Freeimage.host** tab
+11. Paste it into the **Freeimage.host API Key** field
+12. Click **Test Key** — you should see a green message saying the key works
+13. Scroll down and click **Save Settings**
+
+---
+
+### 4.4 Image Hosting — Imghippo (alternative)
+
+If you prefer Imghippo instead of Freeimage.host, use this guide. You only need **one** image hosting service.
+
+1. Go to [imghippo.com](https://imghippo.com) and click **Sign Up** (free, no credit card, 500 MB storage)
 2. Enter your email and verify it
-3. Log in, then navigate to **Settings → API Keys** in your dashboard
-4. Click **Generate API Key** and copy the key that appears
-5. In MERIT: go to **Settings → Image Hosting** and paste the key into the **Imghippo API Key** field
-6. Click **Test Key** — you should see a green success message
-7. Click **Save Settings**
-
-**What happens without it:** The app still works and sends emails, but product images will not appear in the emails and image upload buttons will show a warning.
-
-**Where it's saved:** `config.json` → `imghippo_api_key`
-
----
-
-### 2.3 Supabase (optional, strongly recommended)
-
-Supabase is a free cloud Postgres database service. Connecting it means your products, inventory, and stock levels are stored safely in the cloud — accessible from any machine, any browser, and safe from restarts on Streamlit Cloud.
-
-**Free tier:** 500 MB database, 2 projects, no credit card required.
-
-**Steps:**
-
-1. Go to [supabase.com](https://supabase.com) and click **Start your project** → sign in with GitHub or email
-2. Click **New project** — give it a name, pick a region close to you, set a database password, and click **Create new project** (takes about 2 minutes)
-3. Once your project is ready, go to **Project Settings → API** in the left sidebar
-4. Copy the following three values:
-
-   | Field | Where to find it | Used for |
-   |---|---|---|
-   | **Project URL** | Top of the API settings page | Connecting to your database |
-   | **Anon / public key** | Under *Project API keys* — the `anon` row | Read access |
-   | **Service role key** | Under *Project API keys* — the `service_role` row | Write/admin access |
-
-   > **Keep the service role key secret.** It bypasses Row Level Security and has full database access. Never share it or commit it to git.
-
-5. For the **Personal Access Token** (allows MERIT to create tables automatically):
-   - Go to [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens)
-   - Click **Generate new token**, give it a name (e.g. `MERIT`), and copy it — it starts with `sbp_`
-   - Paste it into **Settings → Supabase → Personal Access Token** in MERIT
-
-6. In MERIT: go to **Settings → Database Connections → Supabase** and fill in all four fields (URL, anon key, service role key, personal access token)
-7. Click **Save Settings**, then click **Setup Tables** — this runs the SQL to create the `inventory` and `products` tables in your Supabase project
-
-**After this:** all product and inventory writes will sync to Supabase automatically. If you restart the app or redeploy on Streamlit Cloud, your data is safe.
-
-**Where it's saved:** `config.json` → `supabase_url`, `supabase_key`, `supabase_service_role_key`, `supabase_pat`
+3. Log in to your Imghippo account
+4. Click **Settings** in your dashboard
+5. Click **API Keys**
+6. Click **Generate API Key** and copy the key that appears
+7. Go to MERIT → **Settings → Image Hosting → Imghippo** tab
+8. Paste the key into the **Imghippo API Key** field
+9. Click **Test Key** — green message means success
+10. Click **Save Settings**
 
 ---
 
-### 2.4 Neon (optional, alternative to Supabase)
+### 4.5 Supabase cloud database
 
-Neon is a serverless Postgres database. It works the same way as Supabase in MERIT — use it instead of or alongside Supabase.
+**What this is for:** Supabase is a free online database. Without it, your products and inventory are only saved on the computer running the app. If the app restarts (which Streamlit Cloud does regularly), all your data would be wiped. Supabase keeps everything safe in the cloud.
 
-**Free tier:** 0.5 GB storage, 1 project, no credit card required.
+**This is strongly recommended** — without it, you will need to re-enter your products every time the app restarts on Streamlit Cloud.
 
-**Steps:**
+**Step-by-step:**
 
-1. Go to [neon.tech](https://neon.tech) and click **Sign Up**
-2. Create a new project and choose a region close to you
-3. Go to your project **Dashboard → Connection Details**
-4. In the connection string dropdown, select the **psql** or **postgresql** format
-5. Copy the full connection string — it looks like:
+1. Open [supabase.com](https://supabase.com) in a new tab
+2. Click **Start your project** (top right)
+3. Click **Sign up** — you can sign in with your GitHub account (convenient) or create a new email account
+4. Once signed in, click **New project** on your Supabase dashboard
+5. Fill in the form:
+   - **Name:** anything you like (e.g. `merit-db`)
+   - **Database Password:** choose a strong password — **write this down somewhere safe**
+   - **Region:** pick whichever is closest to you (e.g. US East, EU West)
+   - Leave everything else as default
+6. Click **Create new project** — this takes about 1–2 minutes to set up
+7. Once the project is ready, look at the left sidebar and click **Project Settings** (the gear icon)
+8. Click **API** in the left sidebar under Project Settings
+9. You will see a page with your credentials. You need to copy three things:
 
-   ```
-   postgresql://neondb_owner:PASSWORD@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require
-   ```
+   **Project URL** (at the top):
+   - Looks like: `https://abcdefghijklmnop.supabase.co`
+   - Copy it and paste into MERIT → Settings → Database Connections → Supabase → **Project URL**
 
-   > **Common mistake:** Do NOT use the REST/HTTP URL (starts with `https://ep-…`). MERIT uses `psycopg2` which requires the `postgresql://` format.
+   **Anon key** (under "Project API keys"):
+   - The row labelled `anon` or `public`
+   - A very long string starting with `eyJ…`
+   - Copy it and paste into MERIT → **Anon Key**
 
-6. In MERIT: go to **Settings → Database Connections → Neon** and paste the string
-7. Click **Test Connection** to verify it connects, then click **Setup Tables**
+   **Service role key** (under "Project API keys"):
+   - The row labelled `service_role`
+   - Also a long string starting with `eyJ…`
+   - Copy it and paste into MERIT → **Service Role Key**
+   - Keep this one private — it has full admin access to your database
 
-**Where it's saved:** `config.json` → `neon_connection_string`
+10. Now get your **Personal Access Token** (this lets MERIT create your database tables automatically):
+    - Open a new tab and go to [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens)
+    - Click **Generate new token**
+    - Give it a name like `MERIT`
+    - Copy the token that appears — it starts with `sbp_…`
+    - Paste it into MERIT → Settings → Supabase → **Personal Access Token**
+
+11. Click **Save Settings** in MERIT
+12. Click **Test Connection** — green means it is working
+13. Click **Setup Tables** — this creates the database tables MERIT needs. You should see "Tables created successfully."
+
+Your data is now safe in the cloud. Every time you add a product or adjust inventory, it saves to Supabase automatically.
 
 ---
 
-## 3. First-Run Setup Checklist
+### 4.6 Neon cloud database (alternative)
 
-Use this after deploying or after a fresh local install:
+Neon is another free online database, similar to Supabase. You only need **one** database service — use this if you prefer Neon or if Supabase is not working for you.
 
-- [ ] Open the app and go to **Settings** in the left sidebar
-- [ ] Fill in **From Name** — your VEI firm name. This appears in emails and as the browser tab title
-- [ ] Fill in **Default Subject Line** — e.g. `Your order #{{order_number}} is confirmed`
-- [ ] Under **Gmail SMTP**: enter your Gmail address and 16-character App Password
-- [ ] Under **Image Hosting**: enter your Imghippo API Key and click **Test Key**
-- [ ] *(Recommended)* Under **Database Connections → Supabase**: enter all four Supabase fields, click **Save Settings**, then **Setup Tables**
-- [ ] Click **Save Settings**
-- [ ] Go to **Products** → add your product catalog (name, SKU, price, category, image)
-- [ ] Go to **Inventory** → add those same products with their starting stock levels
-- [ ] Go to **Email Sender** → add orders to the queue and send your first batch
+**Step-by-step:**
+
+1. Open [neon.tech](https://neon.tech) in a new tab
+2. Click **Sign Up** — you can use your GitHub account or email
+3. Once signed in, you will see the Neon Console
+4. Click **Create a project**
+5. Give the project a name (e.g. `merit`) and choose a region, then click **Create project**
+6. On your project's **Dashboard**, click the **Connect** button
+7. A panel appears showing your connection string. Click **Copy** next to the connection string
+   - It looks like: `postgresql://neondb_owner:PASSWORD@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require`
+   - Make sure the dropdown is set to **psql** or **postgresql** format, not the REST format
+8. Go to MERIT → **Settings → Database Connections → Neon**
+9. Paste the connection string into the **PostgreSQL Connection String** field
+10. Click **Test Connection** — green means it works
+11. Click **Setup Tables** — this creates the database tables automatically
+12. Click **Save Settings**
 
 ---
 
-## 4. Email Sender — Full Guide
+### 4.7 Save Settings reminder
 
-The Email Sender is the core of MERIT. You build a queue of customer orders, each with a name, email address, order number, and list of products, then send all of them in one click.
+**After completing any section above, always scroll to the bottom of the Settings page and click the blue Save Settings button.**
 
-### Adding orders to the queue
+Nothing is saved until you click that button. The app will show a green "Settings saved" message when it works. Then you can close and reopen the app and all your settings will still be there.
 
-There are three ways to add orders:
+---
 
-**Single entry** — fill in the form fields (Name, Email, Order #, Products) and click **Add to Queue**. Products can be entered as a comma-separated list, pipe-separated (`|`), semicolon-separated (`;`), or one per line.
+## 5. Using Email Sender
 
-**Bulk data table** — an editable table lets you type or paste multiple orders at once. Click **Add All to Queue** when done.
+The Email Sender is the main feature of MERIT. You build a list of customer orders and send all their confirmation emails in one click.
 
-**CSV / TSV import** — upload a `.csv` or `.tsv` file. Required columns are `name`, `email`, `order_number`, and `products`. Extra columns are ignored.
+### Adding orders
 
-### Product name matching and warnings
+**Single order:** Fill in the form on the left — customer Name, Email, Order Number, and the Products they ordered. Products can be typed as a list separated by commas, semicolons, or one per line. Click **Add to Queue**.
 
-As you type product names, MERIT checks them against your product catalog (loaded from Supabase/Neon/SQLite). If a product name doesn't match anything in your catalog:
-- A warning appears listing the unmatched names
-- These products will still appear in the email as text, but no product image will be included
+**Multiple orders at once (bulk entry):** Click the **Bulk Entry** tab. A table appears where you can type multiple orders. Fill in as many rows as you need, then click **Add All to Queue**.
 
-Matching is fuzzy — partial matches and substring matches work (e.g. typing `T-Shirt` will match a catalog entry of `Blue T-Shirt`).
+**From a file (CSV/TSV):** If you have a spreadsheet of orders, export it as a `.csv` file. The file needs columns named `name`, `email`, `order_number`, and `products`. Upload it using the file uploader.
 
 ### Sending emails
 
-Click **Send All Emails** to start the batch send. MERIT:
+Once your queue has orders in it, click **Send All Emails**. MERIT will:
 
-1. Connects to Gmail SMTP using your credentials
-2. Builds a personalised HTML email for each order (using your saved template)
-3. Sends each email and shows a live status log as it goes
-4. Shows a final summary (sent / failed count)
+1. Connect to Gmail using your credentials
+2. Build a personalised email for each order
+3. Send each one and show a live log of what is happening
+4. Show you how many were sent and how many failed
 
-### Automatic inventory deduction
+### Automatic stock deduction
 
-After every successful send, MERIT automatically subtracts 1 unit of stock for each matched product in each sent order. This happens across all configured databases (SQLite, Supabase, Neon) simultaneously.
-
-- If a product is ordered once, stock goes down by 1
-- If the same product appears in 3 different orders, stock goes down by 3
-- Stock can go negative — negative stock is shown as **Backordered**
-- Failed emails (SMTP errors) do not trigger deductions
-
-### Inventory Impact chart
-
-After the send completes, an **Inventory Impact** section appears below the results table showing:
-- A table with each affected product: SKU, units deducted, stock before, stock after
-- A grouped bar chart comparing before and after stock for every affected product
-
-This is useful for a quick visual of how the send changed your stock levels. Click **Clear Log** to dismiss it.
+After every successful email send, MERIT automatically reduces stock by 1 for each product in that order. So if you send 5 orders all containing "Blue T-Shirt", the Blue T-Shirt stock goes down by 5.
 
 ---
 
-## 5. Products — Full Guide
+## 6. Using Products
 
-The Products page manages your product catalog — the source of truth for names, SKUs, prices, categories, and images used in emails.
+The Products page manages your product catalog — names, SKUs, prices, categories, and photos.
 
-### Adding a single product
+### Adding products
 
-Fill in the **Add Product** form: SKU (unique identifier), Product Name, Category, Price, and an optional image. Click **Add Product** — the product is saved to all configured databases and the image is uploaded to Imghippo.
+Fill in the **Add Product** form: give each product a unique **SKU** (a short code like `SHIRT-001`), a name, category, price, and optionally upload a photo. Click **Add Product**.
 
-### Bulk adding products
+### Bulk adding
 
-Switch to the **Bulk Add** tab. A table of empty rows appears — fill in as many as you need. Each row has its own image uploader so you can attach images per product without having to go back and edit later. Click **Add Row** to add more rows. Click **Add All Products** to save everything at once.
+Use the **Bulk Add** tab to add many products at once. Fill in the table rows and click **Add All Products**.
 
-### Bulk editing
+### Editing products
 
-The **Bulk Edit** tab shows all your products in an editable data table. Click any cell to edit the value. Click **Save All Changes** to write the entire table back to all databases.
-
-**Replacing images in bulk edit:** Below the table, expand **Replace product images**. Each product is listed with its current image thumbnail and a file uploader. Upload a new image next to any product and click **Upload** — the new image is sent to Imghippo, the URL is updated, and the catalog refreshes immediately.
-
-### Editing a single product
-
-The **Edit Product** tab lets you select one product from a dropdown and edit all its fields in a form. Includes a **Replace Image** section below the form (outside the form since Streamlit doesn't allow file uploaders inside forms).
+Use **Bulk Edit** to edit many products in a spreadsheet-style table. Or use **Edit Product** to select and edit one product at a time.
 
 ### Deleting products
 
-The **Bulk Delete** tab lists all products as checkboxes. Select the ones you want to remove and click **Delete Selected** — they are permanently removed from all configured databases simultaneously.
+Use **Bulk Delete** to select which products to remove and click **Delete Selected**.
 
 ---
 
-## 6. Inventory — Full Guide
+## 7. Using Inventory
 
-The Inventory page tracks live stock levels for every product.
+The Inventory page tracks how many units of each product you have.
 
 ### Overview dashboard
 
-At the top of the page (above the tabs), four metrics give you an instant snapshot:
+At the top you see four numbers at a glance: total products, total units in stock, low stock count, and out-of-stock count. A bar chart shows stock per product.
 
-| Metric | What it shows |
+### Adjusting stock
+
+In the **Adjust Stock** tab, each product has a **±** box. Enter a positive number to add stock (e.g. `+10` received a shipment of 10), or a negative number to remove it (e.g. `-3` sold 3). Click **Apply** per row, or **Apply All Changes** to do all at once.
+
+### Stock status colours
+
+| Colour | What it means |
 |---|---|
-| **Products** | Total number of distinct products in inventory |
-| **Total Stock Units** | Sum of all stock across every product |
-| **Low Stock** | Number of products with 1–10 units remaining |
-| **Out of Stock** | Number of products at exactly 0 units |
-
-Below the metrics, a bar chart shows stock level per product sorted from highest to lowest. Products at zero or in negative (Backordered) are visible at the bottom.
-
-### Stock status levels
-
-| Status | Condition |
-|---|---|
-| **In stock** | 11 or more units |
-| **Low stock** | 1–10 units |
-| **Out of stock** | Exactly 0 |
-| **Backordered** | Negative (stock went below zero — e.g. from bulk deductions) |
-
-Stock is allowed to go negative. This represents orders that have been confirmed but inventory hasn't been restocked yet.
-
-### Adjust Stock tab
-
-The Adjust Stock tab lists every product as a card row showing:
-- Product thumbnail image
-- Product name, SKU, category, and image URL link
-- Current stock number (white, large) with a colour-coded status badge
-- A **± input** to enter a delta (positive to add stock, negative to remove)
-- An **Apply** button per row, plus an **Apply All Changes** button at the top
-
-Entering `+5` adds 5 units. Entering `-3` removes 3. The change is applied to all configured databases immediately.
-
-### Add Products tab
-
-Add new products to inventory with initial stock. Each row has fields for SKU, Name, Category, Price, Stock, and an individual image uploader. Use **Add Row** to add more rows. Click **Add All** to save.
-
-### Bulk Edit tab
-
-An editable data table showing all inventory fields. Edit any cell, then click **Save All Changes** to sync to all databases.
-
-**Replacing images in bulk edit:** Below the Save button, expand **Replace product images**. Each product has its current image shown and an individual file uploader to replace it.
-
-### Edit Product tab
-
-Select a product from the dropdown to edit all its fields in a form. A **Replace Image** section sits below the form (outside the form block) for uploading a new image.
-
-### Delete Products tab
-
-Select one or more products from a multi-select list and click **Delete** to permanently remove them from all databases.
+| Green — **In stock** | 11 or more units available |
+| Yellow — **Low stock** | 1 to 10 units left — order more soon |
+| Red — **Out of stock** | 0 units — nothing left |
+| Purple — **Backordered** | Negative number — more have been sold than exist (a VEI scenario where you confirm orders ahead of restocking) |
 
 ---
 
-## 7. HTML Email Templates
+## 8. How databases work (offline fallback + sync)
 
-MERIT lets you fully customise the HTML of every order confirmation email.
+MERIT always writes your data to every database you have configured at the same time. This means your data is backed up in multiple places.
 
-### How it works
+**If a cloud database (Supabase or Neon) goes offline:**
+- MERIT will still save everything to the local SQLite database on the machine running the app
+- You will not lose any data — writes to SQLite never fail as long as the app is running
+- Any cloud write failures are shown as warnings, not errors that block you from continuing
 
-Go to **Email Sender → Email Template** tab. You can:
-- Edit the HTML directly in the text editor
-- Generate a template using the built-in AI prompt (see below)
-- Preview a live render of the template with sample order data
-- Reset to the built-in default at any time
+**When the cloud comes back online:**
+- Go to **Settings → Database Connections**
+- Click **Sync Local → Cloud**
+- MERIT reads every row from local SQLite and pushes it to your cloud databases
+- You will see a confirmation of how many rows were synced
 
-The template is saved to `config.json` under `email_html_template` and is used automatically for every future send.
-
-### Available template variables
-
-Use these placeholders anywhere in your HTML — MERIT substitutes real values before sending:
-
-| Variable | What it becomes |
-|---|---|
-| `{{name}}` | Customer's full name |
-| `{{order_number}}` | Order number |
-| `{{from_name}}` | Your VEI firm name (from Settings → From Name) |
-| `{{items_html}}` | A pre-built HTML block of table rows — one per product — with product image, name, and SKU |
-
-**Example:**
-
-```html
-<!DOCTYPE html>
-<html>
-<body style="font-family:sans-serif;background:#f9f9f9;padding:20px;">
-  <h2>Hi {{name}}, your order is confirmed!</h2>
-  <p>Order number: <strong>#{{order_number}}</strong></p>
-  <table cellpadding="8" cellspacing="0" style="width:100%;border-collapse:collapse;">
-    {{items_html}}
-  </table>
-  <p style="margin-top:24px;">Thanks for your order — {{from_name}}</p>
-</body>
-</html>
-```
-
-### Generate a template with AI
-
-In the **Email Template** tab, expand **AI prompt — copy this into ChatGPT / Claude**. Copy the full prompt text, replace the design brief placeholder at the bottom with your own brief (e.g. `"dark theme, VEI firm color #1a1a2e, modern sans-serif"`), then paste it into ChatGPT or Claude. Copy the returned HTML into the template editor and click **Save Template**.
-
-### Requirements for custom templates
-
-- Must be a complete HTML document (starting with `<!DOCTYPE html>`, ending with `</html>`)
-- Use inline CSS only — no `<link>` stylesheets or `<script>` tags (most email clients strip them)
-- Use table-based layouts for maximum compatibility across Gmail, Outlook, Apple Mail, etc.
-- Must include `{{items_html}}` wrapped inside a `<table>` element
-- Maximum recommended content width: 600 px
+**Read order (which database MERIT reads from first):**
+1. Supabase (if configured and reachable)
+2. Neon (if configured and reachable)
+3. Local SQLite (always available)
 
 ---
 
-## 8. Database Architecture
+## 9. Error messages explained
 
-MERIT writes to all configured databases simultaneously on every create, update, and delete operation. This means your firm's data is always consistent across every configured source.
-
-| Database | Type | When active |
-|---|---|---|
-| SQLite (`data.db`) | Local file | Always — zero-config, built-in fallback |
-| Supabase | Cloud Postgres | When URL and keys are configured in Settings |
-| Neon | Serverless Postgres | When connection string is configured in Settings |
-| `config.json` `products` array | JSON file | Always — keeps a local copy for fast access |
-
-**Read priority (highest to lowest):** Supabase → Neon → SQLite → `config.json`
-
-The app always reads from the highest-priority source that is configured and available. If Supabase is connected, all reads come from Supabase. If only SQLite is available, reads come from SQLite.
-
-**Important:** `config.json` and `data.db` are both in `.gitignore` and are never committed to your repository. They are local to the machine or container running the app.
+This section explains every error or warning you might see in plain English.
 
 ---
 
-## 9. Troubleshooting
+### Email errors
 
-**"SMTP Authentication Error" when sending**
-- You must use a **Gmail App Password**, not your regular Gmail password
-- App Passwords are exactly 16 characters with no spaces — check for accidental spaces when pasting
-- Confirm that 2-Step Verification is enabled on the Google account — without it, App Passwords don't exist
+**"SMTP Authentication Error" or "Username and Password not accepted"**
 
-**"Supabase credentials not configured"**
-- Go to Settings → Database Connections → Supabase and make sure the Project URL and at least one key (anon or service role) are filled in, then click Save Settings
+What happened: Gmail rejected your login credentials.
 
-**"relation 'inventory' does not exist" or similar Postgres error**
-- Your Supabase or Neon project doesn't have the required tables yet
-- Go to Settings → Database Connections and click **Setup Tables** after entering your credentials
+What to do:
+- Make sure you entered a **Gmail App Password**, not your regular Gmail password
+- The App Password should be exactly 16 characters with no spaces
+- Make sure 2-Step Verification is turned on for that Google account
+- Try generating a new App Password — old ones sometimes stop working
 
-**Stock not deducting after send**
-- Check that your product names in the email queue match (or partially match) the product names in your catalog
-- If a product has no match, a warning is shown in the queue view — exact or partial name match is required
-- Go to Inventory and confirm the products exist there with the correct SKUs
+---
 
-**Images not appearing in emails**
-- Confirm your Imghippo API key is set in Settings → Image Hosting and the Test Key button shows success
-- Products must have images uploaded to Imghippo — a local file path won't work in emails
-- If a product shows `N/A` as its image URL, upload an image from the Products → Catalog or Bulk Edit page
+**"Connection refused" or "timed out" when sending email**
 
-**Data disappears after restarting on Streamlit Cloud**
-- This is expected — Streamlit Cloud resets the local filesystem on every restart
-- Connect Supabase (free tier) so your inventory and products are stored in the cloud
+What happened: MERIT could not reach Gmail's servers.
 
-**App shows "MERIT" instead of your firm name in the browser tab**
-- Go to Settings, fill in **From Name** with your VEI firm name, and click **Save Settings** — the tab title updates on the next page load
+What to do:
+- Check your internet connection
+- If you are on a school or work network, the network may be blocking outgoing email connections (port 587). Try using a personal hotspot or home internet.
 
-**Products page or Inventory page is slow to load**
-- The first load after a restart hits the database — subsequent loads within the same session use a 30-second in-memory cache
-- If you have a large catalog (100+ products), Supabase or Neon will be significantly faster than SQLite for reads
+---
 
-**Negative stock / Backordered status appearing unexpectedly**
-- This is intentional — stock is allowed to go below zero to represent overselling or pre-orders
-- Adjust stock manually from the Inventory → Adjust Stock tab to correct it
+**"Daily sending limit reached"**
+
+What happened: Gmail has a daily limit of roughly 500 emails per day for regular accounts.
+
+What to do:
+- Wait 24 hours and try again
+- If you regularly send more than 500 emails per day, consider Google Workspace (paid)
+
+---
+
+### Image hosting errors
+
+**"Freeimage.host key works!" / "Imghippo key works!"**
+
+This is not an error — this is a success message. Your API key is correct.
+
+---
+
+**"Error: Bad request" or status code errors on image test**
+
+What happened: The API key may be typed incorrectly.
+
+What to do:
+- Go back to freeimage.host (or imghippo.com), open the API page, and copy the key again carefully
+- Make sure there are no spaces before or after the key when you paste it
+- Click **Save Settings** after updating the key
+
+---
+
+**"Image skipped — add an image hosting key in Settings first"**
+
+What happened: You tried to upload a product photo but have not added an image hosting API key yet.
+
+What to do:
+- Go to Settings → Image Hosting, follow the guide in section 4.3, and save your key
+
+---
+
+**"Image upload failed: ..."**
+
+What happened: The image was uploaded but the hosting service returned an error.
+
+What to do:
+- Check that the image file is a standard JPEG, PNG, or WebP
+- Try a smaller image (under 5 MB)
+- Check your internet connection
+- Try clicking the upload button again — sometimes it is a temporary server issue
+
+---
+
+### Database errors
+
+**"Connected. Tables not created yet — click Setup Tables below."**
+
+This is not a real error. It means your database connection works but the tables MERIT needs do not exist yet.
+
+What to do: Click **Setup Tables** right below the test result.
+
+---
+
+**"relation 'inventory' does not exist"**
+
+What happened: You are connected to the database but have not created the tables.
+
+What to do: Go to Settings → Database Connections → Supabase (or Neon) → click **Setup Tables**.
+
+---
+
+**"Connection failed: could not connect to server"**
+
+What happened: MERIT could not reach your Neon database.
+
+What to do:
+- Check that the connection string starts with `postgresql://` — NOT `https://`
+- Make sure you copied the full string including the password and database name at the end
+- Check your internet connection
+- Log into your Neon dashboard and confirm the project is not paused (free tier projects pause after inactivity — click Resume)
+
+---
+
+**"Could not parse project ref from URL" (Supabase Setup Tables)**
+
+What happened: The Project URL you entered does not look like a Supabase URL.
+
+What to do:
+- The URL should look exactly like `https://abcdefghijk.supabase.co`
+- Make sure you copied it from **Project Settings → API → Project URL** in Supabase, not from the browser address bar while browsing Supabase
+
+---
+
+**"401 Unauthorized" (Supabase)**
+
+What happened: The API key you entered is wrong or expired.
+
+What to do:
+- Go to Supabase → Project Settings → API and copy the service role key again
+- Make sure you are copying the **service_role** key for writes, not just the anon key
+- Click Save Settings after updating
+
+---
+
+**"Supabase skipped (pip install supabase)"**
+
+What happened: The Python library for Supabase is not installed in this environment.
+
+What to do:
+- If you are on Streamlit Cloud, this should install automatically from `requirements.txt`. Trigger a reboot by going to your Streamlit dashboard and clicking **Reboot app**.
+- If running locally, run `pip install supabase` in your terminal.
+
+---
+
+**"Run: pip install psycopg2-binary" (Neon Test Connection)**
+
+What happened: The library needed to connect to Neon is not installed. (MERIT now installs it automatically when you click Test Connection, but if you see this it means the auto-install failed.)
+
+What to do:
+- If running locally, open your terminal and run: `pip install psycopg2-binary`
+- Then click **Test Connection** again
+
+---
+
+### General app errors
+
+**"No image hosting configured. Add an API key in Settings → Image Hosting."**
+
+What happened: You tried to upload a product image but neither Freeimage.host nor Imghippo API keys have been saved yet.
+
+What to do: Follow section 4.3 or 4.4 to add an image hosting key and click **Save Settings**.
+
+---
+
+**"Data disappears after the app restarts on Streamlit Cloud"**
+
+This is expected behaviour — Streamlit Cloud resets its local storage every time the app restarts.
+
+What to do: Connect Supabase (section 4.5). Once connected, all your products and inventory are stored in the cloud and survive any number of restarts.
+
+---
+
+**"App shows MERIT instead of our firm name"**
+
+What to do: Go to Settings → Sender Identity → fill in **From Name** with your firm's name → click **Save Settings**. The browser tab title and sidebar header update on the next page load.
+
+---
+
+**"Stock not going down after sending emails"**
+
+What happened: The product names in your email queue do not match the names in your product catalog.
+
+What to do:
+- Go to Products and note the exact names in your catalog
+- When adding orders to the email queue, spell product names the same way they appear in the catalog (partial matches work, but they need to overlap)
+- A warning appears in the queue view if any product could not be matched
+
+---
+
+**"Negative stock / Backordered showing for a product"**
+
+This is intentional. MERIT allows stock to go below zero to represent situations where you have confirmed more orders than you have stock for.
+
+What to do: Go to Inventory → Adjust Stock → enter a positive number in the ± box to add stock back up to the correct level.
+
+---
+
+**"Synced 0 rows to cloud" after clicking Sync Local → Cloud**
+
+What happened: Your local SQLite database had no rows to sync, or the cloud databases were still unreachable.
+
+What to do:
+- Make sure your internet connection is working
+- Click Test Connection in the Supabase or Neon tab to confirm the cloud is reachable before syncing
+- If the local database genuinely has no data (e.g. you just deployed fresh), this is normal — nothing to sync yet
+
+---
+
+## 10. Frequently asked questions
+
+**Do I need to know how to code?**
+
+No. MERIT is designed for VEI students with no programming experience. All setup is done through the Settings page in the browser.
+
+---
+
+**Can multiple students in the firm use it at the same time?**
+
+Yes, if you connect Supabase. Everyone accesses the same cloud database, so changes one person makes are visible to everyone within about 30 seconds.
+
+---
+
+**Can I use a school Gmail account (e.g. @school.edu)?**
+
+Maybe. School accounts controlled by Google Workspace sometimes block App Passwords. If the App Passwords option does not appear in your account security settings, ask your school IT department. The safest choice is a personal Gmail account or a Gmail account created specifically for your VEI firm.
+
+---
+
+**What happens if I forget to click Save Settings?**
+
+Your changes are lost when you navigate to a different page. The app will show all the fields with the old values next time you come back to Settings. Always click **Save Settings** after making any change.
+
+---
+
+**I clicked Test Key and it says success, but images are not appearing in emails.**
+
+Two possible causes:
+1. You tested the key but forgot to click **Save Settings** afterwards — the key was not actually saved.
+2. The products in your catalog have `N/A` as their image URL — they were added before you had an image hosting key. Go to Products → Edit Product (or Bulk Edit → Replace product images) and re-upload images for those products.
+
+---
+
+**Can I use both Supabase and Neon at the same time?**
+
+Yes. MERIT writes to every configured database simultaneously. Both will contain the same data. Reads prefer Supabase first, then Neon, then SQLite.
+
+---
+
+**The app is slow to load products or inventory.**
+
+The first load after any restart hits the database directly. Subsequent loads within 30 seconds use an in-memory cache and are instant. If you are on a free Supabase or Neon tier, the database may take a second to "wake up" after a period of inactivity.
+
+---
+
+**I accidentally deleted a product — can I get it back?**
+
+Not automatically. MERIT does not keep a recycle bin. If you have Supabase connected, you can log into your Supabase dashboard → Table Editor → find the row in the `inventory` or `products` table and restore it manually. This is another reason to use Supabase — it provides a visual table editor as a manual backup.
+
+---
+
+**Where are my credentials stored?**
+
+All settings are saved in a file called `config.json` in the same folder as `app.py`. This file is listed in `.gitignore` — it is never uploaded to GitHub. On Streamlit Cloud, this file only exists while the app is running; it is wiped when the app restarts, which is why Supabase is recommended for data, and you should re-enter credentials after each cloud restart (or use Streamlit Secrets for production).
