@@ -818,50 +818,6 @@ if "send_log" not in st.session_state:
     st.session_state.send_log = []
 
 # ─────────────────────────────────────────────
-# Sidebar navigation
-# ─────────────────────────────────────────────
-
-with st.sidebar:
-    _sb_co = st.session_state.cfg.get("from_name", "").strip()
-    st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
-    page = st.radio(
-        "page",
-        ["Email Sender", "Products", "Inventory", "Settings"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-    cfg = st.session_state.cfg
-    if cfg.get("from_name"):
-        st.caption(f"Sending as: **{cfg['from_name']}**")
-    if cfg.get("smtp_email"):
-        st.caption(f"From: {cfg['smtp_email']}")
-    products_count = len(cfg.get("products", []))
-    if products_count:
-        st.caption(f"Catalog Products: {products_count}")
-    
-    # ── Queue Status Indicator in Sidebar ─────
-    _queue_count = len(st.session_state.queue)
-    if _queue_count:
-        st.divider()
-        st.subheader(f"Queue: {_queue_count}")
-        # Check if queue has any unmatched products
-        _cat_names = [p["item_name"].lower().strip() for p in (load_products_for_catalog(cfg))]
-        _has_err = False
-        for _ord in st.session_state.queue:
-            for _p in split_products(_ord.get("products", "")):
-                _pl = _p.lower().strip()
-                if not any(_pl in cn or cn in _pl for cn in _cat_names):
-                    _has_err = True
-                    break
-            if _has_err: break
-        if _has_err:
-            st.error("⚠️ Queue has unmatched items. Fix them in **Email Sender** before sending.")
-        else:
-            st.success("✅ Queue is ready.")
-
-cfg = st.session_state.cfg
-
-# ─────────────────────────────────────────────
 # Shared helpers
 # ─────────────────────────────────────────────
 
@@ -912,6 +868,48 @@ def add_to_queue(name: str, email: str, order_number: str, products: str,
         "total_cost":    round(float(total), 2)
     })
     return True
+
+# ─────────────────────────────────────────────
+# Sidebar navigation
+# ─────────────────────────────────────────────
+
+with st.sidebar:
+    _sb_co = st.session_state.cfg.get("from_name", "").strip()
+    st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
+    page = st.radio(
+        "page",
+        ["Email Sender", "Products", "Inventory", "Settings"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    cfg = st.session_state.cfg
+    if cfg.get("from_name"):
+        st.caption(f"Sending as: **{cfg['from_name']}**")
+    if cfg.get("smtp_email"):
+        st.caption(f"From: {cfg['smtp_email']}")
+    products_count = len(cfg.get("products", []))
+    if products_count:
+        st.caption(f"Catalog Products: {products_count}")
+    
+    # ── Queue Status Indicator in Sidebar ─────
+    _queue_count = len(st.session_state.queue)
+    if _queue_count:
+        st.divider()
+        st.subheader(f"Queue: {_queue_count}")
+        # Check if queue has any unmatched products
+        _cat_names = [p["item_name"].lower().strip() for p in (load_products_for_catalog(cfg))]
+        _has_err = False
+        for _ord in st.session_state.queue:
+            for _p in split_products(_ord.get("products", "")):
+                _pl = _p.lower().strip()
+                if not any(_pl in cn or cn in _pl for cn in _cat_names):
+                    _has_err = True
+                    break
+            if _has_err: break
+        if _has_err:
+            st.error("⚠️ Queue has unmatched items. Fix them in **Email Sender** before sending.")
+        else:
+            st.success("✅ Queue is ready.")
 
 
 # ─────────────────────────────────────────────
