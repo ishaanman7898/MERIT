@@ -111,6 +111,7 @@ def _init_sqlite():
             stock_left INTEGER NOT NULL DEFAULT 0,
             status     TEXT NOT NULL DEFAULT 'In stock',
             image_url  TEXT NOT NULL DEFAULT 'N/A',
+            original_stock INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS outbound_logs (
@@ -169,11 +170,20 @@ CREATE TABLE IF NOT EXISTS inventory (
     category   TEXT           NOT NULL DEFAULT '',
     price      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     stock_left INTEGER        NOT NULL DEFAULT 0,
-    status     TEXT           NOT NULL DEFAULT 'In stock',
-    image_url  TEXT           NOT NULL DEFAULT 'N/A',
-    created_at TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    status         TEXT           NOT NULL DEFAULT 'In stock',
+    image_url      TEXT           NOT NULL DEFAULT 'N/A',
+    original_stock INTEGER        NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     CONSTRAINT inventory_sku_unique UNIQUE (sku)
 );
+
+-- Migrations for existing users (Original Stock)
+DO $$ 
+BEGIN 
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='inventory' AND column_name='original_stock') THEN
+    ALTER TABLE inventory ADD COLUMN original_stock INTEGER NOT NULL DEFAULT 0;
+  END IF;
+END $$;
 
 -- ── Products table (catalog / storefront) ─────────────────────────────────
 CREATE TABLE IF NOT EXISTS products (
@@ -227,7 +237,9 @@ def load_config() -> dict:
 
 
 def save_config(data: dict):
-    CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _tmp = CONFIG_FILE.with_suffix(".tmp")
+    _tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _tmp.replace(CONFIG_FILE)
 
 
 # ─────────────────────────────────────────────
@@ -343,6 +355,7 @@ def _has_any_db(cfg: dict) -> bool:
 def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     """Upsert one product into ALL configured databases. Always saves to SQLite."""
     _stock = int(product.get("stock_left", 0))
+    _orig  = int(product.get("original_stock") if product.get("original_stock") is not None else _stock)
     _status = str(product.get("status") or (
         "Backordered" if _stock < 0 else ("Out of stock" if _stock == 0 else ("Low stock" if _stock <= 10 else "In stock"))
     ))
@@ -352,6 +365,7 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         "category":   product.get("category", ""),
         "price":      product.get("price", 0.0),
         "stock_left": _stock,
+        "original_stock": _orig,
         "status":     _status,
         "image_url":  product.get("image_url", "N/A"),
     }
@@ -361,8 +375,8 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     try:
         conn = _get_sqlite_conn()
         conn.execute("""
-            INSERT INTO inventory (sku, item_name, category, price, stock_left, status, image_url)
-            VALUES (:sku, :item_name, :category, :price, :stock_left, :status, :image_url)
+            INSERT INTO inventory (sku, item_name, category, price, stock_left, original_stock, status, image_url)
+            VALUES (:sku, :item_name, :category, :price, :stock_left, :original_stock, :status, :image_url)
             ON CONFLICT(sku) DO UPDATE SET
                 item_name=excluded.item_name, category=excluded.category,
                 price=excluded.price, image_url=excluded.image_url
@@ -387,12 +401,12 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
             with conn_pg:
                 with conn_pg.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO inventory (sku,item_name,category,price,stock_left,status,image_url)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(sku) DO UPDATE SET
                             item_name=EXCLUDED.item_name, category=EXCLUDED.category,
                             price=EXCLUDED.price, image_url=EXCLUDED.image_url
-                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["stock_left"],row["status"],row["image_url"]))
+                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
             conn_pg.close()
             results.append("Neon")
         except Exception as exc:
@@ -405,7 +419,7 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         try:
             from supabase import create_client  # type: ignore
             client = create_client(sb_url, sb_key)
-            # Update existing record (preserves stock_left) or insert new one
+            # ── inventory table (stock tracking + catalog) ──────────
             _detail = {
                 "item_name": row["item_name"],
                 "category":  row["category"],
@@ -414,8 +428,17 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
             }
             _res = client.table("inventory").update(_detail).eq("sku", row["sku"]).execute()
             if not getattr(_res, "data", None):
-                # No existing row — insert fresh with stock = 0
                 client.table("inventory").insert(row).execute()
+            # ── products table (clean catalog for external websites) ─
+            _prod_row = {
+                "sku":       row["sku"],
+                "name":      row["item_name"],
+                "category":  row["category"],
+                "price":     row["price"],
+                "image_url": row["image_url"],
+                "active":    True,
+            }
+            _pres = client.table("products").upsert(_prod_row, on_conflict="sku").execute()
             results.append("Supabase")
         except ImportError:
             results.append("Supabase skipped (pip install supabase)")
@@ -441,6 +464,42 @@ def load_inventory_from_sqlite() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
+    """Set the original purchased stock level across all databases."""
+    results = []
+    # SQLite
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("UPDATE inventory SET original_stock=? WHERE sku=?", (stock, sku))
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc: results.append(f"SQLite failed: {exc}")
+
+    # Neon
+    conn_pg = _get_db_conn(cfg)
+    if conn_pg is not None:
+        try:
+            with conn_pg:
+                with conn_pg.cursor() as cur:
+                    cur.execute("UPDATE inventory SET original_stock=%s WHERE sku=%s", (stock, sku))
+            results.append("Neon")
+        except Exception as exc: results.append(f"Neon failed: {exc}")
+
+    # Supabase
+    sb_url = cfg.get("supabase_url","").strip()
+    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
+    if sb_url and sb_key:
+        try:
+            from supabase import create_client # type: ignore
+            client = create_client(sb_url, sb_key)
+            client.table("inventory").update({"original_stock": stock}).eq("sku", sku).execute()
+            results.append("Supabase")
+        except Exception as exc: results.append(f"Supabase failed: {exc}")
+
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
 def adjust_inventory_sqlite(sku: str, delta: int, note: str = "") -> tuple[bool, str]:
     """Add or subtract stock in SQLite. delta can be negative."""
     try:
@@ -459,6 +518,8 @@ def adjust_inventory_sqlite(sku: str, delta: int, note: str = "") -> tuple[bool,
         else:
             status = "In stock"
         conn.execute("UPDATE inventory SET stock_left=?, status=? WHERE sku=?", (new_stock, status, sku))
+        if delta > 0:
+            conn.execute("UPDATE inventory SET original_stock = original_stock + ? WHERE sku=?", (delta, sku))
         conn.commit()
         conn.close()
         return True, f"Stock → {new_stock} ({status})"
@@ -479,6 +540,8 @@ def adjust_inventory_neon(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
                 new_stock = row[0] + delta
                 status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
                 cur.execute("UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s", (new_stock, status, sku))
+                if delta > 0:
+                    cur.execute("UPDATE inventory SET original_stock = original_stock + %s WHERE sku=%s", (delta, sku))
         conn.close()
         return True, f"Neon stock → {new_stock}"
     except Exception as exc:
@@ -498,7 +561,16 @@ def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, st
         current = res.data[0]["stock_left"] or 0
         new_stock = current + delta
         status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
-        client.table("inventory").update({"stock_left": new_stock, "status": status}).eq("sku", sku).execute()
+        upd = {"stock_left": new_stock, "status": status}
+        client.table("inventory").update(upd).eq("sku", sku).execute()
+        if delta > 0:
+            # Atomic increment in Supabase uses rpc or standard query if not available, 
+            # but here we can just read current original and update
+            # (Better to use RPC but this matches current pattern)
+            res_o = client.table("inventory").select("original_stock").eq("sku", sku).execute()
+            if res_o.data:
+                old_o = res_o.data[0].get("original_stock") or 0
+                client.table("inventory").update({"original_stock": old_o + delta}).eq("sku", sku).execute()
         return True, f"Supabase stock → {new_stock}"
     except Exception as exc:
         return False, str(exc)
@@ -912,7 +984,7 @@ with st.sidebar:
     st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
     page = st.radio(
         "page",
-        ["Email Sender", "Products", "Inventory", "Settings"],
+        ["Email Sender", "Products", "Inventory", "Settings", "API Endpoints"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1349,7 +1421,12 @@ if page == "Products":
         )
     _has_cloud_db = cfg.get("neon_connection_string") or (cfg.get("supabase_url") and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key")))
     if not _has_cloud_db:
-        st.info("Saving to **SQLite** (local). Connect Supabase or Neon in Settings for cloud backup.")
+        st.warning(
+            "⚠️ **No cloud database configured.** Products are only saved locally to `data.db` on this machine. "
+            "If this computer is lost or the app is redeployed, all product and inventory data will be gone. "
+            "Go to **Settings → Database** to connect Supabase (recommended) or Neon. "
+            "Supabase also enables the **API Endpoints** page so your website can show live products."
+        )
 
     if "_products_cache" not in st.session_state:
         with st.spinner("Loading products…"):
@@ -1639,11 +1716,24 @@ if page == "Products":
 
 elif page == "Inventory":
     cfg = st.session_state.cfg
+    
+    # ── Migration for Original Stock (SQLite local) ─────────────────
+    try:
+        _conn_mig = _get_sqlite_conn()
+        _cur_mig = _conn_mig.cursor()
+        _cur_mig.execute("PRAGMA table_info(inventory)")
+        _cols = [r[1] for r in _cur_mig.fetchall()]
+        if "original_stock" not in _cols:
+            _conn_mig.execute("ALTER TABLE inventory ADD COLUMN original_stock INTEGER NOT NULL DEFAULT 0")
+            _conn_mig.commit()
+        _conn_mig.close()
+    except: pass
+
     st.title("Inventory")
     st.caption("Manage stock overview, adjustments, and outbound logs in one place.")
 
-    tab_overview, tab_adjust, tab_outbound = st.tabs(
-        ["Overview", "Adjust Stock", "Outbound Information"]
+    tab_overview, tab_adjust, tab_original, tab_outbound = st.tabs(
+        ["Overview", "Adjust Stock", "Original Stock", "Outbound Information"]
     )
 
     # Load shared data
@@ -1777,6 +1867,57 @@ elif page == "Inventory":
                                 _clear_data_caches()
                                 time.sleep(0.5)
                                 st.rerun()
+            st.divider()
+
+    # ── ORIGINAL STOCK ──────────────────────────
+    with tab_original:
+        if inv_df.empty:
+            st.info("No products found. Add products in the **Products** page first.")
+        else:
+            st.markdown("#### Purchased Inventory (Lifetime Total)")
+            st.caption(
+                "This reflects the **total quantity** of items you have ever acquired for your firm. "
+                "The `Adjust Stock` tab automatically increases this number when you ADD stock. "
+                "You can manually correct these values here if needed."
+            )
+            
+            for _, _pr in inv_df.iterrows():
+                _osku   = str(_pr.get("sku", ""))
+                _oname  = str(_pr.get("item_name", _osku))
+                _ostock = int(_pr.get("original_stock", 0))
+                _oimg   = str(_pr.get("image_url", ""))
+                
+                _oc1, _oc2, _oc3, _oc4, _oc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
+                with _oc1:
+                    if _oimg and _oimg not in ("N/A", "", "nan"): st.image(_oimg, width=56)
+                    else: st.markdown("<div style='width:56px;height:56px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:10px;'>No img</div>", unsafe_allow_html=True)
+                
+                with _oc2:
+                    st.markdown(f"**{_oname}**")
+                    st.caption(f"{_osku}")
+                
+                with _oc3:
+                    st.markdown(
+                        f"<div style='font-size:24px;font-weight:700;color:#818cf8;'>{_ostock}</div>"
+                        f"<div style='font-size:10px;color:#94a3b8;'>Lifetime Total</div>",
+                        unsafe_allow_html=True
+                    )
+                
+                with _oc4:
+                    # Input for absolute override
+                    _new_total = st.number_input("New Total", min_value=0, value=_ostock, key=f"orig_val_{_osku}", label_visibility="collapsed")
+                
+                with _oc5:
+                    if st.button("Set", key=f"btn_orig_{_osku}", width="stretch"):
+                        with st.spinner("Setting..."):
+                            ok, _msg = set_original_stock_all_dbs(_osku, int(_new_total), cfg)
+                            if ok:
+                                st.toast(f"Original stock updated: {_oname}", icon="📌")
+                                _clear_data_caches()
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to update some databases: {_msg}")
                 st.divider()
 
     # ── OUTBOUND INFORMATION ────────────────────
@@ -1828,12 +1969,40 @@ elif page == "Inventory":
 
 elif page == "Settings":
     st.title("Settings")
-    st.caption("Settings are saved to config.json in the app folder and load automatically on every visit.")
+    st.caption("Credentials are auto-saved the moment you leave any field — no need to click a button.")
 
-    # ── One-time toast reminder ──────────────────
-    if "_settings_toast_shown" not in st.session_state:
-        st.toast("Tip: after testing your keys, scroll to the bottom and click **Save Settings**!", icon="💾")
-        st.session_state["_settings_toast_shown"] = True
+    # ── Auto-save key map: session-state key → config.json key ──────
+    _SETTINGS_KEY_MAP = {
+        "_cfg_from_name":       "from_name",
+        "_cfg_subject":         "subject",
+        "_cfg_smtp_email":      "smtp_email",
+        "_cfg_smtp_pass":       "smtp_password",
+        "inp_freeimage_key":    "freeimage_api_key",
+        "inp_imgbb_key":        "imghippo_api_key",
+        "inp_sb_url":           "supabase_url",
+        "inp_sb_pat":           "supabase_pat",
+        "inp_sb_anon":          "supabase_key",
+        "inp_sb_publishable":   "supabase_publishable_key",
+        "inp_sb_service":       "supabase_service_role_key",
+        "inp_neon":             "neon_connection_string",
+    }
+
+    # Initialise session state keys from cfg (once per session)
+    for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
+        if _ss_k not in st.session_state:
+            st.session_state[_ss_k] = cfg.get(_cfg_k, "")
+
+    def _auto_save_settings():
+        _new = {**st.session_state.cfg}
+        for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
+            _new[_cfg_k] = st.session_state.get(_ss_k, "")
+        # Gmail app passwords are pasted with spaces — strip them before saving
+        _new["smtp_password"] = re.sub(r"\s+", "", _new.get("smtp_password", ""))
+        try:
+            save_config(_new)
+            st.session_state.cfg = _new
+        except Exception as _e:
+            st.error(f"Auto-save failed: {_e}")
 
     # ── VEI account note ─────────────────────────
     st.info(
@@ -1911,16 +2080,18 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     with col1:
         inp_from_name = st.text_input(
             "From Name",
-            value=cfg.get("from_name", ""),
             placeholder="Acme VEI Firm",
             help="Displayed as the sender name in the recipient's inbox",
+            key="_cfg_from_name",
+            on_change=_auto_save_settings,
         )
     with col2:
         inp_subject = st.text_input(
             "Default Subject Line",
-            value=cfg.get("subject", "Your Order Confirmation"),
             placeholder="Your Order Confirmation",
             help="Use {order_number} to insert the order number",
+            key="_cfg_subject",
+            on_change=_auto_save_settings,
         )
 
     # ── Gmail SMTP ──────────────────────────────
@@ -1943,17 +2114,19 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     with col3:
         inp_smtp_email = st.text_input(
             "Gmail Address",
-            value=cfg.get("smtp_email", ""),
             placeholder="yourname@gmail.com",
             help="The Gmail account emails will be sent from",
+            key="_cfg_smtp_email",
+            on_change=_auto_save_settings,
         )
     with col4:
         inp_smtp_pass = st.text_input(
             "App Password",
-            value=cfg.get("smtp_password", ""),
             type="password",
             placeholder="xxxx xxxx xxxx xxxx",
             help="The 16-character app password from your Google account",
+            key="_cfg_smtp_pass",
+            on_change=_auto_save_settings,
         )
 
     st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
@@ -1992,11 +2165,11 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with _fi_l:
             inp_freeimage_key = st.text_input(
                 "Freeimage.host API Key",
-                value=cfg.get("freeimage_api_key", ""),
                 type="password",
                 placeholder="your_api_key_here",
                 help="freeimage.host → Menu → API → copy your key",
                 key="inp_freeimage_key",
+                on_change=_auto_save_settings,
             )
         with _fi_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
@@ -2044,11 +2217,11 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with _ib_l:
             inp_imgbb_key = st.text_input(
                 "Imghippo API Key",
-                value=cfg.get("imghippo_api_key", ""),
                 type="password",
                 placeholder="your_imghippo_api_key",
                 help="imghippo.com → Settings → API Keys → Generate",
                 key="inp_imgbb_key",
+                on_change=_auto_save_settings,
             )
         with _ib_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
@@ -2130,47 +2303,47 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
 
         inp_sb_url = st.text_input(
             "Project URL",
-            value=cfg.get("supabase_url", ""),
             placeholder="https://xxxxxxxxxxxx.supabase.co",
             help="Supabase Dashboard → Settings → API → Project URL",
             key="inp_sb_url",
+            on_change=_auto_save_settings,
         )
         inp_sb_pat = st.text_input(
             "Personal Access Token",
-            value=cfg.get("supabase_pat", ""),
             type="password",
             placeholder="sbp_xxxxxxxxxxxxxxxxxxxx",
             help="supabase.com/dashboard/account/tokens → Generate new token. Required to auto-run SQL via the Management API.",
             key="inp_sb_pat",
+            on_change=_auto_save_settings,
         )
 
         col_sb1, col_sb2 = st.columns(2)
         with col_sb1:
             inp_sb_anon = st.text_input(
                 "Anon Key",
-                value=cfg.get("supabase_key", ""),
                 type="password",
                 placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
                 help="Supabase Dashboard → Settings → API → Anon key (legacy JWT starting with eyJ…)",
                 key="inp_sb_anon",
+                on_change=_auto_save_settings,
             )
         with col_sb2:
             inp_sb_publishable = st.text_input(
                 "Publishable Key",
-                value=cfg.get("supabase_publishable_key", ""),
                 type="password",
                 placeholder="sb_publishable_...",
                 help="Supabase Dashboard → Settings → API → Publishable key (starts with sb_publishable_…)",
                 key="inp_sb_publishable",
+                on_change=_auto_save_settings,
             )
 
         inp_sb_service = st.text_input(
             "Service Role Key",
-            value=cfg.get("supabase_service_role_key", ""),
             type="password",
             placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... (role: service_role)",
             help="Supabase Dashboard → Settings → API → Service role key. Used by the backend for full read/write access (bypasses RLS). Keep this secret.",
             key="inp_sb_service",
+            on_change=_auto_save_settings,
         )
 
         # Use service_role key for testing if provided, otherwise anon
@@ -2281,11 +2454,11 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
 
         inp_neon = st.text_input(
             "PostgreSQL Connection String",
-            value=cfg.get("neon_connection_string", ""),
             type="password",
             placeholder="postgresql://neondb_owner:[password]@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require",
             help="Neon Console → Dashboard → Connection string (must start with postgresql:// or postgres://)",
             key="inp_neon",
+            on_change=_auto_save_settings,
         )
 
         # Warn immediately if they pasted the REST URL instead
@@ -2368,10 +2541,11 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                     except Exception as exc:
                         st.error(f"Setup failed: {exc}")
 
-    # ── Save Settings ───────────────────────────
+    # ── Save Settings (force-save + cloud sync) ──
     st.divider()
+    st.caption("All fields above are auto-saved as you type. Use this button to force-save and sync products to the cloud.")
 
-    if st.button("Save Settings", type="primary", width="stretch"):
+    if st.button("Save & Sync to Cloud", type="primary", width="stretch"):
         # Save config first
         new_cfg = {
             "from_name":                inp_from_name.strip(),
@@ -2404,11 +2578,440 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
         
         if _synced:
             st.toast(f"Synced {_synced} products to cloud.", icon="🌥️")
-        st.success("Settings saved successfully!")
+        st.success("Settings saved and synced!")
         time.sleep(0.5)
         st.rerun()
 
 
+
+
+# ═════════════════════════════════════════════
+# API ENDPOINTS PAGE
+# ═════════════════════════════════════════════
+
+elif page == "API Endpoints":
+    cfg = st.session_state.cfg
+
+    _api_sb_url     = cfg.get("supabase_url", "").strip()
+    _api_sb_anon    = (cfg.get("supabase_publishable_key") or cfg.get("supabase_key", "")).strip()
+    _api_sb_service = cfg.get("supabase_service_role_key", "").strip()
+    _api_neon       = cfg.get("neon_connection_string", "").strip()
+    _api_rest_base  = f"{_api_sb_url}/rest/v1" if _api_sb_url else ""
+
+    st.title("API Endpoints")
+    st.caption(
+        "Your MERIT product catalog is a live Supabase database. "
+        "Any website built on Bolt.new, Lovable, Cursor, or plain JavaScript can read from it "
+        "in real-time — every product you add, edit, or delete here auto-updates on your site."
+    )
+
+    if not _api_sb_url:
+        st.warning(
+            "**Supabase is not configured.** "
+            "Go to **Settings → Database → Supabase** and enter your Project URL + Service Role Key, "
+            "then click **Setup Tables**. Come back here once that is done."
+        )
+        st.info(
+            "Once connected, this page gives you the live REST API endpoints, ready-to-paste "
+            "JavaScript code, and RLS SQL so your website can show your MERIT catalog automatically."
+        )
+        st.stop()
+
+    # ── Connection Details ────────────────────────────────────────────
+    st.subheader("Connection Details")
+    st.caption("Paste these two values into your website project's environment variables.")
+
+    _cd1, _cd2 = st.columns(2)
+    with _cd1:
+        st.text_input(
+            "NEXT_PUBLIC_SUPABASE_URL  /  VITE_SUPABASE_URL",
+            value=_api_sb_url,
+            disabled=True,
+            help="Your Supabase project URL — safe to expose in front-end code",
+        )
+    with _cd2:
+        _display_anon = _api_sb_anon if _api_sb_anon else "(not set — add Anon or Publishable key in Settings)"
+        st.text_input(
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY  /  VITE_SUPABASE_ANON_KEY",
+            value=_display_anon,
+            type="password" if _api_sb_anon else "default",
+            disabled=True,
+            help="Safe to expose in browsers when Row Level Security (RLS) is enabled (see SQL below)",
+        )
+    st.info(
+        "**Never put the Service Role Key in your website.** "
+        "It bypasses all RLS and would give visitors full write access to your database. "
+        "MERIT uses it server-side only; your website always uses the anon / publishable key."
+    )
+
+    # ── Quick-start platform guide ────────────────────────────────────
+    with st.expander("Quick Start — Bolt.new / Lovable / Cursor / v0", expanded=True):
+        st.markdown(f"""
+**Step 1 — Start a new project** on your vibe-coding platform and choose **Supabase** as the backend.
+
+**Step 2 — Connect to YOUR Supabase project** (not a new one the platform creates):
+
+| Variable name the platform asks for | Value to paste |
+|---|---|
+| `SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_URL` | `{_api_sb_url}` |
+| `SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` | *(copy from Settings → Database → Anon Key)* |
+
+**Step 3 — Tell the AI to use these tables:**
+
+```
+My Supabase database has two tables:
+- "inventory": sku, item_name, category, price, stock_left, status, image_url, original_stock
+- "products":  sku, name, category, price, image_url, active (boolean)
+
+Use the "inventory" table for the storefront — it has live stock levels.
+Filter with: stock_left > 0 (to hide out-of-stock items).
+```
+
+**Step 4 — Enable real-time** in your Supabase dashboard:
+1. Go to **Database → Replication** in your Supabase project
+2. Enable replication for the `inventory` and `products` tables
+3. The platform's AI can then subscribe to live changes
+
+**Step 5 — Run the RLS SQL** (see the *Row Level Security* tab below) so public visitors can read but not write.
+        """)
+
+    # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview ─
+    _tab_api, _tab_code, _tab_rls, _tab_live = st.tabs(
+        ["REST API Reference", "Code Examples", "Row Level Security SQL", "Live Data Preview"]
+    )
+
+    # ── REST API Reference ────────────────────────────────────────────
+    with _tab_api:
+        st.caption(
+            f"Base URL: `{_api_rest_base}`  ·  "
+            "All requests need headers: `apikey: <anon_key>` and `Authorization: Bearer <anon_key>`"
+        )
+
+        st.markdown("#### inventory table — products + live stock")
+        _inv_rows = [
+            ("GET",    f"`{_api_rest_base}/inventory?select=*`",                                   "All products"),
+            ("GET",    f"`{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name`",  "In-stock only, A→Z"),
+            ("GET",    f"`{_api_rest_base}/inventory?select=*&category=eq.Apparel`",               "Filter by category"),
+            ("GET",    f"`{_api_rest_base}/inventory?sku=eq.SKU001&select=*`",                     "Single product by SKU"),
+            ("GET",    f"`{_api_rest_base}/inventory?select=sku,item_name,price,image_url`",       "Specific columns only"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_inv_rows, columns=["Method", "Endpoint", "Description"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### products table — clean catalog (no stock data)")
+        _prod_rows = [
+            ("GET",    f"`{_api_rest_base}/products?select=*&active=eq.true`",                  "All active products"),
+            ("GET",    f"`{_api_rest_base}/products?select=*&active=eq.true&order=name`",       "Active, A→Z"),
+            ("GET",    f"`{_api_rest_base}/products?select=*&category=eq.Apparel&active=eq.true`", "Filter by category"),
+            ("GET",    f"`{_api_rest_base}/products?sku=eq.SKU001&select=*`",                   "Single product by SKU"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_prod_rows, columns=["Method", "Endpoint", "Description"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### outbound_logs table — order history")
+        _log_rows = [
+            ("GET",    f"`{_api_rest_base}/outbound_logs?select=*&order=created_at.desc`",       "All orders, newest first"),
+            ("GET",    f"`{_api_rest_base}/outbound_logs?select=*&order=created_at.desc&limit=10`", "Last 10 orders"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_log_rows, columns=["Method", "Endpoint", "Description"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### Required request headers")
+        st.code(
+            f"apikey: {_api_sb_anon or '<your-anon-key>'}\n"
+            f"Authorization: Bearer {_api_sb_anon or '<your-anon-key>'}",
+            language="http",
+        )
+
+    # ── Code Examples ─────────────────────────────────────────────────
+    with _tab_code:
+        _ex_js, _ex_ts, _ex_react, _ex_rt = st.tabs(
+            ["JavaScript", "TypeScript (Next.js)", "React Hook", "Real-time Subscription"]
+        )
+
+        _sb_url_ph = _api_sb_url or "YOUR_SUPABASE_URL"
+        _sb_key_ph = _api_sb_anon or "YOUR_SUPABASE_ANON_KEY"
+
+        with _ex_js:
+            st.code(f"""\
+// 1. Install:  npm install @supabase/supabase-js
+
+import {{ createClient }} from '@supabase/supabase-js'
+
+const supabase = createClient(
+  '{_sb_url_ph}',
+  '{_sb_key_ph}'
+)
+
+// Fetch all in-stock products
+async function getProducts() {{
+  const {{ data, error }} = await supabase
+    .from('inventory')
+    .select('*')
+    .gt('stock_left', 0)
+    .order('item_name')
+
+  if (error) throw error
+  return data   // array of {{ sku, item_name, price, image_url, stock_left, ... }}
+}}
+
+// Fetch products by category
+async function getByCategory(category) {{
+  const {{ data, error }} = await supabase
+    .from('inventory')
+    .select('sku, item_name, price, image_url, stock_left, status')
+    .eq('category', category)
+    .gt('stock_left', 0)
+
+  if (error) throw error
+  return data
+}}
+""", language="javascript")
+
+        with _ex_ts:
+            st.code(f"""\
+// app/lib/supabase.ts
+import {{ createClient }} from '@supabase/supabase-js'
+
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+)
+
+// types/product.ts
+export interface Product {{
+  sku: string
+  item_name: string
+  category: string
+  price: number
+  stock_left: number
+  status: string
+  image_url: string
+}}
+
+// app/lib/products.ts
+import {{ supabase }} from './supabase'
+import type {{ Product }} from '../types/product'
+
+export async function getInStockProducts(): Promise<Product[]> {{
+  const {{ data, error }} = await supabase
+    .from('inventory')
+    .select('*')
+    .gt('stock_left', 0)
+    .order('item_name')
+
+  if (error) throw error
+  return data as Product[]
+}}
+
+// .env.local
+// NEXT_PUBLIC_SUPABASE_URL={_sb_url_ph}
+// NEXT_PUBLIC_SUPABASE_ANON_KEY={_sb_key_ph}
+""", language="typescript")
+
+        with _ex_react:
+            st.code(f"""\
+// hooks/useProducts.ts — auto-refreshes when MERIT updates a product
+import {{ useEffect, useState }} from 'react'
+import {{ createClient }} from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+)
+
+export function useProducts(categoryFilter?: string) {{
+  const [products, setProducts] = useState([])
+  const [loading, setLoading]   = useState(true)
+
+  async function fetchProducts() {{
+    let query = supabase
+      .from('inventory')
+      .select('*')
+      .gt('stock_left', 0)
+      .order('item_name')
+
+    if (categoryFilter) query = query.eq('category', categoryFilter)
+
+    const {{ data }} = await query
+    setProducts(data ?? [])
+    setLoading(false)
+  }}
+
+  useEffect(() => {{
+    fetchProducts()
+
+    // Subscribe to real-time changes from MERIT
+    const channel = supabase
+      .channel('inventory-realtime')
+      .on('postgres_changes', {{
+        event: '*', schema: 'public', table: 'inventory'
+      }}, () => fetchProducts())   // re-fetch on any change
+      .subscribe()
+
+    return () => {{ supabase.removeChannel(channel) }}
+  }}, [categoryFilter])
+
+  return {{ products, loading }}
+}}
+
+// Usage in any component:
+// const {{ products, loading }} = useProducts()
+// const {{ products }} = useProducts('Apparel')
+""", language="typescript")
+
+        with _ex_rt:
+            st.markdown(
+                "When you add, edit, or delete a product in MERIT it writes to Supabase. "
+                "Enable **Replication** for the `inventory` table in your Supabase Dashboard "
+                "(Database → Replication → toggle inventory) and your site updates live:"
+            )
+            st.code(f"""\
+import {{ createClient }} from '@supabase/supabase-js'
+
+const supabase = createClient(
+  '{_sb_url_ph}',
+  '{_sb_key_ph}'
+)
+
+// Subscribe to ALL changes on the inventory table
+const channel = supabase
+  .channel('merit-sync')
+  .on(
+    'postgres_changes',
+    {{ event: '*', schema: 'public', table: 'inventory' }},
+    (payload) => {{
+      console.log('MERIT update:', payload.eventType, payload.new ?? payload.old)
+      // INSERT → payload.new has the new product
+      // UPDATE → payload.new has updated fields
+      // DELETE → payload.old has the deleted product's sku
+      refreshProductList()   // call your own refresh function
+    }}
+  )
+  .subscribe()
+
+// Clean up when component unmounts
+// supabase.removeChannel(channel)
+""", language="javascript")
+
+    # ── Row Level Security SQL ────────────────────────────────────────
+    with _tab_rls:
+        st.markdown(
+            "Run this SQL in your Supabase project to allow public **read** access "
+            "while keeping all writes protected (MERIT writes using the service role key, "
+            "which bypasses RLS)."
+        )
+        st.markdown("**How to run it:** Supabase Dashboard → SQL Editor → New Query → paste → Run")
+
+        _rls_sql = """\
+-- ── Enable Row Level Security ────────────────────────────────────────
+-- This locks down the tables so only allowed operations go through.
+ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
+
+-- ── Allow anyone to READ products ────────────────────────────────────
+-- Your website visitors (using the anon key) can fetch products.
+-- MERIT writes using the service role key, which bypasses RLS entirely.
+CREATE POLICY "Public can read inventory"
+  ON inventory FOR SELECT
+  USING (true);
+
+CREATE POLICY "Public can read products"
+  ON products FOR SELECT
+  USING (true);
+
+-- ── Optional: allow only active products to be read ──────────────────
+-- Replace the products policy above with this if you want to hide
+-- products you have marked inactive in MERIT:
+-- CREATE POLICY "Public can read active products"
+--   ON products FOR SELECT
+--   USING (active = true);
+
+-- ── Verify RLS is on ─────────────────────────────────────────────────
+SELECT tablename, rowsecurity
+FROM   pg_tables
+WHERE  schemaname = 'public'
+  AND  tablename IN ('inventory', 'products', 'outbound_logs');
+"""
+        st.code(_rls_sql, language="sql")
+
+        st.divider()
+        st.markdown("#### Full table schema (if you need to re-create tables)")
+        with st.expander("Show CREATE TABLE SQL", expanded=False):
+            st.code(SETUP_SQL, language="sql")
+
+    # ── Live Data Preview ─────────────────────────────────────────────
+    with _tab_live:
+        st.caption("Live snapshot from your Supabase database — this is exactly what your website will see.")
+        if st.button("Refresh", key="btn_api_refresh"):
+            st.cache_data.clear()
+
+        try:
+            from supabase import create_client as _sc  # type: ignore
+            _live_key = _api_sb_service or _api_sb_anon
+            if not _live_key:
+                st.warning("Add your Supabase Service Role or Anon key in Settings to preview live data.")
+            else:
+                _live_client = _sc(_api_sb_url, _live_key)
+
+                _preview_inv, _preview_prod = st.columns(2)
+                with _preview_inv:
+                    st.markdown("**inventory** table")
+                    try:
+                        _inv_res = _live_client.table("inventory").select(
+                            "sku,item_name,price,stock_left,status"
+                        ).order("item_name").limit(50).execute()
+                        if _inv_res.data:
+                            st.dataframe(pd.DataFrame(_inv_res.data), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No rows in inventory yet. Add products in the Products page.")
+                    except Exception as _e:
+                        st.error(f"Could not fetch inventory: {_e}")
+
+                with _preview_prod:
+                    st.markdown("**products** table")
+                    try:
+                        _prod_res = _live_client.table("products").select(
+                            "sku,name,category,price,active"
+                        ).order("name").limit(50).execute()
+                        if _prod_res.data:
+                            st.dataframe(pd.DataFrame(_prod_res.data), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No rows in products yet. Add products in the Products page.")
+                    except Exception as _e:
+                        st.error(f"Could not fetch products: {_e}")
+        except ImportError:
+            st.error("Run `pip install supabase` to enable live preview.")
+
+    # ── How auto-sync works ───────────────────────────────────────────
+    st.divider()
+    st.subheader("How auto-sync works")
+    st.markdown("""
+| Action in MERIT | What happens in Supabase |
+|---|---|
+| Add a product | Row inserted into `inventory` **and** `products` |
+| Edit a product (name, price, image) | Row updated in both tables |
+| Delete a product | Row deleted from both tables |
+| Adjust stock in Inventory page | `stock_left` and `status` updated in `inventory` |
+| Send an email order | Row inserted into `outbound_logs` |
+
+Your website subscribes to these tables via Supabase Realtime (see *Real-time Subscription* tab above).
+No polling, no manual export — changes appear on your site within milliseconds.
+""")
+
+    if _api_neon:
+        st.info(
+            "**Neon database is also configured.** "
+            "Neon stores the same data as Supabase but does not support real-time subscriptions. "
+            "For a live-updating website, use Supabase as shown above. "
+            "Neon is still a reliable cloud backup for your data."
+        )
 
 
 # ═════════════════════════════════════════════

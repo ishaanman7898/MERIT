@@ -16,7 +16,6 @@ MERIT is a browser-based app built specifically for **Virtual Enterprise Interna
    - [4.4 Image Hosting — Imghippo (alternative)](#44-image-hosting--imghippo-alternative)
    - [4.5 Supabase cloud database](#45-supabase-cloud-database)
    - [4.6 Neon cloud database (alternative)](#46-neon-cloud-database-alternative)
-   - [4.7 Save Settings reminder](#47-save-settings-reminder)
 5. [Using Email Sender](#5-using-email-sender)
 6. [Using Products](#6-using-products)
 7. [Using Inventory](#7-using-inventory)
@@ -24,9 +23,15 @@ MERIT is a browser-based app built specifically for **Virtual Enterprise Interna
    - [7.2 Adjusting stock](#72-adjusting-stock)
    - [7.3 Outbound Information — email tracking](#73-outbound-information--email-tracking)
 8. [How databases work (offline fallback + sync)](#8-how-databases-work-offline-fallback--sync)
-9. [Error messages explained](#9-error-messages-explained)
-10. [Frequently asked questions](#10-frequently-asked-questions)
-11. [Excel Import — VEI Checkout](#11-excel-import--vei-checkout)
+9. [API Endpoints — connect your website](#9-api-endpoints--connect-your-website)
+   - [9.1 What it does](#91-what-it-does)
+   - [9.2 Quick start (Bolt.new / Lovable / Cursor)](#92-quick-start-boltnew--lovable--cursor)
+   - [9.3 REST API reference](#93-rest-api-reference)
+   - [9.4 Row Level Security (public read)](#94-row-level-security-public-read)
+   - [9.5 Real-time subscriptions](#95-real-time-subscriptions)
+10. [Error messages explained](#10-error-messages-explained)
+11. [Frequently asked questions](#11-frequently-asked-questions)
+12. [Excel Import — VEI Checkout](#12-excel-import--vei-checkout)
 
 ---
 
@@ -252,11 +257,12 @@ Neon is another free online database, similar to Supabase. You only need **one**
 
 ---
 
-### 4.7 Save Settings reminder
+### 4.7 Auto-save
 
-**After completing any section above, always scroll to the bottom of the Settings page and click the blue Save Settings button.**
+**Settings are saved automatically** the moment you leave any field (press Tab, click elsewhere, or press Enter).  
+You do not need to click any button. The **Save & Sync to Cloud** button at the bottom of Settings is only needed when you want to force-push all existing products up to Supabase or Neon in one go.
 
-Nothing is saved until you click that button. The app will show a green "Settings saved" message when it works. Then you can close and reopen the app and all your settings will still be there.
+You can close and reopen the app at any time — all your credentials will still be there.
 
 ---
 
@@ -379,6 +385,87 @@ MERIT always writes your data to every database you have configured at the same 
 1. Supabase (if configured and reachable)
 2. Neon (if configured and reachable)
 3. Local SQLite (always available)
+
+---
+
+## 9b. API Endpoints — connect your website
+
+> **This page is inside MERIT under the "API Endpoints" navigation item.**
+> It only becomes available after you connect Supabase in Settings.
+
+### 9b.1 What it does
+
+Every product you add, edit, or delete in MERIT is immediately written to your Supabase database.  
+Any website — built on Bolt.new, Lovable, Cursor, v0, or written by hand — can connect to the same Supabase project and display your live product catalog without any manual exporting or copy-pasting.
+
+**Two tables are kept in sync:**
+
+| Table | Columns | Best used for |
+|---|---|---|
+| `inventory` | sku, item_name, category, price, stock_left, status, image_url | Storefront product listing with stock levels |
+| `products` | sku, name, category, price, image_url, active | Clean catalog, no stock data |
+
+### 9b.2 Quick start (Bolt.new / Lovable / Cursor)
+
+1. Start a new project on your vibe-coding platform and choose **Supabase** as the backend.
+2. When asked for connection details, enter:
+   - **SUPABASE_URL** → your Supabase project URL (shown in MERIT → API Endpoints)
+   - **SUPABASE_ANON_KEY** → your anon / publishable key (Settings → Database → Anon Key)
+3. Tell the AI assistant to use the `inventory` table and filter with `stock_left > 0` for in-stock items.
+4. Run the **Row Level Security SQL** (shown in MERIT → API Endpoints → Row Level Security SQL tab) so visitors can read products without the ability to write anything.
+5. Enable **Replication** for the `inventory` table in Supabase Dashboard → Database → Replication for live updates.
+
+### 9b.3 REST API reference
+
+All calls need two headers:
+```
+apikey: <your-anon-key>
+Authorization: Bearer <your-anon-key>
+```
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/rest/v1/inventory?select=*` | All products |
+| GET | `/rest/v1/inventory?select=*&stock_left=gte.1&order=item_name` | In-stock only, A→Z |
+| GET | `/rest/v1/inventory?category=eq.Apparel&select=*` | Filter by category |
+| GET | `/rest/v1/inventory?sku=eq.SKU001&select=*` | Single product by SKU |
+| GET | `/rest/v1/products?select=*&active=eq.true&order=name` | Clean catalog, active only |
+
+### 9b.4 Row Level Security (public read)
+
+Run this SQL in your Supabase Dashboard → SQL Editor before going live:
+
+```sql
+ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Public can read inventory"
+  ON inventory FOR SELECT USING (true);
+
+CREATE POLICY "Public can read products"
+  ON products FOR SELECT USING (true);
+```
+
+This allows anyone with the anon key to read products, but **only MERIT** (using the service role key) can write.
+
+### 9b.5 Real-time subscriptions
+
+Enable replication in Supabase Dashboard → Database → Replication → toggle the `inventory` table, then use this in your website:
+
+```javascript
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+supabase
+  .channel('merit-sync')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory' }, () => {
+    refreshProducts()   // re-fetch your product list
+  })
+  .subscribe()
+```
+
+Every time you add, edit, or delete a product in MERIT, your website refreshes automatically.
 
 ---
 
@@ -609,7 +696,7 @@ Maybe. School accounts controlled by Google Workspace sometimes block App Passwo
 
 **What happens if I forget to click Save Settings?**
 
-Your changes are lost when you navigate to a different page. The app will show all the fields with the old values next time you come back to Settings. Always click **Save Settings** after making any change.
+Settings are now **auto-saved** the moment you leave any field (tab out, click elsewhere, press Enter). You no longer need to click "Save & Sync to Cloud" for credentials to persist — that button only force-saves and triggers a cloud product sync.
 
 ---
 
