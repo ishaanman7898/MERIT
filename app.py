@@ -33,16 +33,51 @@ st.markdown("""
 @keyframes toast-fade-in { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes toast-fade-out { from { opacity: 1; } to { opacity: 0; } }
 
-/* Button hover effects */
-.stButton > button:hover {
-    border-color: #4F46E5 !important;
-    color: #4F46E5 !important;
+/* Fix all buttons - avoid blue text/outlines */
+.stButton > button {
+    transition: all 0.2s ease !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+/* Primary buttons (Main actions) */
+.stButton > button[kind="primary"] {
+    background-color: #dc2626 !important; /* Red-600 */
+    border-color: #dc2626 !important;
+    color: #ffffff !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #ef4444 !important; /* Red-500 */
+    border-color: #ef4444 !important;
+    color: #ffffff !important;
     transform: translateY(-1.5px);
-    box-shadow: 0 6px 12px rgba(79, 70, 229, 0.15);
-    transition: all 0.2s ease;
+    box-shadow: 0 6px 15px rgba(220, 38, 38, 0.3) !important;
+}
+.stButton > button[kind="primary"]:focus:not(:active) {
+    background-color: #dc2626 !important;
+    border-color: #dc2626 !important;
+    color: #ffffff !important;
+    box-shadow: none !important;
+}
+
+/* Secondary / Default buttons */
+.stButton > button[kind="secondary"] {
+    border-color: #e4e4e7 !important;
+    color: #3f3f46 !important;
+}
+.stButton > button[kind="secondary"]:hover {
+    border-color: #dc2626 !important;
+    color: #dc2626 !important;
+    transform: translateY(-1.5px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05) !important;
+}
+.stButton > button[kind="secondary"]:focus:not(:active) {
+    border-color: #e4e4e7 !important;
+    color: #3f3f46 !important;
+    box-shadow: none !important;
 }
 .stButton > button:active {
-    transform: translateY(0px);
+    transform: translateY(0px) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1201,7 +1236,7 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
         return [], [f"No products column found (items ordered). Detected headers: {headers}"]
     
     rows = []
-    required_keys = ["name", "email", "order_number", "products", "total_cost"]
+    required_keys = ["name", "email", "order_number", "products", "subtotal", "tax", "shipping", "total_cost"]
     for i, row in enumerate(reader, start=2):
         mapped = {c: (row.get(r) or "").strip() for r, c in hmap.items()}
         email  = mapped.get("email", "")
@@ -2501,8 +2536,7 @@ elif page == "Email Sender":
     with tab_csv:
         st.markdown("#### Import from a CSV or TSV file")
         st.caption(
-            "Required columns: **Name**, **Email**, **Order #**, **Products**, **Total**. "
-            "Optional: **Subtotal**, **Tax**, **Shipping**. "
+            "Required columns: **Name**, **Email**, **Order #**, **Products**, **Subtotal**, **Tax**, **Shipping**, **Total**. "
             "Column names are flexible — most variations are recognised automatically."
         )
 
@@ -2544,6 +2578,10 @@ elif page == "Email Sender":
 | `{{order_number}}` | Order number |
 | `{{from_name}}` | Your VEI firm name |
 | `{{items_html}}` | Ready-made HTML rows for each ordered product (with images when available) |
+| `{{subtotal}}` | Subtotal amount ($) |
+| `{{tax}}` | Tax amount ($) |
+| `{{shipping}}` | Shipping amount ($) |
+| `{{total_cost}}` | Total order cost ($) |
 """
         with st.expander("Available template variables", expanded=True):
             st.markdown(_tpl_vars_md)
@@ -2555,12 +2593,21 @@ Use ONLY these variables (double curly braces, exactly as shown):
   {{order_number}} — order number
   {{from_name}}    — VEI firm name
   {{items_html}}   — pre-built HTML <tr> rows listing the ordered products (with product images when available). Wrap this inside a <table cellpadding="0" cellspacing="0" style="width:100%;">…</table>.
+  {{subtotal}}     — subtotal amount ($)
+  {{tax}}          — tax amount ($)
+  {{shipping}}     — shipping amount ($)
+  {{total_cost}}   — total order cost ($)
 
 Requirements:
 - Return a COMPLETE HTML document (<!DOCTYPE html> … </html>)
 - Email-safe: inline styles only, no external CSS or JS, table-based layout
 - Mobile-friendly: max content width 600 px, readable on small screens
-- Must include all four variables above
+- Must include all variables where appropriate
+
+Example default HTML template for inspiration:
+--------------------------------------------
+""" + _DEFAULT_EMAIL_TEMPLATE + """
+--------------------------------------------
 
 Design brief: [describe your style here — e.g. "clean and minimal, brand color #4F46E5, sans-serif font, white background, dark header bar, soft rounded corners"]
 """
@@ -2577,7 +2624,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             height=380,
             key="email_tpl_editor",
             label_visibility="collapsed",
-            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}} as placeholders.",
+            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}}, {{subtotal}}, {{tax}}, {{shipping}}, {{total_cost}} as placeholders.",
         )
 
         _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
@@ -2676,19 +2723,6 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                         time.sleep(0.5)
                         st.rerun()
             st.divider()
-
-        # Show image match summary
-        if _products_lookup:
-            matched = set()
-            for order in queue:
-                for p in split_products(order.get("products", "")):
-                    p_l = p.lower()
-                    for k in _products_lookup:
-                        if p_l in k.lower() or k.lower() in p_l:
-                            matched.add(k)
-                            break
-            if matched:
-                st.caption(f"Images found for: {', '.join(sorted(matched))}")
 
         st.divider()
 
