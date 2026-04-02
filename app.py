@@ -19,6 +19,18 @@ import streamlit as st
 import sqlite3
 
 # ─────────────────────────────────────────────
+# Startup Dependencies
+# ─────────────────────────────────────────────
+try:
+    import openpyxl # type: ignore
+except ImportError:
+    import subprocess, sys
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except:
+        pass
+
+# ─────────────────────────────────────────────
 # Custom CSS for UI enhancements
 # ─────────────────────────────────────────────
 
@@ -1281,6 +1293,71 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
     if not rows:
         warns.append("No valid rows found.")
     return rows, warns
+
+
+def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str]]:
+    """Links transactions and items from two separate CSV strings."""
+    warns = []
+    try:
+        # Transactions
+        t_text = tx_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        t_reader = csv.DictReader(io.StringIO(t_text))
+        t_headers = t_reader.fieldnames or []
+        t_hmap = _map_headers(t_headers)
+        
+        # Items
+        i_text = items_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        i_reader = list(csv.DictReader(io.StringIO(i_text)))
+        i_headers = (csv.DictReader(io.StringIO(i_text))).fieldnames or []
+        i_hmap = _map_headers(i_headers)
+        
+        # Pre-process items into a lookup
+        # Need transaction_no linking
+        tx_items = {}
+        for row in i_reader:
+            # Map headers for this specific row
+            m = {t: (row.get(r) or "").strip() for r, t in i_hmap.items()}
+            t_no = m.get("order_number") # alias for transaction_no
+            item = m.get("products")     # alias for item_name
+            qty  = m.get("category")     # Quantity often maps here if not found, let's check _ALIASES
+            # Wait, _ALIASES doesn't have quantity. Let's check raw headers.
+            # Sales transaction items CSV has: Transaction no,Item name,Item number,Price,Quantity,Amount
+            if not t_no: # fallback to raw 'Transaction no'
+                t_no = str(row.get('Transaction no') or row.get('transaction_no') or '').strip()
+            if not item:
+                item = str(row.get('Item name') or row.get('item_name') or '').strip()
+            
+            _qty_raw = row.get('Quantity') or row.get('quantity') or 1
+            try: _q = int(float(_qty_raw))
+            except: _q = 1
+            
+            if t_no and item:
+                if t_no not in tx_items: tx_items[t_no] = []
+                tx_items[t_no].append(f"{item} x {_q}" if _q > 1 else item)
+        
+        rows = []
+        for i, row in enumerate(t_reader, start=2):
+            m = {t: (row.get(r) or "").strip() for r, t in t_hmap.items()}
+            email = m.get("email")
+            t_no  = m.get("order_number") or str(row.get('Transaction no') or '').strip()
+            name  = m.get("name", "Customer")
+            if not email or not validate_email(email) or not t_no: continue
+            
+            items_list = " | ".join(tx_items.get(t_no, ["N/A"]))
+            rows.append({
+                "name":          name,
+                "email":         email,
+                "order_number":  t_no,
+                "products":      items_list,
+                "subtotal":      float(m.get("subtotal", 0.0) or 0.0),
+                "discount":      float(m.get("discount", 0.0) or 0.0),
+                "tax":           float(m.get("tax", 0.0) or 0.0),
+                "shipping":      float(m.get("shipping", 0.0) or 0.0),
+                "total_cost":    float(m.get("total_cost", 0.0) or 0.0),
+            })
+        return rows, warns
+    except Exception as e:
+        return [], [f"Error linking multi-CSV: {e}"]
 
 
 # ═════════════════════════════════════════════
@@ -2559,34 +2636,64 @@ elif page == "Email Sender":
                         st.error("No valid orders found in the Excel file.")
     # ─ CSV ──────────────────────────────────────
     with tab_csv:
-        st.markdown("#### Import from a CSV or TSV file")
+        st.markdown("#### Import from CSV file(s)")
         st.caption(
-            "Required columns: **Name**, **Email**, **Order #**, **Products**, **Subtotal**, **Tax**, **Shipping**, **Total**. "
-            "Column names are flexible — most variations are recognised automatically."
+            "Upload a **single CSV** with all order data, or **two CSV files** (one Transactions, one Items/Products) "
+            "to link multiple items per person automatically."
         )
 
-        uploaded = st.file_uploader(
-            "Choose a CSV or TSV file",
+        uploaded_files = st.file_uploader(
+            "Choose CSV file(s)",
             type=["csv", "tsv", "txt"],
-            key="csv_upload",
+            accept_multiple_files=True,
+            key="csv_upload_multi",
         )
 
-        if st.button("Import", type="primary", key="csv_import"):
-            if not uploaded:
-                st.warning("Upload a file first.")
-                st.stop()
-
-            raw = uploaded.read().decode("utf-8", errors="replace")
-            rows, warns = parse_csv_text(raw)
-            for w in warns:
-                st.warning(w)
-            if rows:
-                with st.spinner("Importing orders..."):
-                    st.session_state.queue.extend(rows)
-                    st.toast(f"Imported {len(rows)} orders.", icon="📥")
-                    st.success(f"Imported {len(rows)} orders into the queue.")
-                    time.sleep(0.5)
-                    st.rerun()
+        if st.button("Import CSV", type="primary", key="csv_import"):
+            if not uploaded_files:
+                st.warning("Please upload at least one CSV file.")
+            elif len(uploaded_files) == 1:
+                # Single file logic
+                with st.spinner("Parsing CSV..."):
+                    raw = uploaded_files[0].read().decode("utf-8", errors="replace")
+                    rows, warns = parse_csv_text(raw)
+                    for w in warns: st.warning(w)
+                    if rows:
+                        st.session_state.queue.extend(rows)
+                        st.toast(f"Imported {len(rows)} orders.", icon="📥")
+                        st.success(f"Imported {len(rows)} orders into the queue.")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error("No valid orders found in the CSV file.")
+            elif len(uploaded_files) == 2:
+                # Two-file link logic
+                f1, f2 = uploaded_files[0], uploaded_files[1]
+                t_file, i_file = None, None
+                # Very simple heuristic: if 'item', 'prod', or 'trans_items' is in the name, it's the items sheet
+                for f in [f1, f2]:
+                    fname = f.name.lower()
+                    if any(x in fname for x in ("item", "prod")): i_file = f
+                    else: t_file = f
+                
+                if not t_file or not i_file:
+                    st.error("Could not differentiate files. Please ensure the items/products file has 'item' in its filename.")
+                else:
+                    with st.spinner("Linking CSV transactions and products..."):
+                        t_raw = t_file.read().decode("utf-8", errors="replace")
+                        i_raw = i_file.read().decode("utf-8", errors="replace")
+                        rows, warns = parse_multi_csv(t_raw, i_raw)
+                        for w in warns: st.warning(w)
+                        if rows:
+                            st.session_state.queue.extend(rows)
+                            st.toast(f"Imported {len(rows)} linked orders.", icon="📥")
+                            st.success(f"Imported {len(rows)} orders into the queue (multi-CSV).")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("No valid linked orders found.")
+            else:
+                st.warning("Only supports 1 or 2 files (Transactions + Items).")
 
     # ─ Email Template ───────────────────────────
     with tab_template:
