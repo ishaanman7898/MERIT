@@ -62,18 +62,21 @@ st.markdown("""
 
 /* Secondary / Default buttons */
 .stButton > button[kind="secondary"] {
-    border-color: #e4e4e7 !important;
-    color: #3f3f46 !important;
+    background-color: #3f3f46 !important; /* Zinc-700 */
+    border-color: #3f3f46 !important;
+    color: #ffffff !important;
 }
 .stButton > button[kind="secondary"]:hover {
-    border-color: #dc2626 !important;
-    color: #dc2626 !important;
+    background-color: #52525b !important; /* Zinc-600 */
+    border-color: #52525b !important;
+    color: #ffffff !important;
     transform: translateY(-1.5px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05) !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
 }
 .stButton > button[kind="secondary"]:focus:not(:active) {
-    border-color: #e4e4e7 !important;
-    color: #3f3f46 !important;
+    background-color: #3f3f46 !important;
+    border-color: #3f3f46 !important;
+    color: #ffffff !important;
     box-shadow: none !important;
 }
 .stButton > button:active {
@@ -1103,6 +1106,7 @@ def build_text(order: dict, from_name: str) -> str:
     sub       = f"{float(order.get('subtotal', 0.0)):.2f}"
     tax       = f"{float(order.get('tax', 0.0)):.2f}"
     ship      = f"{float(order.get('shipping', 0.0)):.2f}"
+    disc      = f"{float(order.get('discount', 0.0)):.2f}"
     cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     lines     = "\n".join(f"  - {p}" for p in prods) if prods else "  - N/A"
     return (
@@ -1146,10 +1150,9 @@ def _norm(h: str) -> str:
 def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
     import pandas as pd
     try:
-        import openpyxl
+        import openpyxl # type: ignore
     except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return [], ["Excel engine 'openpyxl' missing. Run: pip install openpyxl"]
     
     warns = []
     try:
@@ -2458,12 +2461,16 @@ elif page == "Email Sender":
             key="bulk_editor",
             column_config={
                 "Name":     st.column_config.TextColumn(width="medium"),
-                "Email":    st.column_config.TextColumn(width="large"),
+                "Email":    st.column_config.TextColumn(width="medium"),
                 "Order #":  st.column_config.TextColumn(width="small"),
                 "Products": st.column_config.TextColumn(
-                    width="large",
+                    width="medium",
                     help="Separate multiple products with |",
                 ),
+                "Subtotal": st.column_config.NumberColumn(width="small", format="$%.2f"),
+                "Discount": st.column_config.NumberColumn(width="small", format="$%.2f"),
+                "Tax":      st.column_config.NumberColumn(width="small", format="$%.2f"),
+                "Shipping": st.column_config.NumberColumn(width="small", format="$%.2f"),
                 "Total Cost": st.column_config.NumberColumn(width="small", format="$%.2f"),
             },
         )
@@ -2502,6 +2509,9 @@ elif page == "Email Sender":
                     co = float(row.get("Total Cost", 0.0) or 0.0)
                     
                     if not nm or nm == "nan" or not em or em == "nan" or not pr or pr == "nan" or co <= 0:
+                        continue
+                    # Skip if any of the key fields are missing or zero (optional ones like tax/disc/ship can be 0)
+                    if not on or on == "nan":
                         continue
                     if add_to_queue(nm, em, on, pr, sb, tx, sh, co, ds):
                         added += 1
@@ -2696,11 +2706,12 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         st.info("Queue is empty. Add orders using the tabs above.")
 
     else:
-        header_col, action_col = st.columns([6, 1])
+        header_col, action_col = st.columns([10, 2])
         with header_col:
             st.subheader(f"Queue  —  {len(queue)} order{'s' if len(queue) != 1 else ''}")
         with action_col:
-            if st.button("Clear All", key="clear_queue"):
+            st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+            if st.button("Clear All", key="clear_queue", width="stretch"):
                 with st.spinner("Clearing queue..."):
                     st.session_state.queue = []
                     st.toast("Queue cleared.", icon="🧹")
