@@ -21,12 +21,14 @@ import sqlite3
 # ─────────────────────────────────────────────
 # Startup Dependencies
 # ─────────────────────────────────────────────
+print("Checking dependencies...")
 try:
     import openpyxl # type: ignore
 except ImportError:
     import subprocess, sys
+    print("Installing openpyxl...")
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
     except:
         pass
 
@@ -1136,23 +1138,25 @@ def build_text(order: dict, from_name: str) -> str:
     )
 
 
-# ─────────────────────────────────────────────
-# CSV parsing
-# ─────────────────────────────────────────────
-
 _ALIASES = {
-    "name":         ["name", "full_name", "customer_name", "customer", "first_name", "billing_name"],
-    "email":        ["email", "email_address", "e_mail", "mail", "customer_email"],
-    "order_number": ["order_number", "order_no", "order_id", "order",
-                     "orderid", "ordernumber", "transaction_no", "transaction"],
-    "products":     ["products", "items", "product_list", "product",
-                     "item", "description", "ordered_items"],
+    "name":         ["name", "customer_name", "billing_name", "shipping_name", "customer"],
+    "email":        ["email", "customer_email", "e-mail"],
+    "order_number": ["order_number", "order_no", "transaction_no", "transaction_id", "id"],
+    "products":     ["products", "items", "item", "description", "ordered_items"],
     "subtotal":     ["subtotal", "sub_total", "price_subtotal", "sub_total_amount"],
     "tax":          ["tax", "tax_amount", "taxes", "vat"],
     "shipping":     ["shipping", "shipping_cost", "freight", "delivery"],
     "discount":     ["discount", "discount_amount", "off", "promo_discount"],
     "total_cost":   ["total_cost", "total", "cost", "total_price", "amount", "price", "order_total"],
 }
+
+
+def _parse_money(val: any) -> float:
+    """Cleans currency strings and converts to float."""
+    if val is None or val == "": return 0.0
+    s = str(val).replace("$", "").replace(",", "").replace("-", "").strip()
+    try: return round(float(s), 2)
+    except: return 0.0
 
 
 def _norm(h: str) -> str:
@@ -1164,13 +1168,14 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
     try:
         import openpyxl # type: ignore
     except ImportError:
-        return [], ["Excel engine 'openpyxl' missing. Run: pip install openpyxl"]
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+        import openpyxl # type: ignore
     
     warns = []
     try:
         xl = pd.ExcelFile(io.BytesIO(file_bytes))
         sheets = xl.sheet_names
-        # Map sheets (some might have slight name variations)
         tx_sheet = next((s for s in sheets if "transaction" in s.lower() and "item" not in s.lower()), None)
         item_sheet = next((s for s in sheets if "transaction" in s.lower() and "item" in s.lower()), None)
         
@@ -1180,9 +1185,7 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
         df_tx = pd.read_excel(xl, sheet_name=tx_sheet)
         df_items = pd.read_excel(xl, sheet_name=item_sheet)
         
-        # Link products to transactions
         tx_items = {}
-        # Normalize columns for the items sheet
         df_items.columns = [_norm(c) for c in df_items.columns]
         for _, obj in df_items.iterrows():
             t_no = str(obj.get('transaction_no', '')).strip()
@@ -1201,7 +1204,6 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
                     tx_items[t_no].append(item)
         
         rows = []
-        # Normalize columns for the transactions sheet
         df_tx.columns = [_norm(c) for c in df_tx.columns]
         for _, tx in df_tx.iterrows():
             t_no  = str(tx.get('transaction_no', '')).strip()
@@ -1211,7 +1213,6 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
             if not t_no or not email or not validate_email(email):
                 continue
             
-            # Combine items
             items_list = " | ".join(tx_items.get(t_no, ["N/A"]))
             
             rows.append({
@@ -1219,11 +1220,11 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
                 "email":         email,
                 "order_number":  t_no,
                 "products":      items_list,
-                "subtotal":      round(float(tx.get('subtotal', 0.0) or 0.0), 2),
-                "discount":      round(float(tx.get('discount', 0.0) or 0.0), 2),
-                "tax":           round(float(tx.get('tax', 0.0) or 0.0), 2),
-                "shipping":      round(float(tx.get('shipping', 0.0) or 0.0), 2),
-                "total_cost":    round(float(tx.get('total', 0.0) or 0.0), 2),
+                "subtotal":      _parse_money(tx.get('subtotal', 0.0)),
+                "discount":      _parse_money(tx.get('discount', 0.0)),
+                "tax":           _parse_money(tx.get('tax', 0.0)),
+                "shipping":      _parse_money(tx.get('shipping', 0.0)),
+                "total_cost":    _parse_money(tx.get('total', 0.0)),
             })
         return rows, warns
     except Exception as e:
@@ -1270,7 +1271,6 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
             warns.append(f"Row {i}: skipped — invalid or missing email")
             continue
         
-        # Validation for required fields
         is_missing = False
         for rk in required_keys:
             if not mapped.get(rk):
@@ -1284,11 +1284,11 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
             "email":         email,
             "order_number":  mapped.get("order_number", ""),
             "products":      mapped.get("products", ""),
-            "subtotal":      float(mapped.get("subtotal", 0.0) or 0.0),
-            "discount":      float(mapped.get("discount", 0.0) or 0.0),
-            "tax":           float(mapped.get("tax", 0.0) or 0.0),
-            "shipping":      float(mapped.get("shipping", 0.0) or 0.0),
-            "total_cost":    float(mapped.get("total_cost", 0.0) or 0.0),
+            "subtotal":      _parse_money(mapped.get("subtotal")),
+            "discount":      _parse_money(mapped.get("discount")),
+            "tax":           _parse_money(mapped.get("tax")),
+            "shipping":      _parse_money(mapped.get("shipping")),
+            "total_cost":    _parse_money(mapped.get("total_cost")),
         })
     if not rows:
         warns.append("No valid rows found.")
@@ -1299,34 +1299,21 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
     """Links transactions and items from two separate CSV strings."""
     warns = []
     try:
-        # Transactions
         t_text = tx_text.replace("\r\n", "\n").replace("\r", "\n").strip()
         t_reader = csv.DictReader(io.StringIO(t_text))
         t_headers = t_reader.fieldnames or []
         t_hmap = _map_headers(t_headers)
         
-        # Items
         i_text = items_text.replace("\r\n", "\n").replace("\r", "\n").strip()
         i_reader = list(csv.DictReader(io.StringIO(i_text)))
         i_headers = (csv.DictReader(io.StringIO(i_text))).fieldnames or []
         i_hmap = _map_headers(i_headers)
         
-        # Pre-process items into a lookup
-        # Need transaction_no linking
         tx_items = {}
         for row in i_reader:
-            # Map headers for this specific row
             m = {t: (row.get(r) or "").strip() for r, t in i_hmap.items()}
-            t_no = m.get("order_number") # alias for transaction_no
-            item = m.get("products")     # alias for item_name
-            qty  = m.get("category")     # Quantity often maps here if not found, let's check _ALIASES
-            # Wait, _ALIASES doesn't have quantity. Let's check raw headers.
-            # Sales transaction items CSV has: Transaction no,Item name,Item number,Price,Quantity,Amount
-            if not t_no: # fallback to raw 'Transaction no'
-                t_no = str(row.get('Transaction no') or row.get('transaction_no') or '').strip()
-            if not item:
-                item = str(row.get('Item name') or row.get('item_name') or '').strip()
-            
+            t_no = m.get("order_number")
+            item = m.get("products")
             _qty_raw = row.get('Quantity') or row.get('quantity') or 1
             try: _q = int(float(_qty_raw))
             except: _q = 1
@@ -1349,11 +1336,11 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
                 "email":         email,
                 "order_number":  t_no,
                 "products":      items_list,
-                "subtotal":      float(m.get("subtotal", 0.0) or 0.0),
-                "discount":      float(m.get("discount", 0.0) or 0.0),
-                "tax":           float(m.get("tax", 0.0) or 0.0),
-                "shipping":      float(m.get("shipping", 0.0) or 0.0),
-                "total_cost":    float(m.get("total_cost", 0.0) or 0.0),
+                "subtotal":      _parse_money(m.get("subtotal")),
+                "discount":      _parse_money(m.get("discount")),
+                "tax":           _parse_money(m.get("tax")),
+                "shipping":      _parse_money(m.get("shipping")),
+                "total_cost":    _parse_money(m.get("total_cost")),
             })
         return rows, warns
     except Exception as e:
@@ -1399,17 +1386,9 @@ if page == "Products":
             st.info("No products yet. Go to the **Add Products** tab to get started.")
         else:
             if _p_has_sb or _p_has_neon:
-                if st.button("Sync All to Cloud Databases", width="stretch", key="btn_sync_all"):
-                    with st.spinner("Syncing all products to cloud..."):
-                        _ok_n, _fail_n = 0, 0
-                        for prod in products:
-                            _ok, _ = save_product_to_db(prod, cfg)
-                            if _ok: _ok_n += 1
-                            else: _fail_n += 1
-                        if _ok_n: st.toast("Sync complete.", icon="🌥️")
-                        st.success(f"Synced {_ok_n} products." if not _fail_n else f"{_ok_n} synced, {_fail_n} failed.")
-
-            st.caption(f"Showing {len(products)} product{'s' if len(products) != 1 else ''}. Syncing to: **{_p_sync_str}**")
+                st.caption(f"Syncing to: **{_p_sync_str}**")
+            
+            st.caption(f"Showing {len(products)} product{'s' if len(products) != 1 else ''}.")
             
             for i, prod in enumerate(products):
                 _sku = prod.get("sku", "N/A")
@@ -1614,13 +1593,20 @@ if page == "Products":
                         _e_cat   = st.text_input("Category",       value=str(_eprod.get("category", "")))
                     with _e_c2:
                         _e_price = st.number_input("Price ($)", value=float(_eprod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
-                        _e_img   = st.text_input("Image URL",   value=str(_eprod.get("image_url", "N/A")))
+                        _e_file  = st.file_uploader("Replace image", type=["jpg", "png", "webp", "jpeg"], key=f"e_file_{_edit_sku}")
+                    
                     if st.form_submit_button("Save Changes", type="primary", width="stretch"):
                         with st.spinner("Saving..."):
+                            _final_url = _eprod.get("image_url", "N/A")
+                            if _e_file and _has_image_host(cfg):
+                                try:
+                                    _final_url = upload_image(_e_file.read(), cfg, name=_e_name.strip())
+                                except: pass
+                            
                             _upd = {
                                 "sku": _edit_sku, "item_name": _e_name.strip() or _eprod.get("item_name", ""),
                                 "category": _e_cat.strip() or _eprod.get("category", "General"),
-                                "price": round(_e_price, 2), "image_url": _e_img.strip() or "N/A",
+                                "price": round(_e_price, 2), "image_url": _final_url,
                                 "stock_left": _eprod.get("stock_left", 0), "status": _eprod.get("status", "In stock")
                             }
                             _ok, _msg = save_product_to_db(_upd, cfg)
@@ -2400,8 +2386,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
     st.divider()
 
     if st.button("Save Settings", type="primary", width="stretch"):
-        # Preserve products list and email template when saving settings
-        existing_products = cfg.get("products", [])
+        # Save config first
         new_cfg = {
             "from_name":                inp_from_name.strip(),
             "subject":                  inp_subject.strip(),
@@ -2417,12 +2402,25 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             "supabase_db_password":     cfg.get("supabase_db_password", ""),
             "neon_connection_string":   inp_neon.strip(),
             "email_html_template":      cfg.get("email_html_template", ""),
-            "products":                 existing_products,
+            "products":                 cfg.get("products", []),
         }
         save_config(new_cfg)
         st.session_state.cfg = new_cfg
-        cfg = new_cfg
-        st.success("Settings saved.")
+        
+        # Auto-sync products to cloud if setup
+        _synced = 0
+        if new_cfg.get("supabase_url") or new_cfg.get("neon_connection_string"):
+            with st.spinner("Auto-syncing products to cloud..."):
+                _local_prods = load_products_for_catalog(new_cfg)
+                for p in _local_prods:
+                    _ok, _ = save_product_to_db(p, new_cfg)
+                    if _ok: _synced += 1
+        
+        if _synced:
+            st.toast(f"Synced {_synced} products to cloud.", icon="🌥️")
+        st.success("Settings saved successfully!")
+        time.sleep(0.5)
+        st.rerun()
 
 
 
@@ -2636,64 +2634,35 @@ elif page == "Email Sender":
                         st.error("No valid orders found in the Excel file.")
     # ─ CSV ──────────────────────────────────────
     with tab_csv:
-        st.markdown("#### Import from CSV file(s)")
-        st.caption(
-            "Upload a **single CSV** with all order data, or **two CSV files** (one Transactions, one Items/Products) "
-            "to link multiple items per person automatically."
-        )
+        st.markdown("#### Import from CSV files")
+        st.caption("Provide both the Transactions and Items CSV files exported from VEI Checkout.")
 
-        uploaded_files = st.file_uploader(
-            "Choose CSV file(s)",
-            type=["csv", "tsv", "txt"],
-            accept_multiple_files=True,
-            key="csv_upload_multi",
-        )
+        c_up1, c_up2 = st.columns(2)
+        with c_up1:
+            tx_csv = st.file_uploader("1. Sales Transactions CSV", type=["csv"], key="tx_csv_sep")
+        with c_up2:
+            items_csv = st.file_uploader("2. Sales Transaction Items CSV", type=["csv"], key="items_csv_sep")
 
-        if st.button("Import CSV", type="primary", key="csv_import"):
-            if not uploaded_files:
-                st.warning("Please upload at least one CSV file.")
-            elif len(uploaded_files) == 1:
-                # Single file logic
-                with st.spinner("Parsing CSV..."):
-                    raw = uploaded_files[0].read().decode("utf-8", errors="replace")
-                    rows, warns = parse_csv_text(raw)
-                    for w in warns: st.warning(w)
-                    if rows:
-                        st.session_state.queue.extend(rows)
-                        st.toast(f"Imported {len(rows)} orders.", icon="📥")
-                        st.success(f"Imported {len(rows)} orders into the queue.")
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error("No valid orders found in the CSV file.")
-            elif len(uploaded_files) == 2:
-                # Two-file link logic
-                f1, f2 = uploaded_files[0], uploaded_files[1]
-                t_file, i_file = None, None
-                # Very simple heuristic: if 'item', 'prod', or 'trans_items' is in the name, it's the items sheet
-                for f in [f1, f2]:
-                    fname = f.name.lower()
-                    if any(x in fname for x in ("item", "prod")): i_file = f
-                    else: t_file = f
-                
-                if not t_file or not i_file:
-                    st.error("Could not differentiate files. Please ensure the items/products file has 'item' in its filename.")
-                else:
-                    with st.spinner("Linking CSV transactions and products..."):
-                        t_raw = t_file.read().decode("utf-8", errors="replace")
-                        i_raw = i_file.read().decode("utf-8", errors="replace")
+        if st.button("Link and Import CSVs", type="primary", key="btn_csv_duo"):
+            if not tx_csv or not items_csv:
+                st.warning("Upload both CSV files.")
+            else:
+                with st.spinner("Linking data..."):
+                    try:
+                        t_raw = tx_csv.read().decode("utf-8", errors="replace")
+                        i_raw = items_csv.read().decode("utf-8", errors="replace")
                         rows, warns = parse_multi_csv(t_raw, i_raw)
                         for w in warns: st.warning(w)
                         if rows:
                             st.session_state.queue.extend(rows)
-                            st.toast(f"Imported {len(rows)} linked orders.", icon="📥")
-                            st.success(f"Imported {len(rows)} orders into the queue (multi-CSV).")
+                            st.toast(f"Imported {len(rows)} orders.", icon="📥")
+                            st.success(f"Imported {len(rows)} linked orders into the queue.")
                             time.sleep(0.5)
                             st.rerun()
                         else:
                             st.error("No valid linked orders found.")
-            else:
-                st.warning("Only supports 1 or 2 files (Transactions + Items).")
+                    except Exception as e:
+                        st.error(f"Error reading CSVs: {e}")
 
     # ─ Email Template ───────────────────────────
     with tab_template:
