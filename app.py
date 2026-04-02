@@ -879,7 +879,8 @@ def validate_email(e: str) -> bool:
 
 
 def add_to_queue(name: str, email: str, order_number: str, products: str, 
-                 sub: float = 0.0, tax: float = 0.0, ship: float = 0.0, total: float = 0.0) -> bool:
+                 sub: float = 0.0, tax: float = 0.0, ship: float = 0.0, total: float = 0.0,
+                 discount: float = 0.0) -> bool:
     if not name.strip():
         st.error("Name is required.")
         return False
@@ -894,6 +895,7 @@ def add_to_queue(name: str, email: str, order_number: str, products: str,
         "subtotal":      round(float(sub), 2),
         "tax":           round(float(tax), 2),
         "shipping":      round(float(ship), 2),
+        "discount":      round(float(discount), 2),
         "total_cost":    round(float(total), 2)
     })
     return True
@@ -1031,6 +1033,10 @@ _DEFAULT_EMAIL_TEMPLATE = """\
                 <td align="right" style="font-size:13px;color:#111;">${{subtotal}}</td>
               </tr>
               <tr>
+                <td style="font-size:13px;color:#666;padding-top:4px;">Discount</td>
+                <td align="right" style="font-size:13px;color:#dc2626;padding-top:4px;">-${{discount}}</td>
+              </tr>
+              <tr>
                 <td style="font-size:13px;color:#666;padding-top:4px;">Tax</td>
                 <td align="right" style="font-size:13px;color:#111;padding-top:4px;">${{tax}}</td>
               </tr>
@@ -1072,6 +1078,7 @@ def build_html(
     sub       = f"{float(order.get('subtotal', 0.0)):.2f}"
     tax       = f"{float(order.get('tax', 0.0)):.2f}"
     ship      = f"{float(order.get('shipping', 0.0)):.2f}"
+    disc      = f"{float(order.get('discount', 0.0)):.2f}"
     cost      = f"{float(order.get('total_cost', 0.0)):.2f}"
     items     = _build_items_html(prods, products_lookup)
     tpl = (template.strip() if template and template.strip() else _DEFAULT_EMAIL_TEMPLATE)
@@ -1084,6 +1091,7 @@ def build_html(
         .replace("{{subtotal}}", sub)
         .replace("{{tax}}", tax)
         .replace("{{shipping}}", ship)
+        .replace("{{discount}}", disc)
         .replace("{{total_cost}}", cost)
     )
 
@@ -1102,6 +1110,7 @@ def build_text(order: dict, from_name: str) -> str:
         f"Thank you for your order.\n\n"
         f"Order Number: #{order_num}\n"
         f"Subtotal: ${sub}\n"
+        f"Discount: -${disc}\n"
         f"Tax: ${tax}\n"
         f"Shipping: ${ship}\n"
         f"Total Amount: ${cost}\n\n"
@@ -1125,6 +1134,7 @@ _ALIASES = {
     "subtotal":     ["subtotal", "sub_total", "price_subtotal", "sub_total_amount"],
     "tax":          ["tax", "tax_amount", "taxes", "vat"],
     "shipping":     ["shipping", "shipping_cost", "freight", "delivery"],
+    "discount":     ["discount", "discount_amount", "off", "promo_discount"],
     "total_cost":   ["total_cost", "total", "cost", "total_price", "amount", "price", "order_total"],
 }
 
@@ -1195,6 +1205,7 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
                 "order_number":  t_no,
                 "products":      items_list,
                 "subtotal":      round(float(tx.get('subtotal', 0.0) or 0.0), 2),
+                "discount":      round(float(tx.get('discount', 0.0) or 0.0), 2),
                 "tax":           round(float(tx.get('tax', 0.0) or 0.0), 2),
                 "shipping":      round(float(tx.get('shipping', 0.0) or 0.0), 2),
                 "total_cost":    round(float(tx.get('total', 0.0) or 0.0), 2),
@@ -1236,7 +1247,7 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
         return [], [f"No products column found (items ordered). Detected headers: {headers}"]
     
     rows = []
-    required_keys = ["name", "email", "order_number", "products", "subtotal", "tax", "shipping", "total_cost"]
+    required_keys = ["name", "email", "order_number", "products", "subtotal", "tax", "shipping", "discount", "total_cost"]
     for i, row in enumerate(reader, start=2):
         mapped = {c: (row.get(r) or "").strip() for r, c in hmap.items()}
         email  = mapped.get("email", "")
@@ -1259,6 +1270,7 @@ def parse_csv_text(text: str) -> tuple[list[dict], list[str]]:
             "order_number":  mapped.get("order_number", ""),
             "products":      mapped.get("products", ""),
             "subtotal":      float(mapped.get("subtotal", 0.0) or 0.0),
+            "discount":      float(mapped.get("discount", 0.0) or 0.0),
             "tax":           float(mapped.get("tax", 0.0) or 0.0),
             "shipping":      float(mapped.get("shipping", 0.0) or 0.0),
             "total_cost":    float(mapped.get("total_cost", 0.0) or 0.0),
@@ -1307,7 +1319,7 @@ if page == "Products":
             st.info("No products yet. Go to the **Add Products** tab to get started.")
         else:
             if _p_has_sb or _p_has_neon:
-                if st.button("Sync All to Cloud Databases", use_container_width=True, key="btn_sync_all"):
+                if st.button("Sync All to Cloud Databases", width="stretch", key="btn_sync_all"):
                     with st.spinner("Syncing all products to cloud..."):
                         _ok_n, _fail_n = 0, 0
                         for prod in products:
@@ -1336,11 +1348,11 @@ if page == "Products":
                     st.caption(f"`{_sku}`  ·  {prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
                 
                 with _c_act:
-                    with st.popover("Replace Image", use_container_width=True):
+                    with st.popover("Replace Image", width="stretch"):
                         st.markdown("##### Upload New Image")
                         _new_file = st.file_uploader("img", type=["jpg","jpeg","png","webp"], key=f"cat_repl_{_sku}_{i}", label_visibility="collapsed")
                         if _new_file and _has_image_host(cfg):
-                            if st.button("Upload & Save", key=f"cat_repl_btn_{_sku}_{i}", type="primary", use_container_width=True):
+                            if st.button("Upload & Save", key=f"cat_repl_btn_{_sku}_{i}", type="primary", width="stretch"):
                                 with st.spinner("Uploading..."):
                                     try:
                                         _new_url = upload_image(_new_file.read(), cfg, name=_name)
@@ -1384,9 +1396,9 @@ if page == "Products":
                     help="Compressed and uploaded to Imghippo automatically.",
                 )
                 if p_image:
-                    st.image(p_image, use_container_width=True)
+                    st.image(p_image, width="stretch")
 
-            if st.button("Add Product", type="primary", use_container_width=True, key="btn_add_product"):
+            if st.button("Add Product", type="primary", width="stretch", key="btn_add_product"):
                 if not p_sku.strip():
                     st.error("SKU is required.")
                 elif not p_name.strip():
@@ -1443,19 +1455,19 @@ if page == "Products":
                 with _pc[3]: st.number_input("price", key=f"pb_price_{_rid}", min_value=0.0, step=0.01, format="%.2f", label_visibility="collapsed")
                 with _pc[4]: st.file_uploader("img", key=f"pb_img_{_rid}", type=["jpg","jpeg","png","webp"], label_visibility="collapsed")
                 with _pc[5]:
-                    if st.button("×", key=f"pb_del_{_rid}", use_container_width=True):
+                    if st.button("×", key=f"pb_del_{_rid}", width="stretch"):
                         st.session_state.pb_ids.remove(_rid)
                         st.rerun()
             _idx_c1, _idx_c2 = st.columns([1, 3])
             with _idx_c1:
-                if st.button("+ Add Row", use_container_width=True, key="pb_add_row"):
+                if st.button("+ Add Row", width="stretch", key="pb_add_row"):
                     st.session_state.pb_ids.append(st.session_state.pb_next)
                     st.session_state.pb_next += 1
                     st.rerun()
             with _idx_c2:
                 _bulk_csv = st.file_uploader("Import CSV (SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
 
-            if st.button("Add All to Products", type="primary", use_container_width=True, key="btn_bulk_add"):
+            if st.button("Add All to Products", type="primary", width="stretch", key="btn_bulk_add"):
                 with st.spinner("Processing products..."):
                     _pb_rows = []
                     for _rid in st.session_state.pb_ids:
@@ -1523,7 +1535,7 @@ if page == "Products":
                     with _e_c2:
                         _e_price = st.number_input("Price ($)", value=float(_eprod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
                         _e_img   = st.text_input("Image URL",   value=str(_eprod.get("image_url", "N/A")))
-                    if st.form_submit_button("Save Changes", type="primary", use_container_width=True):
+                    if st.form_submit_button("Save Changes", type="primary", width="stretch"):
                         with st.spinner("Saving..."):
                             _upd = {
                                 "sku": _edit_sku, "item_name": _e_name.strip() or _eprod.get("item_name", ""),
@@ -1555,7 +1567,7 @@ if page == "Products":
             if _bd_selected:
                 st.warning(f"**{len(_bd_selected)} product(s)** will be deleted.")
                 _bd_confirm = st.checkbox("Confirm permanent deletion", key="p_del_confirm")
-                if st.button("Delete Selected", type="primary", key="btn_p_del", disabled=not _bd_confirm, use_container_width=True):
+                if st.button("Delete Selected", type="primary", key="btn_p_del", disabled=not _bd_confirm, width="stretch"):
                     with st.spinner("Deleting..."):
                         for _sku in _bd_selected:
                             delete_product_from_db(_sku, cfg)
@@ -1634,7 +1646,7 @@ elif page == "Inventory":
             )
 
             # ── Apply All Changes ───────────────────
-            if st.button("Apply All Changes", type="primary", use_container_width=True, key="btn_adj_all"):
+            if st.button("Apply All Changes", type="primary", width="stretch", key="btn_adj_all"):
                 with st.spinner("Applying adjustments..."):
                     _adj_applied = 0
                     for _, _arow in inv_df.iterrows():
@@ -1699,7 +1711,7 @@ elif page == "Inventory":
                     _delta_val = st.number_input("±", step=1, value=0, key=f"adj_{_psku}", label_visibility="collapsed")
 
                 with _rc5:
-                    if st.button("Apply", key=f"btn_adj_{_psku}", use_container_width=True):
+                    if st.button("Apply", key=f"btn_adj_{_psku}", width="stretch"):
                         with st.spinner("Updating..."):
                             if _delta_val == 0:
                                 st.toast(f"{_pname}: delta is 0, nothing changed.")
@@ -1744,7 +1756,7 @@ elif page == "Inventory":
             
             st.dataframe(
                 display_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
@@ -1753,7 +1765,7 @@ elif page == "Inventory":
                 }
             )
 
-            if st.button("Clear View Cache", use_container_width=True):
+            if st.button("Clear View Cache", width="stretch"):
                 _clear_data_caches()
                 st.rerun()
 
@@ -1894,7 +1906,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
 
     st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
     can_test = bool(inp_smtp_email.strip() and inp_smtp_pass.strip())
-    if st.button("Test SMTP Connection", use_container_width=True, disabled=not can_test):
+    if st.button("Test SMTP Connection", width="stretch", disabled=not can_test):
         with st.spinner("Testing connection to Gmail SMTP..."):
             try:
                 server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
@@ -1936,7 +1948,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             )
         with _fi_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-            if st.button("Test Key", use_container_width=True, key="btn_test_fi", disabled=not inp_freeimage_key):
+            if st.button("Test Key", width="stretch", key="btn_test_fi", disabled=not inp_freeimage_key):
                 with st.spinner("Testing Freeimage.host API..."):
                     try:
                         import requests  # type: ignore
@@ -1988,7 +2000,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             )
         with _ib_r:
             st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-            if st.button("Test Key", use_container_width=True, key="btn_test_imgbb", disabled=not inp_imgbb_key):
+            if st.button("Test Key", width="stretch", key="btn_test_imgbb", disabled=not inp_imgbb_key):
                 with st.spinner("Testing Imghippo API..."):
                     try:
                         import requests  # type: ignore
@@ -2043,7 +2055,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             )
         with _sync_col2:
             st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
-            if st.button("Sync Local → Cloud", use_container_width=True, key="btn_sync_sqlite"):
+            if st.button("Sync Local → Cloud", width="stretch", key="btn_sync_sqlite"):
                 with st.spinner("Syncing local SQLite data to cloud…"):
                     _synced, _sync_errs = sync_sqlite_to_cloud(st.session_state.cfg)
                 if _sync_errs:
@@ -2115,7 +2127,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
         with col_sb_test:
             if st.button(
                 "Test Connection",
-                use_container_width=True,
+                width="stretch",
                 key="btn_test_sb",
                 disabled=not (inp_sb_url and _test_key),
             ):
@@ -2138,7 +2150,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
             if st.button(
                 "Setup Tables",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key="btn_setup_sb",
                 disabled=not (inp_sb_url and inp_sb_pat.strip()),
             ):
@@ -2253,7 +2265,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
         with col_neon_test:
             if st.button(
                 "Test Connection",
-                use_container_width=True,
+                width="stretch",
                 key="btn_test_neon",
                 disabled=not _neon_is_valid_dsn,
             ):
@@ -2278,7 +2290,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             if st.button(
                 "Setup Tables",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key="btn_setup_neon",
                 disabled=not _neon_is_valid_dsn,
             ):
@@ -2307,7 +2319,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
     # ── Save Settings ───────────────────────────
     st.divider()
 
-    if st.button("Save Settings", type="primary", use_container_width=True):
+    if st.button("Save Settings", type="primary", width="stretch"):
         # Preserve products list and email template when saving settings
         existing_products = cfg.get("products", [])
         new_cfg = {
@@ -2390,10 +2402,11 @@ elif page == "Email Sender":
             s_sub   = st.number_input("Subtotal ($)", key="s_sub", min_value=0.0, step=0.01, format="%.2f")
             s_tax   = st.number_input("Tax ($)",      key="s_tax", min_value=0.0, step=0.01, format="%.2f")
         with c3:
+            s_disc  = st.number_input("Discount ($)", key="s_disc", min_value=0.0, step=0.01, format="%.2f")
             s_ship  = st.number_input("Shipping ($)", key="s_ship", min_value=0.0, step=0.01, format="%.2f")
             s_cost  = st.number_input("Total Cost ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
             if s_cost == 0 and s_sub > 0:
-                st.caption(f"Suggested Total: ${s_sub + s_tax + s_ship:.2f}")
+                st.caption(f"Suggested Total: ${s_sub + s_tax + s_ship - s_disc:.2f}")
 
         s_prods = st.text_area(
             "Products *", key="s_prods", height=108,
@@ -2415,7 +2428,7 @@ elif page == "Email Sender":
                 st.error("All fields marked with * are required.")
             else:
                 with st.spinner("Adding to queue..."):
-                    if add_to_queue(s_name, s_email, s_order, s_prods, s_sub, s_tax, s_ship, s_cost):
+                    if add_to_queue(s_name, s_email, s_order, s_prods, s_sub, s_tax, s_ship, s_cost, s_disc):
                         st.toast(f"Added {s_name} to queue.", icon="👤")
                         st.success(f"Added {s_name} to the queue.")
                         time.sleep(0.5)
@@ -2432,6 +2445,7 @@ elif page == "Email Sender":
             "Order #":    pd.Series([], dtype=str),
             "Products":   pd.Series([], dtype=str),
             "Subtotal":   pd.Series([], dtype=float),
+            "Discount":   pd.Series([], dtype=float),
             "Tax":        pd.Series([], dtype=float),
             "Shipping":   pd.Series([], dtype=float),
             "Total Cost": pd.Series([], dtype=float),
@@ -2440,7 +2454,7 @@ elif page == "Email Sender":
         edited = st.data_editor(
             _BULK_BASE,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             key="bulk_editor",
             column_config={
                 "Name":     st.column_config.TextColumn(width="medium"),
@@ -2474,7 +2488,7 @@ elif page == "Email Sender":
 
         col_add, col_clear = st.columns(2)
         with col_add:
-            if st.button("Add All to Queue", type="primary", use_container_width=True, key="bulk_add"):
+            if st.button("Add All to Queue", type="primary", width="stretch", key="bulk_add"):
                 added = 0
                 for _, row in edited.iterrows():
                     nm = str(row.get("Name",     "")).strip()
@@ -2482,13 +2496,14 @@ elif page == "Email Sender":
                     on = str(row.get("Order #",  "")).strip()
                     pr = str(row.get("Products", "")).strip()
                     sb = float(row.get("Subtotal", 0.0) or 0.0)
+                    ds = float(row.get("Discount", 0.0) or 0.0)
                     tx = float(row.get("Tax", 0.0) or 0.0)
                     sh = float(row.get("Shipping", 0.0) or 0.0)
                     co = float(row.get("Total Cost", 0.0) or 0.0)
                     
                     if not nm or nm == "nan" or not em or em == "nan" or not pr or pr == "nan" or co <= 0:
                         continue
-                    if add_to_queue(nm, em, on, pr, sb, tx, sh, co):
+                    if add_to_queue(nm, em, on, pr, sb, tx, sh, co, ds):
                         added += 1
                 if added:
                     st.toast(f"Added {added} orders to queue.", icon="📋")
@@ -2501,7 +2516,7 @@ elif page == "Email Sender":
                     st.warning("No valid rows found. Make sure Name and Email are filled in.")
 
         with col_clear:
-            if st.button("Clear Table", use_container_width=True, key="bulk_clear"):
+            if st.button("Clear Table", width="stretch", key="bulk_clear"):
                 if "bulk_editor" in st.session_state:
                     del st.session_state["bulk_editor"]
                 st.rerun()
@@ -2580,6 +2595,7 @@ elif page == "Email Sender":
 | `{{items_html}}` | Ready-made HTML rows for each ordered product (with images when available) |
 | `{{subtotal}}` | Subtotal amount ($) |
 | `{{tax}}` | Tax amount ($) |
+| `{{discount}}` | Discount amount ($) |
 | `{{shipping}}` | Shipping amount ($) |
 | `{{total_cost}}` | Total order cost ($) |
 """
@@ -2594,6 +2610,7 @@ Use ONLY these variables (double curly braces, exactly as shown):
   {{from_name}}    — VEI firm name
   {{items_html}}   — pre-built HTML <tr> rows listing the ordered products (with product images when available). Wrap this inside a <table cellpadding="0" cellspacing="0" style="width:100%;">…</table>.
   {{subtotal}}     — subtotal amount ($)
+  {{discount}}     — discount amount ($)
   {{tax}}          — tax amount ($)
   {{shipping}}     — shipping amount ($)
   {{total_cost}}   — total order cost ($)
@@ -2611,7 +2628,7 @@ Example default HTML template for inspiration:
 
 Design brief: [describe your style here — e.g. "clean and minimal, brand color #4F46E5, sans-serif font, white background, dark header bar, soft rounded corners"]
 """
-        with st.expander("AI prompt — copy this into ChatGPT / Claude to generate a template"):
+        with st.expander("AI prompt — copy this into any AI (ChatGPT, Claude, or any LLM) to generate a template"):
             st.code(_ai_prompt, language=None)
             st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
 
@@ -2624,12 +2641,12 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             height=380,
             key="email_tpl_editor",
             label_visibility="collapsed",
-            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}}, {{subtotal}}, {{tax}}, {{shipping}}, {{total_cost}} as placeholders.",
+            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}}, {{subtotal}}, {{discount}}, {{tax}}, {{shipping}}, {{total_cost}} as placeholders.",
         )
 
         _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
         with _tpl_c1:
-            if st.button("Save Template", type="primary", use_container_width=True, key="btn_save_tpl"):
+            if st.button("Save Template", type="primary", width="stretch", key="btn_save_tpl"):
                 with st.spinner("Saving template..."):
                     cfg["email_html_template"] = _tpl_input.strip()
                     save_config(cfg)
@@ -2637,7 +2654,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     st.toast("Template saved.", icon="💾")
                     st.success("Template saved.")
         with _tpl_c2:
-            if st.button("Reset to Default", use_container_width=True, key="btn_reset_tpl"):
+            if st.button("Reset to Default", width="stretch", key="btn_reset_tpl"):
                 cfg["email_html_template"] = ""
                 save_config(cfg)
                 st.session_state.cfg = cfg
@@ -2645,7 +2662,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 st.success("Reset to built-in template.")
                 st.rerun()
         with _tpl_c3:
-            if st.button("Preview", use_container_width=True, key="btn_preview_tpl"):
+            if st.button("Preview", width="stretch", key="btn_preview_tpl"):
                 _preview_order = {
                     "name": "Jane Smith",
                     "order_number": "ORD-1001",
@@ -2716,7 +2733,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 if unmatched:
                     st.caption(f"⚠️ Unmatched: {', '.join(unmatched)}")
             with row_r:
-                if st.button("Delete", key=f"del_{i}", use_container_width=True):
+                if st.button("Delete", key=f"del_{i}", width="stretch"):
                     with st.spinner("Deleting..."):
                         st.session_state.queue.pop(i)
                         st.toast("Order removed.", icon="🗑️")
@@ -2733,7 +2750,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if st.button(
             "Send All Emails",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not ready,
             key="send_all",
         ):
@@ -2801,7 +2818,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 st.session_state.send_log = results
                 log_ph.dataframe(
                     pd.DataFrame(results),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
                 time.sleep(0.25)
@@ -2853,7 +2870,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         st.subheader("Last Send Results")
         st.dataframe(
             pd.DataFrame(st.session_state.send_log),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
