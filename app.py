@@ -19,20 +19,6 @@ import streamlit as st
 import sqlite3
 
 # ─────────────────────────────────────────────
-# Startup Dependencies
-# ─────────────────────────────────────────────
-print("Checking dependencies...")
-try:
-    import openpyxl # type: ignore
-except ImportError:
-    import subprocess, sys
-    print("Installing openpyxl...")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-    except:
-        pass
-
-# ─────────────────────────────────────────────
 # Custom CSS for UI enhancements
 # ─────────────────────────────────────────────
 
@@ -1142,7 +1128,7 @@ _ALIASES = {
     "name":         ["name", "customer_name", "billing_name", "shipping_name", "customer"],
     "email":        ["email", "customer_email", "e-mail"],
     "order_number": ["order_number", "order_no", "transaction_no", "transaction_id", "id"],
-    "products":     ["products", "items", "item", "description", "ordered_items"],
+    "products":     ["products", "items", "item", "description", "ordered_items", "item_name"],
     "subtotal":     ["subtotal", "sub_total", "price_subtotal", "sub_total_amount"],
     "tax":          ["tax", "tax_amount", "taxes", "vat"],
     "shipping":     ["shipping", "shipping_cost", "freight", "delivery"],
@@ -1168,9 +1154,7 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
     try:
         import openpyxl # type: ignore
     except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-        import openpyxl # type: ignore
+        return [], ["Excel engine 'openpyxl' missing. Please ensure it is in requirements.txt."]
     
     warns = []
     try:
@@ -1311,9 +1295,11 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
         
         tx_items = {}
         for row in i_reader:
-            m = {t: (row.get(r) or "").strip() for r, t in i_hmap.items()}
-            t_no = m.get("order_number")
-            item = m.get("products")
+            # Map headers for this specific row using items hmap
+            m_item = {t: (row.get(r) or "").strip() for r, t in i_hmap.items()}
+            t_no = m_item.get("order_number") or str(row.get('Transaction no') or '').strip()
+            item = m_item.get("products") or str(row.get('Item name') or '').strip()
+            
             _qty_raw = row.get('Quantity') or row.get('quantity') or 1
             try: _q = int(float(_qty_raw))
             except: _q = 1
