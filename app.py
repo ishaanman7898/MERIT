@@ -367,12 +367,41 @@ def upload_image(image_bytes: bytes, cfg: dict, name: str = "product") -> str:
 # Database helpers
 # ─────────────────────────────────────────────
 
+def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
+    """Connect via psycopg2, falling back to IPv4 if IPv6 fails.
+
+    Some networks (and Streamlit Cloud) can't route IPv6 even when DNS returns
+    an AAAA record. We detect the 'Cannot assign requested address' error and
+    retry after resolving the host to an IPv4 address using the libpq `hostaddr`
+    parameter (which bypasses further DNS lookup).
+    """
+    import psycopg2  # type: ignore
+
+    def _try(s: str):
+        return psycopg2.connect(s, connect_timeout=connect_timeout)
+
+    try:
+        return _try(conn_str)
+    except Exception as _e:
+        _msg = str(_e)
+        if "assign requested address" in _msg or "Network is unreachable" in _msg:
+            try:
+                import socket
+                from urllib.parse import urlparse
+                _host = urlparse(conn_str).hostname or ""
+                _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
+                _sep = "&" if "?" in conn_str else "?"
+                return _try(conn_str + _sep + f"hostaddr={_ipv4}")
+            except Exception:
+                pass
+        raise
+
+
 def _get_db_conn(cfg: dict):
     """Return a psycopg2 connection to Neon, or None."""
     try:
-        import psycopg2  # type: ignore
         if cfg.get("neon_connection_string"):
-            return psycopg2.connect(cfg["neon_connection_string"], connect_timeout=10)
+            return _psycopg2_connect(cfg["neon_connection_string"])
     except Exception:
         pass
     return None
@@ -395,8 +424,7 @@ def _get_supabase_conn(cfg: dict):
     if not conn_str:
         return None
     try:
-        import psycopg2  # type: ignore
-        return psycopg2.connect(conn_str, connect_timeout=10)
+        return _psycopg2_connect(conn_str)
     except Exception:
         return None
 
@@ -798,8 +826,7 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
 @st.cache_data(ttl=30, show_spinner=False)
 def _fetch_inventory_supabase(conn_str: str) -> list | None:
     try:
-        import psycopg2  # type: ignore
-        conn = psycopg2.connect(conn_str, connect_timeout=10)
+        conn = _psycopg2_connect(conn_str)
         df = pd.read_sql("SELECT * FROM inventory ORDER BY item_name", conn)
         conn.close()
         if not df.empty:
@@ -812,8 +839,7 @@ def _fetch_inventory_supabase(conn_str: str) -> list | None:
 @st.cache_data(ttl=30, show_spinner=False)
 def _fetch_inventory_neon(conn_str: str) -> list | None:
     try:
-        import psycopg2  # type: ignore
-        conn = psycopg2.connect(conn_str, connect_timeout=10)
+        conn = _psycopg2_connect(conn_str)
         df = pd.read_sql("SELECT * FROM inventory ORDER BY item_name", conn)
         conn.close()
         if not df.empty:
@@ -929,8 +955,7 @@ def load_outbound_logs(cfg: dict) -> pd.DataFrame:
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         try:
-            import psycopg2  # type: ignore
-            conn = psycopg2.connect(_sb_cs, connect_timeout=10)
+            conn = _psycopg2_connect(_sb_cs)
             df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
             conn.close()
             df = df.rename(columns={"created_at": "timestamp"})
@@ -940,8 +965,7 @@ def load_outbound_logs(cfg: dict) -> pd.DataFrame:
     conn_str = cfg.get("neon_connection_string", "").strip()
     if conn_str:
         try:
-            import psycopg2
-            conn = psycopg2.connect(conn_str, connect_timeout=10)
+            conn = _psycopg2_connect(conn_str)
             df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
             conn.close()
             df = df.rename(columns={"created_at": "timestamp"})
@@ -1030,9 +1054,25 @@ def add_to_queue(name: str, email: str, order_number: str, products: str,
 with st.sidebar:
     _sb_co = st.session_state.cfg.get("from_name", "").strip()
     st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
+
+    # Hide "Get Started" once the user has pasted their secrets TOML
+    _secrets_active = False
+    try:
+        _secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
+    except Exception:
+        pass
+    _nav_pages = (
+        ["Email Sender", "Products", "Inventory", "Settings", "API Endpoints"]
+        if _secrets_active
+        else ["Get Started", "Email Sender", "Products", "Inventory", "Settings", "API Endpoints"]
+    )
+    # Ensure current value is valid after hiding Get Started
+    if "sidebar_page" not in st.session_state or st.session_state["sidebar_page"] not in _nav_pages:
+        st.session_state["sidebar_page"] = _nav_pages[0]
     page = st.radio(
         "page",
-        ["Get Started", "Email Sender", "Products", "Inventory", "Settings", "API Endpoints"],
+        _nav_pages,
+        key="sidebar_page",
         label_visibility="collapsed",
     )
     st.divider()
@@ -1518,27 +1558,28 @@ Once connected, the Step 1 indicator above turns green.
         """)
         if not _step1_ok:
             if st.button("Go to Settings → Database", type="primary"):
-                st.session_state["_jump_settings_tab"] = "database"
+                st.session_state["sidebar_page"] = "Settings"
                 st.rerun()
 
     # ── Step 2: Email ────────────────────────────────────────────────
     with st.expander("Step 2 — Configure Email Sending", expanded=not _step2_ok and _step1_ok):
         st.markdown("""
-MERIT sends order emails via your Gmail (or any SMTP) account.
+MERIT sends order emails via your **VEI Google (Gmail) account**.
 
-#### How to set up Gmail:
+#### How to set up:
 1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security** → **2-Step Verification** → turn it ON
 2. Then go to **Security** → **App Passwords** → generate a new app password for "Mail"
 3. Copy the 16-character password (e.g. `abcd efgh ijkl mnop`)
 4. In MERIT → **Settings → Email**, fill in:
-   - **From Name**: your company or personal name
-   - **SMTP Email**: your Gmail address
-   - **SMTP Password**: the 16-character app password (spaces are fine, MERIT strips them)
-5. Fields auto-save as you type
-
-#### Other email providers (Outlook, custom SMTP):
-Use your regular SMTP credentials. Gmail is recommended for simplicity.
+   - **From Name**: your name or company name
+   - **SMTP Email**: your Gmail address (e.g. `yourname@gmail.com`)
+   - **SMTP Password**: the 16-character app password — spaces are fine, MERIT strips them automatically
+5. Fields auto-save as you type — no save button needed
         """)
+        if not _step2_ok:
+            if st.button("Go to Settings → Email"):
+                st.session_state["sidebar_page"] = "Settings"
+                st.rerun()
 
     # ── Step 3: Streamlit Secrets ────────────────────────────────────
     with st.expander("Step 3 — Save Secrets TOML (prevents settings loss on reboot)", expanded=not _step3_ok and _step1_ok):
@@ -1551,17 +1592,18 @@ Streamlit Cloud restarts your app container periodically. When it does, any file
 your credentials there once, and MERIT reads from it automatically on every startup.
 
 #### How to save your secrets:
-1. Go to **Settings → Secrets TOML** below and click **Generate Secrets TOML**
-2. Copy the generated TOML
-3. Go to your Streamlit app → click **Manage app** (bottom right corner)
-4. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
-5. Paste the TOML into the secrets editor → click **Save**
-6. Streamlit will reboot the app — your settings will now persist forever
+1. Go to **Settings → Secrets TOML** and copy the generated TOML
+2. Click **Manage app** in the bottom-right corner of your Streamlit app
+3. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
+4. Paste the TOML → click **Save**
+5. Streamlit reboots the app — your settings persist forever
 
-Once saved, the Step 3 indicator above turns green.
+Once saved, the Step 3 indicator above turns green and **Get Started disappears from the sidebar**.
         """)
-        if st.button("Go to Settings → Secrets TOML"):
-            st.rerun()
+        if not _step3_ok:
+            if st.button("Go to Settings → Secrets TOML"):
+                st.session_state["sidebar_page"] = "Settings"
+                st.rerun()
 
     st.divider()
 
@@ -2460,34 +2502,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
 
     with db_tab_sb:
         st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
-
-        with st.expander("Step-by-step setup guide", expanded=not _has_supabase(st.session_state.cfg)):
-            st.markdown("""
-**Step 1 — Create a free Supabase account**
-Go to [supabase.com](https://supabase.com) → Sign Up → Create a new organisation and project.
-
-**Step 2 — Note your database password**
-When Supabase asks you to set a database password during project creation, **copy it now**.
-You will paste it into the field below. (If you forgot, go to **Project Settings → Database → Reset database password**.)
-
-**Step 3 — Get your connection string**
-Once your project is created:
-1. Click the **Connect** button at the top of your project dashboard (blue button, top-right area).
-2. Go to the **Direct connection** tab.
-3. Scroll down and copy the connection string — it looks like:
-   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres`
-
-**Step 4 — Paste both values below**
-- Paste the connection string into **Connection String** (with `[YOUR-PASSWORD]` still in it — MERIT will substitute it).
-- Paste your actual database password into **Database Password**.
-
-**Step 5 — Create tables**
-Click **Setup Tables** below. MERIT will connect and create the `inventory`, `products`, and `outbound_logs` tables automatically.
-
-> **Why only two fields?** MERIT connects directly to your Postgres database using the connection string.
-> No API keys, no SDKs — just a secure direct connection. Your website still uses the Supabase REST API
-> (see **API Endpoints** page for those keys).
-            """)
+        st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
 
         inp_sb_conn = st.text_input(
             "Connection String",
@@ -2530,8 +2545,7 @@ Click **Setup Tables** below. MERIT will connect and create the `inventory`, `pr
             ):
                 with st.spinner("Connecting to Supabase..."):
                     try:
-                        import psycopg2 as _pg2
-                        _conn = _pg2.connect(_sb_effective, connect_timeout=10)
+                        _conn = _psycopg2_connect(_sb_effective)
                         _conn.close()
                         st.toast("Supabase connection success!", icon="☁️")
                         st.success("Connected to Supabase successfully.")
@@ -2548,8 +2562,7 @@ Click **Setup Tables** below. MERIT will connect and create the `inventory`, `pr
             ):
                 with st.spinner("Creating tables in Supabase..."):
                     try:
-                        import psycopg2 as _pg2
-                        _conn = _pg2.connect(_sb_effective, connect_timeout=15)
+                        _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
                         _cur = _conn.cursor()
                         _statements = [
                             s.strip() for s in SETUP_SQL.split(";")
@@ -2632,17 +2645,7 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
                 disabled=not _neon_is_valid_dsn,
             ):
                 try:
-                    import psycopg2  # type: ignore
-                except ImportError:
-                    import subprocess, sys
-                    with st.spinner("Installing psycopg2-binary…"):
-                        subprocess.check_call(
-                            [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                    import psycopg2  # type: ignore
-                try:
-                    with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
+                    with _psycopg2_connect(_neon_val) as conn:
                         pass
                     st.success("Connected to Neon successfully.")
                 except Exception as exc:
@@ -2658,18 +2661,8 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             ):
                 with st.spinner("Setting up Neon tables..."):
                     try:
-                        import psycopg2  # type: ignore
-                    except ImportError:
-                        import subprocess, sys
-                        with st.spinner("Installing psycopg2-binary…"):
-                            subprocess.check_call(
-                                [sys.executable, "-m", "pip", "install", "psycopg2-binary"],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            )
-                        import psycopg2  # type: ignore
-                    try:
                         _run_sql = st.session_state.get("neon_sql_editor", SETUP_SQL)
-                        with psycopg2.connect(_neon_val, connect_timeout=10) as conn:
+                        with _psycopg2_connect(_neon_val) as conn:
                             with conn.cursor() as cur:
                                 cur.execute(_run_sql)
                             conn.commit()
@@ -3192,9 +3185,8 @@ WHERE  schemaname = 'public'
             st.cache_data.clear()
 
         try:
-            import psycopg2 as _pg2
             _live_conn_str = _get_effective_supabase_conn_str(cfg)
-            _live_conn = _pg2.connect(_live_conn_str, connect_timeout=10)
+            _live_conn = _psycopg2_connect(_live_conn_str)
 
             _preview_inv, _preview_prod = st.columns(2)
             with _preview_inv:
