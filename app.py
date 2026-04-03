@@ -227,13 +227,43 @@ END $$;
 """
 
 
+_SECRETS_CREDENTIAL_KEYS = [
+    "supabase_connection_string",
+    "supabase_db_password",
+    "neon_connection_string",
+    "smtp_email",
+    "smtp_password",
+    "from_name",
+    "subject",
+    "freeimage_api_key",
+    "imghippo_api_key",
+]
+
+
 def load_config() -> dict:
+    """Load config from config.json, then overlay credentials from st.secrets[merit].
+
+    st.secrets persists across Streamlit Cloud reboots; config.json is used for
+    local dev and for non-credential data (products list, email template).
+    """
+    cfg: dict = {}
+    # 1. Load local config.json (products, email template, and local dev credentials)
     try:
         if CONFIG_FILE.exists():
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    return {}
+    # 2. Overlay credentials from st.secrets (Streamlit Cloud — survives reboots)
+    #    Secrets take precedence so that pasting a new TOML always wins.
+    try:
+        if hasattr(st, "secrets") and "merit" in st.secrets:
+            for _k in _SECRETS_CREDENTIAL_KEYS:
+                _v = st.secrets["merit"].get(_k, "")
+                if _v:
+                    cfg[_k] = str(_v)
+    except Exception:
+        pass
+    return cfg
 
 
 def save_config(data: dict):
@@ -1002,7 +1032,7 @@ with st.sidebar:
     st.title(f"{_sb_co} · MERIT" if _sb_co else "MERIT")
     page = st.radio(
         "page",
-        ["Email Sender", "Products", "Inventory", "Settings", "API Endpoints"],
+        ["Get Started", "Email Sender", "Products", "Inventory", "Settings", "API Endpoints"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1424,10 +1454,134 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
 
 
 # ═════════════════════════════════════════════
+# GET STARTED PAGE
+# ═════════════════════════════════════════════
+
+if page == "Get Started":
+    cfg = st.session_state.cfg
+    _gs_has_sb = _has_supabase(cfg)
+    _gs_has_smtp = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
+    _gs_has_secrets = False
+    try:
+        _gs_has_secrets = hasattr(st, "secrets") and "merit" in st.secrets
+    except Exception:
+        pass
+
+    st.title("Get Started with MERIT")
+    st.caption("MERIT is a product catalog + email order system. Follow the steps below to get fully set up.")
+
+    # ── Step status indicators ────────────────────────────────────────
+    _step1_ok = _gs_has_sb
+    _step2_ok = _gs_has_smtp
+    _step3_ok = _gs_has_secrets
+
+    st.markdown("### Setup Checklist")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if _step1_ok:
+            st.success("Step 1 — Supabase Connected")
+        else:
+            st.error("Step 1 — Connect Supabase (required)")
+    with col2:
+        if _step2_ok:
+            st.success("Step 2 — Email Configured")
+        else:
+            st.warning("Step 2 — Configure Email")
+    with col3:
+        if _step3_ok:
+            st.success("Step 3 — Secrets Saved (persists reboots)")
+        else:
+            st.warning("Step 3 — Save Secrets TOML (prevents settings loss)")
+
+    st.divider()
+
+    # ── Step 1: Supabase ──────────────────────────────────────────────
+    with st.expander("Step 1 — Connect Supabase (REQUIRED)", expanded=not _step1_ok):
+        st.markdown("""
+Supabase is **required** for MERIT to work properly. It stores your products and inventory in the cloud
+so that your data survives app reboots, and powers the **API Endpoints** page so your website auto-updates.
+
+**Without Supabase:** products are only stored in a local SQLite file that gets wiped every time Streamlit restarts.
+
+#### How to set up:
+1. Go to [supabase.com](https://supabase.com) → Sign up for free → Create a new project
+2. **Write down the database password** you set during project creation (you'll need it in Step 3)
+3. Once the project is ready, click the **Connect** button (top right of your project dashboard)
+4. Go to the **Direct connection** tab, scroll down, and copy the connection string:
+   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres`
+5. Go to **Settings → Database** in MERIT and paste:
+   - The connection string into **Connection String**
+   - Your database password into **Database Password**
+6. Click **Setup Tables** — MERIT will create all required tables automatically
+
+Once connected, the Step 1 indicator above turns green.
+        """)
+        if not _step1_ok:
+            if st.button("Go to Settings → Database", type="primary"):
+                st.session_state["_jump_settings_tab"] = "database"
+                st.rerun()
+
+    # ── Step 2: Email ────────────────────────────────────────────────
+    with st.expander("Step 2 — Configure Email Sending", expanded=not _step2_ok and _step1_ok):
+        st.markdown("""
+MERIT sends order emails via your Gmail (or any SMTP) account.
+
+#### How to set up Gmail:
+1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security** → **2-Step Verification** → turn it ON
+2. Then go to **Security** → **App Passwords** → generate a new app password for "Mail"
+3. Copy the 16-character password (e.g. `abcd efgh ijkl mnop`)
+4. In MERIT → **Settings → Email**, fill in:
+   - **From Name**: your company or personal name
+   - **SMTP Email**: your Gmail address
+   - **SMTP Password**: the 16-character app password (spaces are fine, MERIT strips them)
+5. Fields auto-save as you type
+
+#### Other email providers (Outlook, custom SMTP):
+Use your regular SMTP credentials. Gmail is recommended for simplicity.
+        """)
+
+    # ── Step 3: Streamlit Secrets ────────────────────────────────────
+    with st.expander("Step 3 — Save Secrets TOML (prevents settings loss on reboot)", expanded=not _step3_ok and _step1_ok):
+        st.markdown("""
+**Why is this needed?**
+Streamlit Cloud restarts your app container periodically. When it does, any files written to disk
+(including `config.json`) are wiped. Your settings disappear.
+
+**The fix:** Streamlit has a built-in **Secrets** store that persists across reboots. You paste
+your credentials there once, and MERIT reads from it automatically on every startup.
+
+#### How to save your secrets:
+1. Go to **Settings → Secrets TOML** below and click **Generate Secrets TOML**
+2. Copy the generated TOML
+3. Go to your Streamlit app → click **Manage app** (bottom right corner)
+4. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
+5. Paste the TOML into the secrets editor → click **Save**
+6. Streamlit will reboot the app — your settings will now persist forever
+
+Once saved, the Step 3 indicator above turns green.
+        """)
+        if st.button("Go to Settings → Secrets TOML"):
+            st.rerun()
+
+    st.divider()
+
+    # ── Quick reference ───────────────────────────────────────────────
+    st.subheader("What each page does")
+    st.markdown("""
+| Page | What it does |
+|---|---|
+| **Email Sender** | Upload a CSV of orders, match them to products, send bulk emails |
+| **Products** | Add, edit, and delete products (syncs to Supabase automatically) |
+| **Inventory** | View live stock levels, adjust stock manually |
+| **Settings** | Configure email, Supabase, image hosting, and get your secrets TOML |
+| **API Endpoints** | REST API docs + ready-to-paste code for your website (Bolt, Lovable, etc.) |
+    """)
+
+# ═════════════════════════════════════════════
 # PRODUCTS PAGE
 # ═════════════════════════════════════════════
 
-if page == "Products":
+elif page == "Products":
     cfg = st.session_state.cfg
     st.title("Products")
 
@@ -2561,7 +2715,52 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
         time.sleep(0.5)
         st.rerun()
 
+    # ── Secrets TOML ─────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Secrets TOML — Prevent Settings Loss on Reboot")
+    st.markdown("""
+Streamlit Cloud wipes the local filesystem on every reboot, so `config.json` disappears.
+**Fix this in one step:** generate the TOML below, copy it, and paste it into Streamlit's built-in secrets store.
+MERIT reads from `st.secrets` automatically on startup — your settings will survive reboots forever.
 
+**How to paste it:**
+1. Click **Manage app** in the bottom-right corner of your Streamlit app
+2. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
+3. Paste the TOML below into the editor → click **Save**
+4. Streamlit reboots the app with your secrets loaded
+
+*If running locally:* save the TOML to `.streamlit/secrets.toml` in the project folder.
+    """)
+
+    _toml_cfg = st.session_state.cfg
+    def _toml_escape(v: str) -> str:
+        return v.replace("\\", "\\\\").replace('"', '\\"')
+
+    _toml_lines = ["[merit]"]
+    for _tk in _SECRETS_CREDENTIAL_KEYS:
+        _tv = _toml_cfg.get(_tk, "")
+        _toml_lines.append(f'{_tk} = "{_toml_escape(str(_tv))}"')
+    _toml_content = "\n".join(_toml_lines)
+
+    st.code(_toml_content, language="toml")
+
+    _has_toml_data = any(_toml_cfg.get(k) for k in _SECRETS_CREDENTIAL_KEYS)
+    if not _has_toml_data:
+        st.info("Fill in your Supabase and email settings above, then come back here to generate your TOML.")
+
+    _gs_secrets_active = False
+    try:
+        _gs_secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
+    except Exception:
+        pass
+
+    if _gs_secrets_active:
+        st.success("Secrets are active — MERIT is reading credentials from `st.secrets`. Settings will persist across reboots.")
+    else:
+        st.warning(
+            "Secrets not detected yet. After pasting the TOML into Streamlit secrets and saving, "
+            "Streamlit will reboot and this message will change to a green confirmation."
+        )
 
 
 # ═════════════════════════════════════════════
