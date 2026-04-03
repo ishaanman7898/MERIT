@@ -348,6 +348,45 @@ def _get_db_conn(cfg: dict):
     return None
 
 
+def _get_effective_supabase_conn_str(cfg: dict) -> str:
+    """Return the Supabase connection string with the stored password substituted in."""
+    conn_str = cfg.get("supabase_connection_string", "").strip()
+    password  = cfg.get("supabase_db_password", "").strip()
+    if not conn_str:
+        return ""
+    if "[YOUR-PASSWORD]" in conn_str and password:
+        return conn_str.replace("[YOUR-PASSWORD]", password)
+    return conn_str
+
+
+def _get_supabase_conn(cfg: dict):
+    """Open a psycopg2 connection to Supabase. Returns None if not configured."""
+    conn_str = _get_effective_supabase_conn_str(cfg)
+    if not conn_str:
+        return None
+    try:
+        import psycopg2  # type: ignore
+        return psycopg2.connect(conn_str, connect_timeout=10)
+    except Exception:
+        return None
+
+
+def _has_supabase(cfg: dict) -> bool:
+    """True if a working Supabase connection string is present."""
+    return bool(_get_effective_supabase_conn_str(cfg))
+
+
+def _get_supabase_project_url(cfg: dict) -> str:
+    """Derive the Supabase project URL from the connection string (for API Endpoints)."""
+    import re as _re
+    conn_str = _get_effective_supabase_conn_str(cfg)
+    if conn_str:
+        m = _re.search(r'@db\.([^.]+)\.supabase\.co', conn_str)
+        if m:
+            return f"https://{m.group(1)}.supabase.co"
+    return cfg.get("supabase_url", "").strip()   # fallback: old-style config
+
+
 def _has_any_db(cfg: dict) -> bool:
     return True  # SQLite is always available; Neon/Supabase are optional extras
 
@@ -412,36 +451,31 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         except Exception as exc:
             results.append(f"Neon failed: {exc}")
 
-    # ── Supabase ────────────────────────────────────────────────────
-    sb_url = cfg.get("supabase_url","").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
-    if sb_url and sb_key:
+    # ── Supabase (psycopg2 direct connection) ───────────────────────
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client  # type: ignore
-            client = create_client(sb_url, sb_key)
-            # ── inventory table (stock tracking + catalog) ──────────
-            _detail = {
-                "item_name": row["item_name"],
-                "category":  row["category"],
-                "price":     row["price"],
-                "image_url": row["image_url"],
-            }
-            _res = client.table("inventory").update(_detail).eq("sku", row["sku"]).execute()
-            if not getattr(_res, "data", None):
-                client.table("inventory").insert(row).execute()
-            # ── products table (clean catalog for external websites) ─
-            _prod_row = {
-                "sku":       row["sku"],
-                "name":      row["item_name"],
-                "category":  row["category"],
-                "price":     row["price"],
-                "image_url": row["image_url"],
-                "active":    True,
-            }
-            _pres = client.table("products").upsert(_prod_row, on_conflict="sku").execute()
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    # inventory table — stock tracking + all catalog fields
+                    cur.execute("""
+                        INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT(sku) DO UPDATE SET
+                            item_name=EXCLUDED.item_name, category=EXCLUDED.category,
+                            price=EXCLUDED.price, image_url=EXCLUDED.image_url
+                    """, (row["sku"],row["item_name"],row["category"],row["price"],
+                          row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
+                    # products table — clean catalog for external websites
+                    cur.execute("""
+                        INSERT INTO products (sku,name,category,price,image_url,active)
+                        VALUES (%s,%s,%s,%s,%s,true)
+                        ON CONFLICT(sku) DO UPDATE SET
+                            name=EXCLUDED.name, category=EXCLUDED.category,
+                            price=EXCLUDED.price, image_url=EXCLUDED.image_url, active=true
+                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["image_url"]))
+            conn_sb.close()
             results.append("Supabase")
-        except ImportError:
-            results.append("Supabase skipped (pip install supabase)")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
 
@@ -487,13 +521,13 @@ def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, s
         except Exception as exc: results.append(f"Neon failed: {exc}")
 
     # Supabase
-    sb_url = cfg.get("supabase_url","").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
-    if sb_url and sb_key:
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client # type: ignore
-            client = create_client(sb_url, sb_key)
-            client.table("inventory").update({"original_stock": stock}).eq("sku", sku).execute()
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("UPDATE inventory SET original_stock=%s WHERE sku=%s", (stock, sku))
+            conn_sb.close()
             results.append("Supabase")
         except Exception as exc: results.append(f"Supabase failed: {exc}")
 
@@ -548,29 +582,22 @@ def adjust_inventory_neon(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
         return False, str(exc)
 
 def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
-    sb_url = cfg.get("supabase_url","").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
-    if not (sb_url and sb_key):
+    conn = _get_supabase_conn(cfg)
+    if conn is None:
         return False, "Supabase not configured"
     try:
-        from supabase import create_client  # type: ignore
-        client = create_client(sb_url, sb_key)
-        res = client.table("inventory").select("stock_left").eq("sku", sku).execute()
-        if not res.data:
-            return False, "SKU not found in Supabase"
-        current = res.data[0]["stock_left"] or 0
-        new_stock = current + delta
-        status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
-        upd = {"stock_left": new_stock, "status": status}
-        client.table("inventory").update(upd).eq("sku", sku).execute()
-        if delta > 0:
-            # Atomic increment in Supabase uses rpc or standard query if not available, 
-            # but here we can just read current original and update
-            # (Better to use RPC but this matches current pattern)
-            res_o = client.table("inventory").select("original_stock").eq("sku", sku).execute()
-            if res_o.data:
-                old_o = res_o.data[0].get("original_stock") or 0
-                client.table("inventory").update({"original_stock": old_o + delta}).eq("sku", sku).execute()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT stock_left FROM inventory WHERE sku=%s", (sku,))
+                row = cur.fetchone()
+                if row is None:
+                    return False, "SKU not found in Supabase"
+                new_stock = row[0] + delta
+                status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
+                cur.execute("UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s", (new_stock, status, sku))
+                if delta > 0:
+                    cur.execute("UPDATE inventory SET original_stock = original_stock + %s WHERE sku=%s", (delta, sku))
+        conn.close()
         return True, f"Supabase stock → {new_stock}"
     except Exception as exc:
         return False, str(exc)
@@ -608,17 +635,17 @@ def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
             results.append(f"Neon failed: {exc}")
 
     # ── Supabase ─────────────────────────────────────────────────────
-    sb_url = cfg.get("supabase_url", "").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    if sb_url and sb_key:
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client  # type: ignore
-            client = create_client(sb_url, sb_key)
-            client.table("inventory").delete().eq("sku", sku).execute()
-            try:
-                client.table("products").delete().eq("sku", sku).execute()
-            except Exception:
-                pass
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("DELETE FROM inventory WHERE sku=%s", (sku,))
+                    try:
+                        cur.execute("DELETE FROM products WHERE sku=%s", (sku,))
+                    except Exception:
+                        pass
+            conn_sb.close()
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
@@ -658,13 +685,13 @@ def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
             results.append(f"Neon failed: {exc}")
 
     # Supabase
-    sb_url = cfg.get("supabase_url", "").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    if sb_url and sb_key:
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client  # type: ignore
-            client = create_client(sb_url, sb_key)
-            client.table("inventory").update({"stock_left": stock, "status": status}).eq("sku", sku).execute()
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s", (stock, status, sku))
+            conn_sb.close()
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
@@ -714,24 +741,23 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
             errors.append(f"Neon sync failed: {exc}")
 
     # ── Supabase ──────────────────────────────────────────────────────
-    sb_url = cfg.get("supabase_url", "").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    if sb_url and sb_key:
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client  # type: ignore
-            client = create_client(sb_url, sb_key)
-            for rec in records:
-                row = {
-                    "sku": rec.get("sku"), "item_name": rec.get("item_name"),
-                    "category": rec.get("category"), "price": rec.get("price"),
-                    "stock_left": rec.get("stock_left"), "status": rec.get("status"),
-                    "image_url": rec.get("image_url"),
-                }
-                existing = client.table("inventory").select("sku").eq("sku", row["sku"]).execute()
-                if getattr(existing, "data", None):
-                    client.table("inventory").update(row).eq("sku", row["sku"]).execute()
-                else:
-                    client.table("inventory").insert(row).execute()
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    for rec in records:
+                        cur.execute("""
+                            INSERT INTO inventory (sku,item_name,category,price,stock_left,status,image_url)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT(sku) DO UPDATE SET
+                                item_name=EXCLUDED.item_name, category=EXCLUDED.category,
+                                price=EXCLUDED.price, stock_left=EXCLUDED.stock_left,
+                                status=EXCLUDED.status, image_url=EXCLUDED.image_url
+                        """, (rec.get("sku"), rec.get("item_name"), rec.get("category"),
+                              rec.get("price"), rec.get("stock_left"), rec.get("status"),
+                              rec.get("image_url")))
+            conn_sb.close()
             synced = max(synced, len(records))
         except Exception as exc:
             errors.append(f"Supabase sync failed: {exc}")
@@ -740,13 +766,14 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_inventory_supabase(sb_url: str, sb_key: str) -> list | None:
+def _fetch_inventory_supabase(conn_str: str) -> list | None:
     try:
-        from supabase import create_client  # type: ignore
-        client = create_client(sb_url, sb_key)
-        res = client.table("inventory").select("*").order("item_name").execute()
-        if res.data:
-            return res.data
+        import psycopg2  # type: ignore
+        conn = psycopg2.connect(conn_str, connect_timeout=10)
+        df = pd.read_sql("SELECT * FROM inventory ORDER BY item_name", conn)
+        conn.close()
+        if not df.empty:
+            return df.to_dict("records")
     except Exception:
         pass
     return None
@@ -776,10 +803,9 @@ def _fetch_inventory_sqlite_cached() -> list | None:
 
 def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
     """Load inventory preferring Supabase > Neon > SQLite (results cached 30 s)."""
-    sb_url = cfg.get("supabase_url", "").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    if sb_url and sb_key:
-        rows = _fetch_inventory_supabase(sb_url, sb_key)
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        rows = _fetch_inventory_supabase(_sb_cs)
         if rows:
             return pd.DataFrame(rows)
 
@@ -797,10 +823,9 @@ def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
 
 def load_products_for_catalog(cfg: dict) -> list[dict]:
     """Load product list preferring Supabase > Neon > SQLite > config.json (cached 30 s)."""
-    sb_url = cfg.get("supabase_url", "").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key", "")).strip()
-    if sb_url and sb_key:
-        rows = _fetch_inventory_supabase(sb_url, sb_key)
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        rows = _fetch_inventory_supabase(_sb_cs)
         if rows:
             return rows
 
@@ -854,39 +879,32 @@ def save_outbound_log(log: dict, cfg: dict):
         except Exception: pass
 
     # Supabase
-    sb_url = cfg.get("supabase_url","").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
-    if sb_url and sb_key:
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
         try:
-            from supabase import create_client
-            client = create_client(sb_url, sb_key)
-            client.table("outbound_logs").insert({
-                "recipient_name": row["name"],
-                "recipient_email": row["email"],
-                "order_number": row["order"],
-                "products_list": row["prods"],
-                "subtotal": row["sub"],
-                "tax": row["tax"],
-                "shipping": row["ship"],
-                "total_cost": row["cost"]
-            }).execute()
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO outbound_logs
+                            (recipient_name,recipient_email,order_number,products_list,subtotal,tax,shipping,total_cost)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (row["name"],row["email"],row["order"],row["prods"],
+                          row["sub"],row["tax"],row["ship"],row["cost"]))
+            conn_sb.close()
         except Exception: pass
 
 
 def load_outbound_logs(cfg: dict) -> pd.DataFrame:
     """Load outbound logs from cloud (preferring Supabase > Neon) or local SQLite."""
-    sb_url = cfg.get("supabase_url","").strip()
-    sb_key = (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip()
-    if sb_url and sb_key:
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
         try:
-            from supabase import create_client
-            client = create_client(sb_url, sb_key)
-            res = client.table("outbound_logs").select("*").order("created_at", desc=True).limit(500).execute()
-            if res.data:
-                df = pd.DataFrame(res.data)
-                # Rename columns to match local if needed
-                df = df.rename(columns={"created_at": "timestamp"})
-                return df
+            import psycopg2  # type: ignore
+            conn = psycopg2.connect(_sb_cs, connect_timeout=10)
+            df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
+            conn.close()
+            df = df.rename(columns={"created_at": "timestamp"})
+            return df
         except Exception: pass
 
     conn_str = cfg.get("neon_connection_string", "").strip()
@@ -1419,13 +1437,13 @@ if page == "Products":
             "No image hosting key set. Go to **Settings → Image Hosting** to add one. "
             "Free options: [freeimage.host](https://freeimage.host) or [imghippo.com](https://imghippo.com)."
         )
-    _has_cloud_db = cfg.get("neon_connection_string") or (cfg.get("supabase_url") and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key")))
+    _has_cloud_db = _has_supabase(cfg) or cfg.get("neon_connection_string")
     if not _has_cloud_db:
         st.warning(
-            "⚠️ **No cloud database configured.** Products are only saved locally to `data.db` on this machine. "
+            "⚠️ **Supabase not configured.** Products are only saved locally to `data.db` on this machine. "
             "If this computer is lost or the app is redeployed, all product and inventory data will be gone. "
-            "Go to **Settings → Database** to connect Supabase (recommended) or Neon. "
-            "Supabase also enables the **API Endpoints** page so your website can show live products."
+            "Go to **Settings → Database** to connect Supabase. "
+            "Supabase also powers the **API Endpoints** page so your website auto-updates when you change products here."
         )
 
     if "_products_cache" not in st.session_state:
@@ -1434,7 +1452,7 @@ if page == "Products":
     products = st.session_state["_products_cache"]
 
     # Compute sync targets for display in this page
-    _p_has_sb = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+    _p_has_sb = _has_supabase(cfg)
     _p_has_neon = bool(cfg.get("neon_connection_string"))
     _p_sync = ["SQLite"] + (["Neon"] if _p_has_neon else []) + (["Supabase"] if _p_has_sb else [])
     _p_sync_str = " + ".join(_p_sync)
@@ -1776,11 +1794,11 @@ elif page == "Inventory":
         if inv_df.empty:
             st.info("No products found. Add products in the **Products** page first.")
         else:
-            _has_supabase = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+            _has_sb_inv = _has_supabase(cfg)
             _has_neon = bool(cfg.get("neon_connection_string"))
             _sync_targets = ["SQLite"]
-            if _has_neon:   _sync_targets.append("Neon")
-            if _has_supabase: _sync_targets.append("Supabase")
+            if _has_neon:    _sync_targets.append("Neon")
+            if _has_sb_inv:  _sync_targets.append("Supabase")
 
             st.caption(
                 f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
@@ -1979,11 +1997,8 @@ elif page == "Settings":
         "_cfg_smtp_pass":       "smtp_password",
         "inp_freeimage_key":    "freeimage_api_key",
         "inp_imgbb_key":        "imghippo_api_key",
-        "inp_sb_url":           "supabase_url",
-        "inp_sb_pat":           "supabase_pat",
-        "inp_sb_anon":          "supabase_key",
-        "inp_sb_publishable":   "supabase_publishable_key",
-        "inp_sb_service":       "supabase_service_role_key",
+        "inp_sb_pass":          "supabase_db_password",
+        "inp_sb_conn":          "supabase_connection_string",
         "inp_neon":             "neon_connection_string",
     }
 
@@ -2267,8 +2282,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     # ── Offline fallback + sync notice ──────────
     _cfg_now = st.session_state.cfg
     _cloud_configured = bool(
-        _cfg_now.get("neon_connection_string") or
-        (_cfg_now.get("supabase_url") and (_cfg_now.get("supabase_service_role_key") or _cfg_now.get("supabase_key")))
+        _cfg_now.get("neon_connection_string") or _has_supabase(_cfg_now)
     )
     if _cloud_configured:
         _sync_col1, _sync_col2 = st.columns([3, 1])
@@ -2291,85 +2305,84 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     db_tab_sb, db_tab_neon = st.tabs(["Supabase", "Neon"])
 
     with db_tab_sb:
-        with st.expander("Where do I find my Supabase credentials?", expanded=False):
+        st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
+
+        with st.expander("Step-by-step setup guide", expanded=not _has_supabase(st.session_state.cfg)):
             st.markdown("""
-1. Open [supabase.com](https://supabase.com) and select your project.
-2. Go to **Settings → API** in the left sidebar.
-3. Copy the **Project URL** (e.g. `https://xxxx.supabase.co`) → paste into **Project URL** below.
-4. Copy the **Anon key** (starts with `eyJ…`) → paste into **Anon Key**.
-5. Copy the **Service role key** (starts with `eyJ…`) → paste into **Service Role Key**. Keep this secret!
-6. For **Personal Access Token**: go to **supabase.com → Account → Access Tokens** → click **Generate new token** → paste into **Personal Access Token**.
+**Step 1 — Create a free Supabase account**
+Go to [supabase.com](https://supabase.com) → Sign Up → Create a new organisation and project.
+
+**Step 2 — Note your database password**
+When Supabase asks you to set a database password during project creation, **copy it now**.
+You will paste it into the field below. (If you forgot, go to **Project Settings → Database → Reset database password**.)
+
+**Step 3 — Get your connection string**
+Once your project is created:
+1. Click the **Connect** button at the top of your project dashboard (blue button, top-right area).
+2. Go to the **Direct connection** tab.
+3. Scroll down and copy the connection string — it looks like:
+   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres`
+
+**Step 4 — Paste both values below**
+- Paste the connection string into **Connection String** (with `[YOUR-PASSWORD]` still in it — MERIT will substitute it).
+- Paste your actual database password into **Database Password**.
+
+**Step 5 — Create tables**
+Click **Setup Tables** below. MERIT will connect and create the `inventory`, `products`, and `outbound_logs` tables automatically.
+
+> **Why only two fields?** MERIT connects directly to your Postgres database using the connection string.
+> No API keys, no SDKs — just a secure direct connection. Your website still uses the Supabase REST API
+> (see **API Endpoints** page for those keys).
             """)
 
-        inp_sb_url = st.text_input(
-            "Project URL",
-            placeholder="https://xxxxxxxxxxxx.supabase.co",
-            help="Supabase Dashboard → Settings → API → Project URL",
-            key="inp_sb_url",
+        inp_sb_conn = st.text_input(
+            "Connection String",
+            placeholder="postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres",
+            help="From Supabase Dashboard → Connect button (top right) → Direct connection tab. Leave [YOUR-PASSWORD] as-is.",
+            key="inp_sb_conn",
             on_change=_auto_save_settings,
         )
-        inp_sb_pat = st.text_input(
-            "Personal Access Token",
+        inp_sb_pass = st.text_input(
+            "Database Password",
             type="password",
-            placeholder="sbp_xxxxxxxxxxxxxxxxxxxx",
-            help="supabase.com/dashboard/account/tokens → Generate new token. Required to auto-run SQL via the Management API.",
-            key="inp_sb_pat",
+            placeholder="Your Supabase database password",
+            help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
+            key="inp_sb_pass",
             on_change=_auto_save_settings,
         )
 
-        col_sb1, col_sb2 = st.columns(2)
-        with col_sb1:
-            inp_sb_anon = st.text_input(
-                "Anon Key",
-                type="password",
-                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                help="Supabase Dashboard → Settings → API → Anon key (legacy JWT starting with eyJ…)",
-                key="inp_sb_anon",
-                on_change=_auto_save_settings,
-            )
-        with col_sb2:
-            inp_sb_publishable = st.text_input(
-                "Publishable Key",
-                type="password",
-                placeholder="sb_publishable_...",
-                help="Supabase Dashboard → Settings → API → Publishable key (starts with sb_publishable_…)",
-                key="inp_sb_publishable",
-                on_change=_auto_save_settings,
-            )
+        # Show resolved connection status
+        _sb_conn_val = inp_sb_conn.strip()
+        _sb_pass_val = inp_sb_pass.strip()
+        _sb_effective = ""
+        if _sb_conn_val:
+            if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
+                _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _sb_pass_val)
+            elif "[YOUR-PASSWORD]" not in _sb_conn_val:
+                _sb_effective = _sb_conn_val
 
-        inp_sb_service = st.text_input(
-            "Service Role Key",
-            type="password",
-            placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... (role: service_role)",
-            help="Supabase Dashboard → Settings → API → Service role key. Used by the backend for full read/write access (bypasses RLS). Keep this secret.",
-            key="inp_sb_service",
-            on_change=_auto_save_settings,
-        )
+        if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
+            st.warning("Enter your **Database Password** above to complete the connection string.")
+        elif _sb_effective:
+            st.caption("Connection string is ready. Click **Test Connection** to verify.")
 
-        # Use service_role key for testing if provided, otherwise anon
-        _test_key = inp_sb_service.strip() or inp_sb_anon.strip()
         col_sb_test, col_sb_setup = st.columns(2)
         with col_sb_test:
             if st.button(
                 "Test Connection",
                 width="stretch",
                 key="btn_test_sb",
-                disabled=not (inp_sb_url and _test_key),
+                disabled=not _sb_effective,
             ):
                 with st.spinner("Connecting to Supabase..."):
                     try:
-                        from supabase import create_client  # type: ignore
-                        client = create_client(inp_sb_url.strip(), _test_key)
-                        client.table("inventory").select("id").limit(1).execute()
+                        import psycopg2 as _pg2
+                        _conn = _pg2.connect(_sb_effective, connect_timeout=10)
+                        _conn.close()
                         st.toast("Supabase connection success!", icon="☁️")
                         st.success("Connected to Supabase successfully.")
-                    except ImportError:
-                        st.error("Run: pip install supabase")
                     except Exception as exc:
-                        if "PGRST205" in str(exc) or "does not exist" in str(exc).lower() or "relation" in str(exc).lower():
-                            st.success("Connected. Tables not created yet — click **Setup Tables** below.")
-                        else:
-                            st.error(f"Connection failed: {exc}")
+                        st.error(f"Connection failed: {exc}")
 
         with col_sb_setup:
             if st.button(
@@ -2377,66 +2390,36 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
                 type="primary",
                 width="stretch",
                 key="btn_setup_sb",
-                disabled=not (inp_sb_url and inp_sb_pat.strip()),
+                disabled=not _sb_effective,
             ):
-                import re as _re
-                import requests as _req
-                _project_ref = _re.search(r"https://([^.]+)\.supabase\.co", inp_sb_url.strip())
-                if not _project_ref:
-                    st.error("Could not parse project ref from URL.")
-                else:
-                    _ref = _project_ref.group(1)
-                    # Split on semicolons, skip blank/comment-only chunks
-                    _statements = [
-                        s.strip() for s in SETUP_SQL.split(";")
-                        if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
-                    ]
-                    _ok, _fail = 0, []
-                    for _stmt in _statements:
-                        _r = _req.post(
-                            f"https://api.supabase.com/v1/projects/{_ref}/database/query",
-                            headers={
-                                "Authorization": f"Bearer {inp_sb_pat.strip()}",
-                                "Content-Type": "application/json",
-                            },
-                            json={"query": _stmt},
-                            timeout=20,
-                        )
-                        if _r.status_code in (200, 201):
-                            _ok += 1
-                        else:
-                            _fail.append(f"{_stmt[:60]}… → {_r.text[:120]}")
-                    if not _fail:
-                        st.success(f"Tables created successfully.")
-                    else:
-                        _ref = _project_ref.group(1)
-                        # Split on semicolons, skip blank/comment-only chunks
+                with st.spinner("Creating tables in Supabase..."):
+                    try:
+                        import psycopg2 as _pg2
+                        _conn = _pg2.connect(_sb_effective, connect_timeout=15)
+                        _cur = _conn.cursor()
                         _statements = [
                             s.strip() for s in SETUP_SQL.split(";")
                             if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
                         ]
                         _ok, _fail = 0, []
                         for _stmt in _statements:
-                            _r = _req.post(
-                                f"https://api.supabase.com/v1/projects/{_ref}/database/query",
-                                headers={
-                                    "Authorization": f"Bearer {inp_sb_pat.strip()}",
-                                    "Content-Type": "application/json",
-                                },
-                                json={"query": _stmt},
-                                timeout=20,
-                            )
-                            if _r.status_code in (200, 201):
+                            try:
+                                _cur.execute(_stmt)
                                 _ok += 1
-                            else:
-                                _fail.append(f"{_stmt[:60]}… → {_r.text[:120]}")
+                            except Exception as _se:
+                                _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                        _conn.commit()
+                        _cur.close()
+                        _conn.close()
                         if not _fail:
                             st.toast("Supabase tables ready!", icon="📦")
-                            st.success(f"Tables created successfully.")
+                            st.success("Tables created successfully. You can now use the API Endpoints page.")
                         else:
                             st.warning(f"{_ok} OK, {len(_fail)} failed:")
                             for _f in _fail:
                                 st.caption(_f)
+                    except Exception as exc:
+                        st.error(f"Setup failed: {exc}")
 
     with db_tab_neon:
         with st.expander("Where do I find the Neon connection string?", expanded=False):
@@ -2552,24 +2535,20 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             "subject":                  inp_subject.strip(),
             "smtp_email":               inp_smtp_email.strip(),
             "smtp_password":            re.sub(r"\s+", "", inp_smtp_pass.strip()),
-            "freeimage_api_key":         inp_freeimage_key.strip(),
+            "freeimage_api_key":        inp_freeimage_key.strip(),
             "imghippo_api_key":         inp_imgbb_key.strip(),
-            "supabase_url":             inp_sb_url.strip(),
-            "supabase_pat":             inp_sb_pat.strip(),
-            "supabase_key":             inp_sb_anon.strip(),
-            "supabase_publishable_key": inp_sb_publishable.strip(),
-            "supabase_service_role_key": inp_sb_service.strip(),
-            "supabase_db_password":     cfg.get("supabase_db_password", ""),
+            "supabase_connection_string": inp_sb_conn.strip(),
+            "supabase_db_password":     inp_sb_pass.strip(),
             "neon_connection_string":   inp_neon.strip(),
             "email_html_template":      cfg.get("email_html_template", ""),
             "products":                 cfg.get("products", []),
         }
         save_config(new_cfg)
         st.session_state.cfg = new_cfg
-        
+
         # Auto-sync products to cloud if setup
         _synced = 0
-        if new_cfg.get("supabase_url") or new_cfg.get("neon_connection_string"):
+        if _has_supabase(new_cfg) or new_cfg.get("neon_connection_string"):
             with st.spinner("Auto-syncing products to cloud..."):
                 _local_prods = load_products_for_catalog(new_cfg)
                 for p in _local_prods:
@@ -2592,23 +2571,21 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
 elif page == "API Endpoints":
     cfg = st.session_state.cfg
 
-    _api_sb_url     = cfg.get("supabase_url", "").strip()
-    _api_sb_anon    = (cfg.get("supabase_publishable_key") or cfg.get("supabase_key", "")).strip()
-    _api_sb_service = cfg.get("supabase_service_role_key", "").strip()
+    _api_sb_url     = _get_supabase_project_url(cfg)   # derived from connection string
     _api_neon       = cfg.get("neon_connection_string", "").strip()
     _api_rest_base  = f"{_api_sb_url}/rest/v1" if _api_sb_url else ""
 
     st.title("API Endpoints")
     st.caption(
-        "Your MERIT product catalog is a live Supabase database. "
+        "Your MERIT product catalog lives in a Supabase database. "
         "Any website built on Bolt.new, Lovable, Cursor, or plain JavaScript can read from it "
         "in real-time — every product you add, edit, or delete here auto-updates on your site."
     )
 
-    if not _api_sb_url:
+    if not _has_supabase(cfg):
         st.warning(
             "**Supabase is not configured.** "
-            "Go to **Settings → Database → Supabase** and enter your Project URL + Service Role Key, "
+            "Go to **Settings → Database → Supabase**, paste your connection string + database password, "
             "then click **Setup Tables**. Come back here once that is done."
         )
         st.info(
@@ -2619,7 +2596,11 @@ elif page == "API Endpoints":
 
     # ── Connection Details ────────────────────────────────────────────
     st.subheader("Connection Details")
-    st.caption("Paste these two values into your website project's environment variables.")
+    st.markdown(
+        "Your website uses the Supabase **REST API** (not the direct connection string — that's for MERIT's backend only). "
+        "To get your anon key for the website, go to your [Supabase dashboard](https://supabase.com) → "
+        "**Project Settings → API** and copy the **anon / public** key."
+    )
 
     _cd1, _cd2 = st.columns(2)
     with _cd1:
@@ -2630,49 +2611,60 @@ elif page == "API Endpoints":
             help="Your Supabase project URL — safe to expose in front-end code",
         )
     with _cd2:
-        _display_anon = _api_sb_anon if _api_sb_anon else "(not set — add Anon or Publishable key in Settings)"
         st.text_input(
             "NEXT_PUBLIC_SUPABASE_ANON_KEY  /  VITE_SUPABASE_ANON_KEY",
-            value=_display_anon,
-            type="password" if _api_sb_anon else "default",
+            value="(copy from Supabase Dashboard → Project Settings → API → anon / public)",
             disabled=True,
-            help="Safe to expose in browsers when Row Level Security (RLS) is enabled (see SQL below)",
+            help="Safe to expose in browsers. Copy from Supabase Dashboard → Project Settings → API",
         )
     st.info(
-        "**Never put the Service Role Key in your website.** "
-        "It bypasses all RLS and would give visitors full write access to your database. "
-        "MERIT uses it server-side only; your website always uses the anon / publishable key."
+        "**Never put your database password or connection string in your website.** "
+        "The direct connection string is for MERIT's backend only. "
+        "Your website always uses the anon key shown above (it's safe to expose publicly when RLS is on)."
     )
 
     # ── Quick-start platform guide ────────────────────────────────────
     with st.expander("Quick Start — Bolt.new / Lovable / Cursor / v0", expanded=True):
         st.markdown(f"""
-**Step 1 — Start a new project** on your vibe-coding platform and choose **Supabase** as the backend.
+**Step 1 — Get your anon key from Supabase**
+Go to your [Supabase Dashboard](https://supabase.com) → **Project Settings** (gear icon in the left sidebar) → **API** → copy the **anon / public** key.
+This is the key your website will use (safe to expose in the browser).
 
-**Step 2 — Connect to YOUR Supabase project** (not a new one the platform creates):
+**Step 2 — Start a new project** on your vibe-coding platform and choose **Supabase** as the backend.
+
+**Step 3 — Connect to YOUR Supabase project** (not a new one the platform creates):
 
 | Variable name the platform asks for | Value to paste |
 |---|---|
 | `SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_URL` | `{_api_sb_url}` |
-| `SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` | *(copy from Settings → Database → Anon Key)* |
+| `SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` | *(your anon / public key from Step 1)* |
 
-**Step 3 — Tell the AI to use these tables:**
+**Step 4 — Tell the AI to use these tables:**
 
 ```
-My Supabase database has two tables:
+My Supabase database has these tables (managed by MERIT inventory system):
 - "inventory": sku, item_name, category, price, stock_left, status, image_url, original_stock
 - "products":  sku, name, category, price, image_url, active (boolean)
 
 Use the "inventory" table for the storefront — it has live stock levels.
-Filter with: stock_left > 0 (to hide out-of-stock items).
+Filter with: stock_left > 0 AND status = 'Active' to hide out-of-stock items.
+The image_url column contains the full URL to the product image — display it directly in an <img> tag.
 ```
 
-**Step 4 — Enable real-time** in your Supabase dashboard:
+**Step 5 — Images**
+Product images in MERIT are uploaded to a hosting service (FreeImage or ImgBB) and stored as public URLs in the `image_url` column.
+You do **not** need to do anything special — just use `image_url` directly in your HTML/React/Vue:
+```html
+<img src="{{product.image_url}}" alt="{{product.item_name}}" />
+```
+If `image_url` is empty for a product, show a placeholder image. Images are always external URLs — they are never stored inside Supabase.
+
+**Step 6 — Enable real-time** in your Supabase dashboard:
 1. Go to **Database → Replication** in your Supabase project
 2. Enable replication for the `inventory` and `products` tables
-3. The platform's AI can then subscribe to live changes
+3. The platform's AI can then subscribe to live changes — any product you edit in MERIT appears on your site within milliseconds
 
-**Step 5 — Run the RLS SQL** (see the *Row Level Security* tab below) so public visitors can read but not write.
+**Step 7 — Run the RLS SQL** (see the *Row Level Security* tab below) so public visitors can read but not write.
         """)
 
     # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview ─
@@ -2724,19 +2716,20 @@ Filter with: stock_left > 0 (to hide out-of-stock items).
 
         st.markdown("#### Required request headers")
         st.code(
-            f"apikey: {_api_sb_anon or '<your-anon-key>'}\n"
-            f"Authorization: Bearer {_api_sb_anon or '<your-anon-key>'}",
+            "apikey: <your-anon-key>\n"
+            "Authorization: Bearer <your-anon-key>",
             language="http",
         )
+        st.caption("Get your anon key from: Supabase Dashboard → Project Settings → API → anon / public")
 
     # ── Code Examples ─────────────────────────────────────────────────
     with _tab_code:
-        _ex_js, _ex_ts, _ex_react, _ex_rt = st.tabs(
-            ["JavaScript", "TypeScript (Next.js)", "React Hook", "Real-time Subscription"]
+        _ex_js, _ex_ts, _ex_react, _ex_rt, _ex_img = st.tabs(
+            ["JavaScript", "TypeScript (Next.js)", "React Hook", "Real-time Subscription", "Images"]
         )
 
         _sb_url_ph = _api_sb_url or "YOUR_SUPABASE_URL"
-        _sb_key_ph = _api_sb_anon or "YOUR_SUPABASE_ANON_KEY"
+        _sb_key_ph = "YOUR_SUPABASE_ANON_KEY"
 
         with _ex_js:
             st.code(f"""\
@@ -2900,11 +2893,58 @@ const channel = supabase
 // supabase.removeChannel(channel)
 """, language="javascript")
 
+        with _ex_img:
+            st.markdown("""
+#### How images work in MERIT
+
+When you add a product in MERIT you can upload an image. MERIT uploads it to an external image host
+(FreeImage or ImgBB, configured in **Settings → Image Hosting**) and stores the public URL in the
+`image_url` column of both `inventory` and `products`.
+
+**Your website just uses the URL directly — no extra setup needed.**
+
+```html
+<!-- Plain HTML -->
+<img src="{{ product.image_url }}" alt="{{ product.item_name }}" />
+```
+""")
+            st.code(f"""\
+// React / Next.js
+export function ProductCard({{ product }}) {{
+  return (
+    <div className="product-card">
+      {{product.image_url ? (
+        <img src={{product.image_url}} alt={{product.item_name}} />
+      ) : (
+        <div className="placeholder">No image</div>
+      )}}
+      <h2>{{product.item_name}}</h2>
+      <p>${{product.price}}</p>
+    </div>
+  )
+}}
+
+// Fetching with Supabase client:
+const {{ data }} = await supabase
+  .from('inventory')
+  .select('sku, item_name, price, stock_left, image_url, category')
+  .gt('stock_left', 0)
+  .order('item_name')
+
+// data[0].image_url → 'https://ibb.co/...' or 'https://freeimage.host/...'
+// Always a full public URL — use it directly in <img src={{...}} />
+""", language="typescript")
+            st.info(
+                "**If image_url is empty:** Some products may not have images. "
+                "Always add a fallback in your website (a placeholder image or a CSS background color). "
+                "To add images to existing products, go to the **Products → Edit Products** tab in MERIT."
+            )
+
     # ── Row Level Security SQL ────────────────────────────────────────
     with _tab_rls:
         st.markdown(
             "Run this SQL in your Supabase project to allow public **read** access "
-            "while keeping all writes protected (MERIT writes using the service role key, "
+            "while keeping all writes protected (MERIT writes via a direct database connection, "
             "which bypasses RLS)."
         )
         st.markdown("**How to run it:** Supabase Dashboard → SQL Editor → New Query → paste → Run")
@@ -2953,41 +2993,42 @@ WHERE  schemaname = 'public'
             st.cache_data.clear()
 
         try:
-            from supabase import create_client as _sc  # type: ignore
-            _live_key = _api_sb_service or _api_sb_anon
-            if not _live_key:
-                st.warning("Add your Supabase Service Role or Anon key in Settings to preview live data.")
-            else:
-                _live_client = _sc(_api_sb_url, _live_key)
+            import psycopg2 as _pg2
+            _live_conn_str = _get_effective_supabase_conn_str(cfg)
+            _live_conn = _pg2.connect(_live_conn_str, connect_timeout=10)
 
-                _preview_inv, _preview_prod = st.columns(2)
-                with _preview_inv:
-                    st.markdown("**inventory** table")
-                    try:
-                        _inv_res = _live_client.table("inventory").select(
-                            "sku,item_name,price,stock_left,status"
-                        ).order("item_name").limit(50).execute()
-                        if _inv_res.data:
-                            st.dataframe(pd.DataFrame(_inv_res.data), use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No rows in inventory yet. Add products in the Products page.")
-                    except Exception as _e:
-                        st.error(f"Could not fetch inventory: {_e}")
+            _preview_inv, _preview_prod = st.columns(2)
+            with _preview_inv:
+                st.markdown("**inventory** table")
+                try:
+                    _inv_df = pd.read_sql(
+                        "SELECT sku, item_name, price, stock_left, status FROM inventory ORDER BY item_name LIMIT 50",
+                        _live_conn,
+                    )
+                    if not _inv_df.empty:
+                        st.dataframe(_inv_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No rows in inventory yet. Add products in the Products page.")
+                except Exception as _e:
+                    st.error(f"Could not fetch inventory: {_e}")
 
-                with _preview_prod:
-                    st.markdown("**products** table")
-                    try:
-                        _prod_res = _live_client.table("products").select(
-                            "sku,name,category,price,active"
-                        ).order("name").limit(50).execute()
-                        if _prod_res.data:
-                            st.dataframe(pd.DataFrame(_prod_res.data), use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No rows in products yet. Add products in the Products page.")
-                    except Exception as _e:
-                        st.error(f"Could not fetch products: {_e}")
-        except ImportError:
-            st.error("Run `pip install supabase` to enable live preview.")
+            with _preview_prod:
+                st.markdown("**products** table")
+                try:
+                    _prod_df = pd.read_sql(
+                        "SELECT sku, name, category, price, active FROM products ORDER BY name LIMIT 50",
+                        _live_conn,
+                    )
+                    if not _prod_df.empty:
+                        st.dataframe(_prod_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No rows in products yet. Add products in the Products page.")
+                except Exception as _e:
+                    st.error(f"Could not fetch products: {_e}")
+
+            _live_conn.close()
+        except Exception as _live_err:
+            st.error(f"Could not connect to Supabase: {_live_err}")
 
     # ── How auto-sync works ───────────────────────────────────────────
     st.divider()
@@ -3503,7 +3544,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             prog.progress(1.0, text="Done")
 
             # ── Deduct inventory for every successfully sent order ──────
-            _has_sb_send  = bool(cfg.get("supabase_url","").strip() and (cfg.get("supabase_service_role_key") or cfg.get("supabase_key","")).strip())
+            _has_sb_send  = _has_supabase(cfg)
             _has_neon_send = bool(cfg.get("neon_connection_string","").strip())
             _deductions: dict[str, int] = {}
             for _si, _sorder in enumerate(queue):
