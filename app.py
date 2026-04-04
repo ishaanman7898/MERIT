@@ -564,6 +564,50 @@ def _has_any_db(cfg: dict) -> bool:
     return True  # SQLite is always available; Supabase is optional
 
 
+def _split_sql_statements(sql: str) -> list:
+    """Split SQL into individual executable statements, respecting dollar-quoted blocks.
+
+    A naive split on ';' breaks DO $$ ... $$; migration blocks because the PL/pgSQL
+    body itself contains semicolons. This scanner tracks dollar-quote depth so that
+    semicolons inside $$ ... $$ are never treated as statement terminators.
+    """
+    import re as _re
+    statements: list = []
+    buf: list = []
+    dollar_tag: str | None = None
+    i = 0
+    while i < len(sql):
+        if dollar_tag is None:
+            # Detect opening dollar-quote: $tag$ or $$
+            _dm = _re.match(r"\$([A-Za-z0-9_]*)\$", sql[i:])
+            if _dm:
+                dollar_tag = _dm.group(0)
+                buf.append(dollar_tag)
+                i += len(dollar_tag)
+                continue
+            if sql[i] == ";":
+                stmt = "".join(buf).strip()
+                if stmt and not all(ln.lstrip().startswith("--") for ln in stmt.splitlines() if ln.strip()):
+                    statements.append(stmt)
+                buf = []
+                i += 1
+                continue
+        else:
+            # Detect matching closing dollar-quote
+            if sql[i : i + len(dollar_tag)] == dollar_tag:
+                buf.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+                continue
+        buf.append(sql[i])
+        i += 1
+    # trailing statement without final semicolon
+    stmt = "".join(buf).strip()
+    if stmt and not all(ln.lstrip().startswith("--") for ln in stmt.splitlines() if ln.strip()):
+        statements.append(stmt)
+    return statements
+
+
 def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     """Upsert one product into ALL configured databases. Always saves to SQLite."""
     _stock = int(product.get("stock_left", 0))
@@ -2615,10 +2659,7 @@ elif page == "Settings":
                 try:
                     _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
                     _cur = _conn.cursor()
-                    _statements = [
-                        s.strip() for s in SETUP_SQL.split(";")
-                        if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
-                    ]
+                    _statements = _split_sql_statements(SETUP_SQL)
                     _ok, _fail = 0, []
                     for _stmt in _statements:
                         try:
