@@ -2884,78 +2884,17 @@ elif page == "API Endpoints":
         )
         st.stop()
 
-    # ── Connection Details ────────────────────────────────────────────
-    st.subheader("Connection Details")
-    st.markdown(
-        "Your website uses the Supabase **REST API** (not the direct connection string — that's for MERIT's backend only). "
-        "To get your anon key for the website, go to your [Supabase dashboard](https://supabase.com) → "
-        "**Project Settings → API** and copy the **anon / public** key."
-    )
-
-    _cd1, _cd2 = st.columns(2)
-    with _cd1:
-        st.text_input(
-            "NEXT_PUBLIC_SUPABASE_URL  /  VITE_SUPABASE_URL",
-            value=_api_sb_url,
-            disabled=True,
-            help="Your Supabase project URL — safe to expose in front-end code",
-        )
-    with _cd2:
-        st.text_input(
-            "NEXT_PUBLIC_SUPABASE_ANON_KEY  /  VITE_SUPABASE_ANON_KEY",
-            value="(copy from Supabase Dashboard → Project Settings → API → anon / public)",
-            disabled=True,
-            help="Safe to expose in browsers. Copy from Supabase Dashboard → Project Settings → API",
-        )
+    # ── Quick intro ───────────────────────────────────────────────────
     st.info(
-        "**Never put your database password or connection string in your website.** "
-        "The direct connection string is for MERIT's backend only. "
-        "Your website always uses the anon key shown above (it's safe to expose publicly when RLS is on)."
+        f"**Your Supabase URL:** `{_api_sb_url}`  ·  "
+        "**Anon key:** Supabase Dashboard → Project Settings → API → anon / public  ·  "
+        "**Never** put the direct connection string in your website — that's MERIT's backend only."
     )
-
-    # ── Quick-start platform guide ────────────────────────────────────
-    with st.expander("Quick Start — Bolt.new / Lovable / Cursor / v0", expanded=True):
-        st.markdown(f"""
-**Step 1 — Get your anon key from Supabase**
-Go to your [Supabase Dashboard](https://supabase.com) → **Project Settings** (gear icon in the left sidebar) → **API** → copy the **anon / public** key.
-This is the key your website will use (safe to expose in the browser).
-
-**Step 2 — Start a new project** on your vibe-coding platform and choose **Supabase** as the backend.
-
-**Step 3 — Connect to YOUR Supabase project** (not a new one the platform creates):
-
-| Variable name the platform asks for | Value to paste |
-|---|---|
-| `SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_URL` | `{_api_sb_url}` |
-| `SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` | *(your anon / public key from Step 1)* |
-
-**Step 4 — Tell the AI to use these tables:**
-
-```
-My Supabase database has these tables (managed by MERIT inventory system):
-- "inventory": sku, item_name, category, price, stock_left, status, image_url, original_stock
-- "products":  sku, name, category, price, image_url, active (boolean)
-
-Use the "inventory" table for the storefront — it has live stock levels.
-Filter with: stock_left > 0 AND status = 'Active' to hide out-of-stock items.
-The image_url column contains the full URL to the product image — display it directly in an <img> tag.
-```
-
-**Step 5 — Images**
-Product images in MERIT are uploaded to a hosting service (FreeImage or ImgBB) and stored as public URLs in the `image_url` column.
-You do **not** need to do anything special — just use `image_url` directly in your HTML/React/Vue:
-```html
-<img src="{{product.image_url}}" alt="{{product.item_name}}" />
-```
-If `image_url` is empty for a product, show a placeholder image. Images are always external URLs — they are never stored inside Supabase.
-
-**Step 6 — Enable real-time** in your Supabase dashboard:
-1. Go to **Database → Replication** in your Supabase project
-2. Enable replication for the `inventory` and `products` tables
-3. The platform's AI can then subscribe to live changes — any product you edit in MERIT appears on your site within milliseconds
-
-**Step 7 — Run the RLS SQL** (see the *Row Level Security* tab below) so public visitors can read but not write.
-        """)
+    st.markdown(
+        "Every product you add, edit, or delete in MERIT writes to Supabase instantly. "
+        "Any website built on **Bolt.new, Lovable, Cursor, v0**, or plain JavaScript can read "
+        "that data in real-time. Use the **AI Prompts** tab to get copy-paste prompts pre-filled with your schema."
+    )
 
     # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview | AI Prompts ─
     _tab_api, _tab_code, _tab_rls, _tab_live, _tab_ai = st.tabs(
@@ -3347,127 +3286,368 @@ No polling, no manual export — changes appear on your site within milliseconds
     with _tab_ai:
         _sb_url_ai = _api_sb_url or "YOUR_SUPABASE_URL"
         st.caption(
-            "Copy any of these prompts into Bolt.new, Lovable, Cursor, v0, or any AI coding tool. "
-            "Your Supabase URL is pre-filled where possible — just add your anon key."
+            "Every prompt below has your Supabase URL pre-filled and the exact schema MERIT uses. "
+            "Copy the one matching your platform, add your anon key, and paste it into the AI chat to start building."
+        )
+        st.info(
+            "**How to get your anon key:** Supabase Dashboard → Project Settings (gear icon) → API → "
+            "copy the **anon / public** key. It starts with `eyJ…`. Safe to expose in browser code when RLS is on."
         )
 
-        _ai_storefront, _ai_product, _ai_cart, _ai_context = st.tabs(
-            ["Storefront / Product Grid", "Product Detail Page", "Cart & Checkout", "General Context Block"]
+        _ai_master, _ai_bolt, _ai_lovable, _ai_cursor, _ai_schema_tab = st.tabs(
+            ["Master Context Block", "Bolt.new", "Lovable", "Cursor / v0 / General", "Full Schema SQL"]
         )
 
-        with _ai_storefront:
-            st.markdown("**Paste this into Bolt.new, Lovable, or Cursor to build a live product grid that auto-updates from MERIT.**")
-            _storefront_prompt = f"""\
-Build me a product storefront connected to my Supabase database.
+        # ── shared schema text used across all prompts ──────────────────
+        _schema_block = f"""\
+=== MERIT DATABASE SCHEMA (Supabase / PostgreSQL) ===
 
-Supabase project URL: {_sb_url_ai}
-Supabase anon key: YOUR_SUPABASE_ANON_KEY  (get from Supabase Dashboard → Project Settings → API → anon/public)
+Supabase project URL : {_sb_url_ai}
+Supabase anon key    : YOUR_SUPABASE_ANON_KEY   ← replace this
 
-Database table: inventory
-Columns: sku, item_name, category, price, stock_left, status, image_url
+--- TABLE: inventory  (use for storefront — has live stock) ---
+Column          Type              Notes
+-----------     ----------------  -----------------------------------------
+id              BIGSERIAL PK      auto-increment, do not reference in queries
+sku             TEXT NOT NULL     unique product code, use as the URL slug
+item_name       TEXT NOT NULL     product display name
+category        TEXT              product category (use for filters)
+price           NUMERIC(10,2)     retail price in USD
+stock_left      INTEGER           units currently in stock
+status          TEXT              'In stock' | 'Low stock' | 'Out of stock' | 'Backordered'
+image_url       TEXT              full public HTTPS URL — use directly in <img src="">
+original_stock  INTEGER           initial stock set when product was added
+created_at      TIMESTAMPTZ       when the row was created
+
+STOREFRONT QUERY RULE:
+  Show only products where stock_left > 0
+  (status reflects the same thing but stock_left > 0 is the canonical filter)
+
+--- TABLE: products  (clean catalog, no stock data) ---
+Column          Type              Notes
+-----------     ----------------  -----------------------------------------
+id              BIGSERIAL PK
+sku             TEXT NOT NULL     matches inventory.sku
+name            TEXT NOT NULL     product display name
+category        TEXT
+price           NUMERIC(10,2)
+description     TEXT              product description (may be empty)
+image_url       TEXT              full public HTTPS URL
+active          BOOLEAN           true = visible, false = hidden
+created_at      TIMESTAMPTZ
+
+USE CASE: Use products table when you want a clean catalog without stock numbers.
+Filter: active = true
+
+--- TABLE: outbound_logs  (order history — read-only from website) ---
+Column            Type              Notes
+-----------       ----------------  -----------------------------------------
+id                BIGSERIAL PK
+recipient_name    TEXT
+recipient_email   TEXT
+order_number      TEXT
+products_list     TEXT              comma-separated product names
+subtotal          NUMERIC(10,2)
+tax               NUMERIC(10,2)
+shipping          NUMERIC(10,2)
+total_cost        NUMERIC(10,2)
+created_at        TIMESTAMPTZ
+
+=== IMAGE RULES ===
+- image_url is ALWAYS a full public HTTPS URL (hosted on Freeimage.host or Imghippo)
+- Use it directly in <img src={{product.image_url}}>
+- If image_url is 'N/A', null, or empty string → show a grey placeholder div
+- NEVER try to proxy or re-upload images — they are already hosted
+
+=== RLS (ROW LEVEL SECURITY) ===
+The following policies must be in place so anonymous visitors can read but not write.
+Run this SQL in Supabase Dashboard → SQL Editor → New Query:
+
+  ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE outbound_logs ENABLE ROW LEVEL SECURITY;
+
+  CREATE POLICY "Public read inventory"
+    ON inventory FOR SELECT USING (true);
+
+  CREATE POLICY "Public read products"
+    ON products FOR SELECT USING (true);
+
+MERIT writes to the database using the direct PostgreSQL connection string (bypasses RLS).
+The anon key used by the website is read-only — it cannot INSERT, UPDATE, or DELETE.
+
+=== SUPABASE REALTIME ===
+To enable live updates when MERIT changes a product:
+1. Supabase Dashboard → Database → Replication
+2. Toggle ON for: inventory, products
+3. Subscribe in your JS code using supabase.channel(...)
+
+=== ENV VARIABLES ===
+For Bolt.new / Lovable / Vite projects use:
+  VITE_SUPABASE_URL      = {_sb_url_ai}
+  VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY
+
+For Next.js projects use:
+  NEXT_PUBLIC_SUPABASE_URL      = {_sb_url_ai}
+  NEXT_PUBLIC_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
+
+        # ── Master Context Block ────────────────────────────────────────
+        with _ai_master:
+            st.markdown(
+                "**Paste this entire block at the start of any AI conversation** "
+                "(Bolt.new, Lovable, Cursor, ChatGPT, Claude, v0 — anything). "
+                "It gives the AI full schema, RLS policies, image rules, and env var names so it can build "
+                "the entire storefront without asking follow-up questions."
+            )
+            _master_prompt = f"""\
+{_schema_block}
+
+=== WHAT TO BUILD ===
+Build a modern product storefront website that reads from the Supabase database described above.
 
 Requirements:
-- Fetch all products where stock_left > 0 and status = 'Active'
-- Display products in a responsive grid (3 columns on desktop, 1 on mobile)
-- Each card shows: product image (image_url), name (item_name), price, and an "Add to Cart" button
-- If image_url is empty or null, show a grey placeholder box
-- Add a category filter bar at the top so users can filter by category
-- Sort products alphabetically by item_name by default
-- Subscribe to Supabase Realtime on the inventory table so the grid updates live when I change products in MERIT
-- Use the Supabase JS client (@supabase/supabase-js)
-- Keep the design clean and modern"""
-            st.code(_storefront_prompt, language="text")
+1. Product grid — responsive 3-column layout (1 col mobile, 2 col tablet, 3 col desktop)
+   - Each card: product image, name (item_name), price, stock status badge, "Add to Cart" button
+   - Only show products where stock_left > 0
+   - Grey placeholder when image_url is 'N/A' or empty
 
-        with _ai_product:
-            st.markdown("**Prompt for building an individual product detail page.**")
-            _product_prompt = f"""\
-Build a product detail page that pulls a single product from my Supabase inventory table.
+2. Category filter — horizontal pill buttons at the top, "All" selected by default
+   - Fetch distinct categories from the inventory table
+   - Clicking a category filters the grid instantly (client-side)
 
-Supabase project URL: {_sb_url_ai}
-Supabase anon key: YOUR_SUPABASE_ANON_KEY
+3. Product detail page — route: /products/[sku]
+   - Large image left, details right
+   - Show: name, price, category, description (from products table), stock status
+   - "Out of Stock" badge when stock_left = 0, grey out the Add to Cart button
 
-Table: inventory
-Columns: sku, item_name, category, price, stock_left, status, image_url
+4. Cart — localStorage, no login required
+   - Slide-in drawer, quantity +/-, remove button, subtotal
+   - Cart icon in header with item count badge
 
-The page receives a SKU from the URL (e.g. /products/[sku]).
-It should:
-- Fetch the product where sku = [sku from URL]
-- Show a large product image on the left, product details on the right
-- Display: name, price, category, stock status (show "Out of Stock" badge if stock_left = 0)
-- If image_url is null or empty, show a placeholder
-- Include a back button to return to the product grid
-- Handle loading and error states gracefully"""
-            st.code(_product_prompt, language="text")
+5. Realtime — subscribe to inventory table changes
+   - When MERIT updates a product, the grid refreshes automatically without page reload
 
-        with _ai_cart:
-            st.markdown("**Prompt for adding cart and checkout flow. Paste after the storefront is built.**")
-            _cart_prompt = f"""\
-Add a cart and checkout flow to my storefront. The product data comes from Supabase (table: inventory).
+6. RLS — run the RLS SQL above in Supabase before going live"""
+            st.code(_master_prompt, language="text")
 
-Supabase project URL: {_sb_url_ai}
-Supabase anon key: YOUR_SUPABASE_ANON_KEY
+        # ── Bolt.new ────────────────────────────────────────────────────
+        with _ai_bolt:
+            st.markdown("""
+**How to use in Bolt.new:**
+1. Open [bolt.new](https://bolt.new) → start a new project
+2. When Bolt asks you to connect a database → click **Supabase** → **Connect to existing project**
+3. Paste your Supabase URL and anon key
+4. Then paste the prompt below into the chat
+            """)
+            _bolt_prompt = f"""\
+I already have a Supabase database set up and connected. Do NOT create new tables.
 
-Cart requirements:
-- Cart state stored in localStorage (no login required)
-- Each cart item has: sku, item_name, price, image_url, quantity
-- Cart icon in the header showing item count
-- Cart drawer/sidebar that slides in from the right
-- Quantity controls (+ / -) and remove button per item
-- Cart total calculated from price × quantity
+{_schema_block}
 
-Checkout page requirements:
-- Form fields: First Name, Last Name, Email, optional notes
-- Order summary showing all items and total
-- On submit: send a POST request to my order endpoint (I will provide this separately)
-- Show a confirmation message after successful submission
-- Do NOT integrate a payment processor — this is a manual order flow"""
-            st.code(_cart_prompt, language="text")
+Build a VEI (Virtual Enterprise International) firm product storefront using the schema above.
 
-        with _ai_context:
+Tech stack: React + Vite + Tailwind CSS + @supabase/supabase-js
+
+Pages to build:
+1. / (Home) — product grid
+   - Fetch from inventory where stock_left > 0
+   - Responsive grid: 1 col (mobile) → 2 col (tablet) → 3 col (desktop)
+   - Product card: <img src={{item.image_url}} /> with grey fallback, item_name, price formatted as $X.XX,
+     stock status badge (green = In stock, yellow = Low stock, red = Out of stock), Add to Cart button
+   - Category filter pills at top (fetch distinct categories, All selected by default)
+   - Sort toggle: A-Z / Price Low-High / Price High-Low
+
+2. /products/:sku — product detail
+   - Pull single product where sku = route param
+   - Large image + details panel with description from products table
+   - Add to Cart button disabled + greyed when stock_left = 0
+   - Breadcrumb: Home → [category] → [item_name]
+
+3. Cart (slide-in drawer, not a page)
+   - State in localStorage key "merit_cart"
+   - Each item: {{ sku, item_name, price, image_url, quantity }}
+   - +/- quantity buttons, remove button, item subtotal, grand total
+   - "Checkout" button → opens a modal form (Name, Email, notes) → shows order confirmation on submit
+
+Supabase Realtime:
+- Subscribe to postgres_changes on inventory table
+- On any change event → refetch the product list so the page stays live
+
+Use the exact env var names: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY"""
+            st.code(_bolt_prompt, language="text")
+
+        # ── Lovable ─────────────────────────────────────────────────────
+        with _ai_lovable:
+            st.markdown("""
+**How to use in Lovable:**
+1. Open [lovable.dev](https://lovable.dev) → create a new project
+2. In the Supabase integration panel → paste your URL and anon key
+3. Tell Lovable **"do not create new tables — I already have tables"**, then paste the prompt below
+            """)
+            _lovable_prompt = f"""\
+I have an existing Supabase database. DO NOT run any CREATE TABLE or ALTER TABLE statements.
+My tables already exist. Only read from them using SELECT queries through the Supabase client.
+
+{_schema_block}
+
+Build a product storefront for my VEI firm with the following pages and features.
+
+Design: clean, minimal, white background, dark navy header, rounded product cards with subtle shadows.
+
+--- PAGE: / (Product Catalog) ---
+- Fetch all rows from inventory where stock_left > 0, ordered by item_name ASC
+- Display in a responsive product grid
+- Each card shows:
+    • Product image from image_url (if image_url = 'N/A' or empty → show grey box with "No image" text)
+    • item_name as card title
+    • price formatted as "$X.XX"
+    • A coloured badge for status: "In stock" → green, "Low stock" → amber, "Out of stock" → red
+    • "Add to Cart" button (disabled and greyed when stock_left = 0)
+- Horizontal category filter at top (distinct values from inventory.category)
+- Search bar that filters item_name in real-time (client-side)
+
+--- PAGE: /product/:sku ---
+- Fetch single product from inventory where sku = URL param
+- Two-column layout: image left (large), details right
+- Show: item_name, price, category, stock_left (e.g. "12 in stock"), status badge, description (from products table if available)
+- Add to Cart button
+- Back link to catalog
+
+--- COMPONENT: Cart Drawer ---
+- Triggered by cart icon in navbar (shows count badge)
+- Slide in from right
+- Line items: image thumbnail, name, $price × quantity, remove button
+- Order total at bottom
+- "Request Order" button → opens a modal with: Name, Email, Message fields → on submit show thank-you confirmation
+
+--- REALTIME ---
+Connect to Supabase Realtime on the inventory table. On INSERT, UPDATE, or DELETE events re-fetch the catalog so changes from MERIT appear instantly on the site.
+
+--- ENV VARS needed ---
+VITE_SUPABASE_URL      = {_sb_url_ai}
+VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
+            st.code(_lovable_prompt, language="text")
+
+        # ── Cursor / v0 / General ───────────────────────────────────────
+        with _ai_cursor:
+            st.markdown("""
+**Works with Cursor, v0.dev, Claude, ChatGPT, or any AI assistant.**
+Paste the prompt below into the AI chat after opening your project.
+For **v0.dev** just paste it directly into the v0 prompt bar.
+            """)
+            _cursor_prompt = f"""\
+I need to build a product storefront that reads from my Supabase database.
+Use the schema and rules below exactly — do not invent column names or table structures.
+
+{_schema_block}
+
+=== IMPLEMENTATION INSTRUCTIONS ===
+
+Step 1 — Supabase client setup
+  import {{ createClient }} from '@supabase/supabase-js'
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,   // or VITE_SUPABASE_URL for Vite
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  )
+
+Step 2 — Fetch in-stock products
+  const {{ data: products }} = await supabase
+    .from('inventory')
+    .select('sku, item_name, category, price, stock_left, status, image_url')
+    .gt('stock_left', 0)
+    .order('item_name')
+
+Step 3 — Fetch a single product by SKU
+  const {{ data }} = await supabase
+    .from('inventory')
+    .select('*')
+    .eq('sku', sku)
+    .single()
+
+Step 4 — Fetch distinct categories for the filter bar
+  const {{ data: cats }} = await supabase
+    .from('inventory')
+    .select('category')
+  const categories = [...new Set(cats.map(r => r.category).filter(Boolean))]
+
+Step 5 — Product image rendering
+  // image_url is a full HTTPS URL from Freeimage.host or Imghippo
+  // Always provide a fallback:
+  <img
+    src={{product.image_url !== 'N/A' ? product.image_url : '/placeholder.png'}}
+    alt={{product.item_name}}
+    onError={{(e) => {{ e.target.src = '/placeholder.png' }}}}
+  />
+
+Step 6 — Subscribe to Realtime (live updates from MERIT)
+  const channel = supabase
+    .channel('merit-inventory')
+    .on('postgres_changes', {{ event: '*', schema: 'public', table: 'inventory' }},
+      () => fetchProducts()  // re-fetch on any change
+    )
+    .subscribe()
+  // Cleanup: supabase.removeChannel(channel)
+
+Step 7 — Run RLS SQL in Supabase SQL Editor before deploying:
+  ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY "Public read inventory" ON inventory FOR SELECT USING (true);
+  CREATE POLICY "Public read products"  ON products  FOR SELECT USING (true);
+
+=== BUILD THE FOLLOWING ===
+- Responsive product grid (3 cols desktop, 1 col mobile) from the inventory table
+- Category filter pills
+- Product detail page routed by SKU
+- Cart stored in localStorage (sku, item_name, price, image_url, quantity)
+- Simple checkout modal (Name, Email, Message) with confirmation on submit
+- Realtime subscription so the page auto-updates when I change products in MERIT"""
+            st.code(_cursor_prompt, language="text")
+
+        # ── Full Schema SQL ─────────────────────────────────────────────
+        with _ai_schema_tab:
             st.markdown(
-                "**Copy this block and paste it at the start of any AI conversation** "
-                "to give the AI full context about your MERIT database schema."
+                "**Paste this SQL into Supabase Dashboard → SQL Editor → New Query and click Run.** "
+                "This creates all tables MERIT needs AND adds the public-read RLS policies your website requires. "
+                "If tables already exist the `IF NOT EXISTS` clauses make it safe to re-run."
             )
-            _context_prompt = f"""\
-I have a product catalog managed by MERIT (a Streamlit app). The data lives in Supabase.
+            _full_schema_sql = SETUP_SQL.rstrip() + """
 
-Supabase URL: {_sb_url_ai}
-Anon key: YOUR_SUPABASE_ANON_KEY  (get from Supabase Dashboard → Project Settings → API → anon/public)
+-- ── Row Level Security (required for website access) ─────────────────────────
+-- Run this after creating the tables.
+-- This lets any visitor with the anon key READ products.
+-- MERIT writes using the direct connection string which bypasses RLS entirely.
 
-Tables:
+ALTER TABLE inventory     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE outbound_logs ENABLE ROW LEVEL SECURITY;
 
-inventory (use this for your website storefront):
-  sku          TEXT PRIMARY KEY
-  item_name    TEXT
-  category     TEXT
-  price        NUMERIC
-  stock_left   INTEGER
-  status       TEXT   -- 'Active' or 'Inactive'
-  image_url    TEXT   -- full public URL, use directly in <img src>
+-- Drop policies first in case you are re-running this script
+DROP POLICY IF EXISTS "Public read inventory"     ON inventory;
+DROP POLICY IF EXISTS "Public read products"      ON products;
+DROP POLICY IF EXISTS "Public read outbound_logs" ON outbound_logs;
 
-products (clean catalog, no stock data):
-  sku          TEXT PRIMARY KEY
-  name         TEXT
-  category     TEXT
-  price        NUMERIC
-  image_url    TEXT
-  active       BOOLEAN
+CREATE POLICY "Public read inventory"
+  ON inventory FOR SELECT USING (true);
 
-outbound_logs (order history — read-only for the website):
-  id           SERIAL PRIMARY KEY
-  name         TEXT
-  email        TEXT
-  order_number TEXT
-  products     TEXT
-  total_cost   NUMERIC
-  created_at   TIMESTAMPTZ
+CREATE POLICY "Public read products"
+  ON products FOR SELECT USING (true);
 
-Rules:
-- Always filter inventory with: stock_left > 0 AND status = 'Active' for the public storefront
-- image_url is always a full external URL — use it directly in <img src>. Always handle null/empty with a fallback
-- The anon key is safe to expose in the browser when Row Level Security (RLS) is enabled
-- Never use the direct PostgreSQL connection string in the website — that is for backend use only"""
-            st.code(_context_prompt, language="text")
+-- outbound_logs: uncomment the line below if you want the website to show order history
+-- CREATE POLICY "Public read outbound_logs" ON outbound_logs FOR SELECT USING (true);
+
+-- ── Verify everything ─────────────────────────────────────────────────────────
+SELECT
+  t.tablename,
+  t.rowsecurity,
+  COUNT(p.policyname) AS policies
+FROM pg_tables t
+LEFT JOIN pg_policies p ON p.tablename = t.tablename
+WHERE t.schemaname = 'public'
+  AND t.tablename IN ('inventory', 'products', 'outbound_logs')
+GROUP BY t.tablename, t.rowsecurity
+ORDER BY t.tablename;
+-- Expected result: 3 rows, rowsecurity = true, inventory and products have 1 policy each"""
+            st.code(_full_schema_sql, language="sql")
 
 
 # ═════════════════════════════════════════════
