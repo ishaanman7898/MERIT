@@ -96,12 +96,15 @@ def _init_sqlite():
     conn = _get_sqlite_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS products (
-            sku       TEXT PRIMARY KEY,
-            item_name TEXT NOT NULL,
-            category  TEXT NOT NULL DEFAULT '',
-            price     REAL NOT NULL DEFAULT 0.0,
-            image_url TEXT NOT NULL DEFAULT 'N/A',
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            sku            TEXT PRIMARY KEY,
+            item_name      TEXT NOT NULL,
+            category       TEXT NOT NULL DEFAULT '',
+            price          REAL NOT NULL DEFAULT 0.0,
+            description    TEXT NOT NULL DEFAULT '',
+            buy_button_url TEXT NOT NULL DEFAULT '',
+            image_url      TEXT NOT NULL DEFAULT 'N/A',
+            active         INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS inventory (
             sku        TEXT PRIMARY KEY,
@@ -139,6 +142,20 @@ def _init_sqlite():
             conn.execute("ALTER TABLE outbound_logs ADD COLUMN tax REAL NOT NULL DEFAULT 0.0")
             conn.execute("ALTER TABLE outbound_logs ADD COLUMN shipping REAL NOT NULL DEFAULT 0.0")
             conn.commit()
+    except Exception: pass
+
+    # Migration for existing products table (add description, buy_button_url, active)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(products)")
+        _prod_cols = [r[1] for r in cur.fetchall()]
+        if "description" not in _prod_cols:
+            conn.execute("ALTER TABLE products ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        if "buy_button_url" not in _prod_cols:
+            conn.execute("ALTER TABLE products ADD COLUMN buy_button_url TEXT NOT NULL DEFAULT ''")
+        if "active" not in _prod_cols:
+            conn.execute("ALTER TABLE products ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
     except Exception: pass
 
     conn.close()
@@ -187,17 +204,26 @@ END $$;
 
 -- ── Products table (catalog / storefront) ─────────────────────────────────
 CREATE TABLE IF NOT EXISTS products (
-    id          BIGSERIAL      PRIMARY KEY,
-    sku         TEXT           NOT NULL,
-    name        TEXT           NOT NULL,
-    category    TEXT           NOT NULL DEFAULT '',
-    price       NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
-    description TEXT           NOT NULL DEFAULT '',
-    image_url   TEXT           NOT NULL DEFAULT 'N/A',
-    active      BOOLEAN        NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    id              BIGSERIAL      PRIMARY KEY,
+    sku             TEXT           NOT NULL,
+    name            TEXT           NOT NULL,
+    category        TEXT           NOT NULL DEFAULT '',
+    price           NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
+    description     TEXT           NOT NULL DEFAULT '',
+    buy_button_url  TEXT           NOT NULL DEFAULT '',
+    image_url       TEXT           NOT NULL DEFAULT 'N/A',
+    active          BOOLEAN        NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     CONSTRAINT products_sku_unique UNIQUE (sku)
 );
+
+-- Migrations for existing users (buy_button_url)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='products' AND column_name='buy_button_url') THEN
+    ALTER TABLE products ADD COLUMN buy_button_url TEXT NOT NULL DEFAULT '';
+  END IF;
+END $$;
 
 -- ── Outbound logs (email history) ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS outbound_logs (
@@ -388,7 +414,7 @@ def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
         # IPv6 unreachable — resolve to IPv4 and reconnect via keyword DSN
         try:
             import socket
-            from urllib.parse import urlparse
+            from urllib.parse import urlparse, unquote as _unquote
             _p    = urlparse(conn_str)
             _host = _p.hostname or ""
             _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
@@ -397,8 +423,8 @@ def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
                 f"hostaddr={_ipv4} "
                 f"port={_p.port or 5432} "
                 f"dbname={(_p.path or '/postgres').lstrip('/')} "
-                f"user={_p.username or 'postgres'} "
-                f"password={_p.password or ''} "
+                f"user={_unquote(_p.username or 'postgres')} "
+                f"password={_unquote(_p.password or '')} "
                 f"sslmode=require"
             )
             return psycopg2.connect(_dsn, connect_timeout=connect_timeout)
@@ -409,13 +435,18 @@ def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
 
 
 def _get_effective_supabase_conn_str(cfg: dict) -> str:
-    """Return the Supabase connection string with the stored password substituted in."""
+    """Return the Supabase connection string with the stored password substituted in.
+
+    The password is URL-encoded so that special characters like '?' or '@' don't
+    corrupt the URL structure when parsed by urllib or libpq.
+    """
+    from urllib.parse import quote as _url_quote
     conn_str = cfg.get("supabase_connection_string", "").strip()
     password  = cfg.get("supabase_db_password", "").strip()
     if not conn_str:
         return ""
     if "[YOUR-PASSWORD]" in conn_str and password:
-        return conn_str.replace("[YOUR-PASSWORD]", password)
+        return conn_str.replace("[YOUR-PASSWORD]", _url_quote(password, safe=""))
     return conn_str
 
 
@@ -458,14 +489,17 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         "Backordered" if _stock < 0 else ("Out of stock" if _stock == 0 else ("Low stock" if _stock <= 10 else "In stock"))
     ))
     row = {
-        "sku":        product["sku"],
-        "item_name":  product["item_name"],
-        "category":   product.get("category", ""),
-        "price":      product.get("price", 0.0),
-        "stock_left": _stock,
+        "sku":            product["sku"],
+        "item_name":      product["item_name"],
+        "category":       product.get("category", ""),
+        "price":          product.get("price", 0.0),
+        "stock_left":     _stock,
         "original_stock": _orig,
-        "status":     _status,
-        "image_url":  product.get("image_url", "N/A"),
+        "status":         _status,
+        "image_url":      product.get("image_url", "N/A"),
+        "description":    product.get("description", ""),
+        "buy_button_url": product.get("buy_button_url", ""),
+        "active":         product.get("active", True),
     }
     results = []
 
@@ -480,11 +514,13 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
                 price=excluded.price, image_url=excluded.image_url
         """, row)
         conn.execute("""
-            INSERT INTO products (sku, item_name, category, price, image_url)
-            VALUES (:sku, :item_name, :category, :price, :image_url)
+            INSERT INTO products (sku, item_name, category, price, description, buy_button_url, image_url, active)
+            VALUES (:sku, :item_name, :category, :price, :description, :buy_button_url, :image_url, :active)
             ON CONFLICT(sku) DO UPDATE SET
                 item_name=excluded.item_name, category=excluded.category,
-                price=excluded.price, image_url=excluded.image_url
+                price=excluded.price, description=excluded.description,
+                buy_button_url=excluded.buy_button_url,
+                image_url=excluded.image_url, active=excluded.active
         """, row)
         conn.commit()
         conn.close()
@@ -509,12 +545,15 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
                           row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
                     # products table — clean catalog for external websites
                     cur.execute("""
-                        INSERT INTO products (sku,name,category,price,image_url,active)
-                        VALUES (%s,%s,%s,%s,%s,true)
+                        INSERT INTO products (sku,name,category,price,description,buy_button_url,image_url,active)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(sku) DO UPDATE SET
                             name=EXCLUDED.name, category=EXCLUDED.category,
-                            price=EXCLUDED.price, image_url=EXCLUDED.image_url, active=true
-                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["image_url"]))
+                            price=EXCLUDED.price, description=EXCLUDED.description,
+                            buy_button_url=EXCLUDED.buy_button_url,
+                            image_url=EXCLUDED.image_url, active=EXCLUDED.active
+                    """, (row["sku"],row["item_name"],row["category"],row["price"],
+                          row["description"],row["buy_button_url"],row["image_url"],row["active"]))
             conn_sb.close()
             results.append("Supabase")
         except Exception as exc:
@@ -1690,8 +1729,14 @@ elif page == "Products":
                     else:
                         st.markdown("<div style='width:80px;height:80px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:11px;'>No image</div>", unsafe_allow_html=True)
                 with _c_txt:
-                    st.markdown(f"**{_name}**")
+                    _store_active = prod.get("active", True)
+                    _store_badge = "🟢 In Store" if _store_active else "🔴 Out of Store"
+                    st.markdown(f"**{_name}**  ·  {_store_badge}")
                     st.caption(f"`{_sku}`  ·  {prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
+                    if prod.get("description"):
+                        st.caption(f"📝 {prod['description'][:120]}")
+                    if prod.get("buy_button_url"):
+                        st.caption(f"🛒 [Buy Button]({prod['buy_button_url']})")
                 
                 with _c_act:
                     with st.popover("Replace Image", width="stretch"):
@@ -1730,10 +1775,19 @@ elif page == "Products":
         with _add_single_exp:
             col_left, col_right = st.columns([3, 2])
             with col_left:
-                p_sku      = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
-                p_name     = st.text_input("Product Name *", placeholder="Blue T-Shirt", key="p_name")
-                p_category = st.text_input("Category",       placeholder="Clothing",     key="p_category")
-                p_price    = st.number_input("Price ($)", min_value=0.0, step=0.01, format="%.2f", key="p_price")
+                p_sku           = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
+                p_name          = st.text_input("Product Name *", placeholder="Blue T-Shirt", key="p_name")
+                p_category      = st.text_input("Category",       placeholder="Clothing",     key="p_category")
+                p_price         = st.number_input("Price ($)", min_value=0.0, step=0.01, format="%.2f", key="p_price")
+                p_description   = st.text_area("Description", placeholder="Short product description shown on storefront.", key="p_description", height=80)
+                p_buy_btn_url   = st.text_input(
+                    "Buy Button URL",
+                    placeholder="https://portal.veinternational.org/buybuttons/us019814/btn/product-name/",
+                    key="p_buy_btn_url",
+                    help="VEI buy button link. Consumers click this to purchase through the VEI interface.",
+                )
+                p_store_status  = st.selectbox("Store Status", ["In Store", "Out of Store"], index=0, key="p_store_status",
+                                               help="In Store = visible on your storefront. Out of Store = hidden from customers.")
             with col_right:
                 p_image = st.file_uploader(
                     "Product Image",
@@ -1761,13 +1815,16 @@ elif page == "Products":
                                 except Exception as _img_err:
                                     st.error(f"Image upload failed: {_img_err}")
                     product = {
-                        "sku":        p_sku.strip().upper(),
-                        "item_name":  p_name.strip(),
-                        "category":   p_category.strip() or "General",
-                        "price":      round(float(p_price), 2),
-                        "stock_left": 0,
-                        "status":     "In stock",
-                        "image_url":  image_url,
+                        "sku":            p_sku.strip().upper(),
+                        "item_name":      p_name.strip(),
+                        "category":       p_category.strip() or "General",
+                        "price":          round(float(p_price), 2),
+                        "stock_left":     0,
+                        "status":         "In stock",
+                        "description":    p_description.strip(),
+                        "buy_button_url": p_buy_btn_url.strip(),
+                        "active":         p_store_status == "In Store",
+                        "image_url":      image_url,
                     }
                     ok, saved_to = save_product_to_db(product, cfg)
                     if not ok:
@@ -1876,12 +1933,22 @@ elif page == "Products":
                 with st.form(key=f"edit_form_{_edit_sku}"):
                     _e_c1, _e_c2 = st.columns(2)
                     with _e_c1:
-                        _e_name  = st.text_input("Product Name *", value=str(_eprod.get("item_name", "")))
-                        _e_cat   = st.text_input("Category",       value=str(_eprod.get("category", "")))
+                        _e_name       = st.text_input("Product Name *", value=str(_eprod.get("item_name", "")))
+                        _e_cat        = st.text_input("Category",       value=str(_eprod.get("category", "")))
+                        _e_price      = st.number_input("Price ($)", value=float(_eprod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
+                        _e_store_idx  = 0 if _eprod.get("active", True) else 1
+                        _e_store      = st.selectbox("Store Status", ["In Store", "Out of Store"], index=_e_store_idx,
+                                                     help="In Store = visible on storefront. Out of Store = hidden from customers.")
                     with _e_c2:
-                        _e_price = st.number_input("Price ($)", value=float(_eprod.get("price", 0.0)), min_value=0.0, step=0.01, format="%.2f")
-                        _e_file  = st.file_uploader("Replace image", type=["jpg", "png", "webp", "jpeg"], key=f"e_file_{_edit_sku}")
-                    
+                        _e_desc       = st.text_area("Description", value=str(_eprod.get("description", "")), height=80)
+                        _e_buy_url    = st.text_input(
+                            "Buy Button URL",
+                            value=str(_eprod.get("buy_button_url", "")),
+                            placeholder="https://portal.veinternational.org/buybuttons/us019814/btn/product-name/",
+                            help="VEI buy button link consumers click to purchase.",
+                        )
+                        _e_file       = st.file_uploader("Replace image", type=["jpg", "png", "webp", "jpeg"], key=f"e_file_{_edit_sku}")
+
                     if st.form_submit_button("Save Changes", type="primary", width="stretch"):
                         with st.spinner("Saving..."):
                             _final_url = _eprod.get("image_url", "N/A")
@@ -1889,12 +1956,18 @@ elif page == "Products":
                                 try:
                                     _final_url = upload_image(_e_file.read(), cfg, name=_e_name.strip())
                                 except: pass
-                            
+
                             _upd = {
-                                "sku": _edit_sku, "item_name": _e_name.strip() or _eprod.get("item_name", ""),
-                                "category": _e_cat.strip() or _eprod.get("category", "General"),
-                                "price": round(_e_price, 2), "image_url": _final_url,
-                                "stock_left": _eprod.get("stock_left", 0), "status": _eprod.get("status", "In stock")
+                                "sku":            _edit_sku,
+                                "item_name":      _e_name.strip() or _eprod.get("item_name", ""),
+                                "category":       _e_cat.strip() or _eprod.get("category", "General"),
+                                "price":          round(_e_price, 2),
+                                "image_url":      _final_url,
+                                "stock_left":     _eprod.get("stock_left", 0),
+                                "status":         _eprod.get("status", "In stock"),
+                                "description":    _e_desc.strip(),
+                                "buy_button_url": _e_buy_url.strip(),
+                                "active":         _e_store == "In Store",
                             }
                             _ok, _msg = save_product_to_db(_upd, cfg)
                             if not _ok: st.toast("Error saving to database.", icon="❌")
@@ -2406,7 +2479,8 @@ elif page == "Settings":
     _sb_effective = ""
     if _sb_conn_val:
         if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
-            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _sb_pass_val)
+            from urllib.parse import quote as _url_quote_sb
+            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _url_quote_sb(_sb_pass_val, safe=""))
         elif "[YOUR-PASSWORD]" not in _sb_conn_val:
             _sb_effective = _sb_conn_val
 
@@ -2610,12 +2684,21 @@ name            TEXT NOT NULL     product display name
 category        TEXT
 price           NUMERIC(10,2)
 description     TEXT              product description (may be empty)
+buy_button_url  TEXT              VEI buy button link — e.g. https://portal.veinternational.org/buybuttons/us019814/btn/product-name/
+                                  Render this as the "Buy Now" / "Add to Cart" button href.
+                                  If empty string, disable or hide the buy button.
 image_url       TEXT              full public HTTPS URL
-active          BOOLEAN           true = visible, false = hidden
+active          BOOLEAN           true = In Store (visible), false = Out of Store (hidden)
 created_at      TIMESTAMPTZ
 
 USE CASE: Use products table when you want a clean catalog without stock numbers.
-Filter: active = true
+Filter: active = true (only show In Store products)
+
+BUY BUTTON RULE:
+  Each product's buy_button_url is a direct VEI interface link.
+  Use it as the href for your "Buy Now" button — do NOT wrap in your own cart logic.
+  Example: <a href="{{product.buy_button_url}}" target="_blank">Buy Now</a>
+  If buy_button_url is empty → hide or grey out the Buy Now button.
 
 --- TABLE: outbound_logs  (order history — read-only from website) ---
 Column            Type              Notes
