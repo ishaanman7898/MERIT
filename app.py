@@ -2861,437 +2861,53 @@ MERIT reads from `st.secrets` automatically on startup — your settings will su
 elif page == "API Endpoints":
     cfg = st.session_state.cfg
 
-    _api_sb_url     = _get_supabase_project_url(cfg)   # derived from connection string
-    _api_neon       = cfg.get("neon_connection_string", "").strip()
-    _api_rest_base  = f"{_api_sb_url}/rest/v1" if _api_sb_url else ""
+    _api_sb_url    = _get_supabase_project_url(cfg)
+    _api_rest_base = f"{_api_sb_url}/rest/v1" if _api_sb_url else ""
+    _sb_url_ph     = _api_sb_url or "YOUR_SUPABASE_URL"
 
-    st.title("API Endpoints")
+    st.title("Connect Your Website")
     st.caption(
-        "Your MERIT product catalog lives in a Supabase database. "
-        "Any website built on Bolt.new, Lovable, Cursor, or plain JavaScript can read from it "
-        "in real-time — every product you add, edit, or delete here auto-updates on your site."
+        "Every product you add or edit in MERIT automatically updates in your Supabase database. "
+        "This page gives you everything you need to connect that database to a website built on "
+        "Bolt.new, Lovable, Cursor, v0, or any other platform."
     )
 
     if not _has_supabase(cfg):
         st.warning(
-            "**Supabase is not configured.** "
-            "Go to **Settings → Database → Supabase**, paste your connection string + database password, "
-            "then click **Setup Tables**. Come back here once that is done."
-        )
-        st.info(
-            "Once connected, this page gives you the live REST API endpoints, ready-to-paste "
-            "JavaScript code, and RLS SQL so your website can show your MERIT catalog automatically."
+            "**Supabase is not connected yet.** "
+            "Go to **Get Started → Step 1** or **Settings → Database** and paste your "
+            "Supabase connection string, then click **Setup Tables**."
         )
         st.stop()
 
-    # ── Quick intro ───────────────────────────────────────────────────
-    st.info(
-        f"**Your Supabase URL:** `{_api_sb_url}`  ·  "
-        "**Anon key:** Supabase Dashboard → Project Settings → API → anon / public  ·  "
-        "**Never** put the direct connection string in your website — that's MERIT's backend only."
-    )
-    st.markdown(
-        "Every product you add, edit, or delete in MERIT writes to Supabase instantly. "
-        "Any website built on **Bolt.new, Lovable, Cursor, v0**, or plain JavaScript can read "
-        "that data in real-time. Use the **AI Prompts** tab to get copy-paste prompts pre-filled with your schema."
-    )
+    # ── Key values banner ────────────────────────────────────────────
+    _kv1, _kv2 = st.columns(2)
+    with _kv1:
+        st.markdown("**Your Supabase URL** — paste this into your website builder")
+        st.code(_sb_url_ph, language="text")
+    with _kv2:
+        st.markdown("**Your anon key** — where to get it")
+        st.info("Supabase Dashboard → Project Settings (gear icon) → API → copy the **anon / public** key (starts with `eyJ…`)")
 
-    # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview | AI Prompts ─
-    _tab_api, _tab_code, _tab_rls, _tab_live, _tab_ai = st.tabs(
-        ["REST API Reference", "Code Examples", "Row Level Security SQL", "Live Data Preview", "AI Prompts"]
+    st.caption(
+        "The anon key is safe to put in your website code when Row Level Security is on. "
+        "Never put your database password or connection string in a website."
     )
 
-    # ── REST API Reference ────────────────────────────────────────────
-    with _tab_api:
-        st.caption(
-            f"Base URL: `{_api_rest_base}`  ·  "
-            "All requests need headers: `apikey: <anon_key>` and `Authorization: Bearer <anon_key>`"
-        )
-
-        st.markdown("#### inventory table — products + live stock")
-        _inv_rows = [
-            ("GET",    f"`{_api_rest_base}/inventory?select=*`",                                   "All products"),
-            ("GET",    f"`{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name`",  "In-stock only, A→Z"),
-            ("GET",    f"`{_api_rest_base}/inventory?select=*&category=eq.Apparel`",               "Filter by category"),
-            ("GET",    f"`{_api_rest_base}/inventory?sku=eq.SKU001&select=*`",                     "Single product by SKU"),
-            ("GET",    f"`{_api_rest_base}/inventory?select=sku,item_name,price,image_url`",       "Specific columns only"),
-        ]
-        st.dataframe(
-            pd.DataFrame(_inv_rows, columns=["Method", "Endpoint", "Description"]),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### products table — clean catalog (no stock data)")
-        _prod_rows = [
-            ("GET",    f"`{_api_rest_base}/products?select=*&active=eq.true`",                  "All active products"),
-            ("GET",    f"`{_api_rest_base}/products?select=*&active=eq.true&order=name`",       "Active, A→Z"),
-            ("GET",    f"`{_api_rest_base}/products?select=*&category=eq.Apparel&active=eq.true`", "Filter by category"),
-            ("GET",    f"`{_api_rest_base}/products?sku=eq.SKU001&select=*`",                   "Single product by SKU"),
-        ]
-        st.dataframe(
-            pd.DataFrame(_prod_rows, columns=["Method", "Endpoint", "Description"]),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### outbound_logs table — order history")
-        _log_rows = [
-            ("GET",    f"`{_api_rest_base}/outbound_logs?select=*&order=created_at.desc`",       "All orders, newest first"),
-            ("GET",    f"`{_api_rest_base}/outbound_logs?select=*&order=created_at.desc&limit=10`", "Last 10 orders"),
-        ]
-        st.dataframe(
-            pd.DataFrame(_log_rows, columns=["Method", "Endpoint", "Description"]),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### Required request headers")
-        st.code(
-            "apikey: <your-anon-key>\n"
-            "Authorization: Bearer <your-anon-key>",
-            language="http",
-        )
-        st.caption("Get your anon key from: Supabase Dashboard → Project Settings → API → anon / public")
-
-    # ── Code Examples ─────────────────────────────────────────────────
-    with _tab_code:
-        _ex_js, _ex_ts, _ex_react, _ex_rt, _ex_img = st.tabs(
-            ["JavaScript", "TypeScript (Next.js)", "React Hook", "Real-time Subscription", "Images"]
-        )
-
-        _sb_url_ph = _api_sb_url or "YOUR_SUPABASE_URL"
-        _sb_key_ph = "YOUR_SUPABASE_ANON_KEY"
-
-        with _ex_js:
-            st.code(f"""\
-// 1. Install:  npm install @supabase/supabase-js
-
-import {{ createClient }} from '@supabase/supabase-js'
-
-const supabase = createClient(
-  '{_sb_url_ph}',
-  '{_sb_key_ph}'
-)
-
-// Fetch all in-stock products
-async function getProducts() {{
-  const {{ data, error }} = await supabase
-    .from('inventory')
-    .select('*')
-    .gt('stock_left', 0)
-    .order('item_name')
-
-  if (error) throw error
-  return data   // array of {{ sku, item_name, price, image_url, stock_left, ... }}
-}}
-
-// Fetch products by category
-async function getByCategory(category) {{
-  const {{ data, error }} = await supabase
-    .from('inventory')
-    .select('sku, item_name, price, image_url, stock_left, status')
-    .eq('category', category)
-    .gt('stock_left', 0)
-
-  if (error) throw error
-  return data
-}}
-""", language="javascript")
-
-        with _ex_ts:
-            st.code(f"""\
-// app/lib/supabase.ts
-import {{ createClient }} from '@supabase/supabase-js'
-
-export const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
-
-// types/product.ts
-export interface Product {{
-  sku: string
-  item_name: string
-  category: string
-  price: number
-  stock_left: number
-  status: string
-  image_url: string
-}}
-
-// app/lib/products.ts
-import {{ supabase }} from './supabase'
-import type {{ Product }} from '../types/product'
-
-export async function getInStockProducts(): Promise<Product[]> {{
-  const {{ data, error }} = await supabase
-    .from('inventory')
-    .select('*')
-    .gt('stock_left', 0)
-    .order('item_name')
-
-  if (error) throw error
-  return data as Product[]
-}}
-
-// .env.local
-// NEXT_PUBLIC_SUPABASE_URL={_sb_url_ph}
-// NEXT_PUBLIC_SUPABASE_ANON_KEY={_sb_key_ph}
-""", language="typescript")
-
-        with _ex_react:
-            st.code(f"""\
-// hooks/useProducts.ts — auto-refreshes when MERIT updates a product
-import {{ useEffect, useState }} from 'react'
-import {{ createClient }} from '@supabase/supabase-js'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
-
-export function useProducts(categoryFilter?: string) {{
-  const [products, setProducts] = useState([])
-  const [loading, setLoading]   = useState(true)
-
-  async function fetchProducts() {{
-    let query = supabase
-      .from('inventory')
-      .select('*')
-      .gt('stock_left', 0)
-      .order('item_name')
-
-    if (categoryFilter) query = query.eq('category', categoryFilter)
-
-    const {{ data }} = await query
-    setProducts(data ?? [])
-    setLoading(false)
-  }}
-
-  useEffect(() => {{
-    fetchProducts()
-
-    // Subscribe to real-time changes from MERIT
-    const channel = supabase
-      .channel('inventory-realtime')
-      .on('postgres_changes', {{
-        event: '*', schema: 'public', table: 'inventory'
-      }}, () => fetchProducts())   // re-fetch on any change
-      .subscribe()
-
-    return () => {{ supabase.removeChannel(channel) }}
-  }}, [categoryFilter])
-
-  return {{ products, loading }}
-}}
-
-// Usage in any component:
-// const {{ products, loading }} = useProducts()
-// const {{ products }} = useProducts('Apparel')
-""", language="typescript")
-
-        with _ex_rt:
-            st.markdown(
-                "When you add, edit, or delete a product in MERIT it writes to Supabase. "
-                "Enable **Replication** for the `inventory` table in your Supabase Dashboard "
-                "(Database → Replication → toggle inventory) and your site updates live:"
-            )
-            st.code(f"""\
-import {{ createClient }} from '@supabase/supabase-js'
-
-const supabase = createClient(
-  '{_sb_url_ph}',
-  '{_sb_key_ph}'
-)
-
-// Subscribe to ALL changes on the inventory table
-const channel = supabase
-  .channel('merit-sync')
-  .on(
-    'postgres_changes',
-    {{ event: '*', schema: 'public', table: 'inventory' }},
-    (payload) => {{
-      console.log('MERIT update:', payload.eventType, payload.new ?? payload.old)
-      // INSERT → payload.new has the new product
-      // UPDATE → payload.new has updated fields
-      // DELETE → payload.old has the deleted product's sku
-      refreshProductList()   // call your own refresh function
-    }}
-  )
-  .subscribe()
-
-// Clean up when component unmounts
-// supabase.removeChannel(channel)
-""", language="javascript")
-
-        with _ex_img:
-            st.markdown("""
-#### How images work in MERIT
-
-When you add a product in MERIT you can upload an image. MERIT uploads it to an external image host
-(FreeImage or ImgBB, configured in **Settings → Image Hosting**) and stores the public URL in the
-`image_url` column of both `inventory` and `products`.
-
-**Your website just uses the URL directly — no extra setup needed.**
-
-```html
-<!-- Plain HTML -->
-<img src="{{ product.image_url }}" alt="{{ product.item_name }}" />
-```
-""")
-            st.code(f"""\
-// React / Next.js
-export function ProductCard({{ product }}) {{
-  return (
-    <div className="product-card">
-      {{product.image_url ? (
-        <img src={{product.image_url}} alt={{product.item_name}} />
-      ) : (
-        <div className="placeholder">No image</div>
-      )}}
-      <h2>{{product.item_name}}</h2>
-      <p>${{product.price}}</p>
-    </div>
-  )
-}}
-
-// Fetching with Supabase client:
-const {{ data }} = await supabase
-  .from('inventory')
-  .select('sku, item_name, price, stock_left, image_url, category')
-  .gt('stock_left', 0)
-  .order('item_name')
-
-// data[0].image_url → 'https://ibb.co/...' or 'https://freeimage.host/...'
-// Always a full public URL — use it directly in <img src={{...}} />
-""", language="typescript")
-            st.info(
-                "**If image_url is empty:** Some products may not have images. "
-                "Always add a fallback in your website (a placeholder image or a CSS background color). "
-                "To add images to existing products, go to the **Products → Edit Products** tab in MERIT."
-            )
-
-    # ── Row Level Security SQL ────────────────────────────────────────
-    with _tab_rls:
-        st.markdown(
-            "Run this SQL in your Supabase project to allow public **read** access "
-            "while keeping all writes protected (MERIT writes via a direct database connection, "
-            "which bypasses RLS)."
-        )
-        st.markdown("**How to run it:** Supabase Dashboard → SQL Editor → New Query → paste → Run")
-
-        _rls_sql = """\
--- ── Enable Row Level Security ────────────────────────────────────────
--- This locks down the tables so only allowed operations go through.
-ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
-
--- ── Allow anyone to READ products ────────────────────────────────────
--- Your website visitors (using the anon key) can fetch products.
--- MERIT writes using the service role key, which bypasses RLS entirely.
-CREATE POLICY "Public can read inventory"
-  ON inventory FOR SELECT
-  USING (true);
-
-CREATE POLICY "Public can read products"
-  ON products FOR SELECT
-  USING (true);
-
--- ── Optional: allow only active products to be read ──────────────────
--- Replace the products policy above with this if you want to hide
--- products you have marked inactive in MERIT:
--- CREATE POLICY "Public can read active products"
---   ON products FOR SELECT
---   USING (active = true);
-
--- ── Verify RLS is on ─────────────────────────────────────────────────
-SELECT tablename, rowsecurity
-FROM   pg_tables
-WHERE  schemaname = 'public'
-  AND  tablename IN ('inventory', 'products', 'outbound_logs');
-"""
-        st.code(_rls_sql, language="sql")
-
-        st.divider()
-        st.markdown("#### Full table schema (if you need to re-create tables)")
-        with st.expander("Show CREATE TABLE SQL", expanded=False):
-            st.code(SETUP_SQL, language="sql")
-
-    # ── Live Data Preview ─────────────────────────────────────────────
-    with _tab_live:
-        st.caption("Live snapshot from your Supabase database — this is exactly what your website will see.")
-        if st.button("Refresh", key="btn_api_refresh"):
-            st.cache_data.clear()
-
-        try:
-            _live_conn_str = _get_effective_supabase_conn_str(cfg)
-            _live_conn = _psycopg2_connect(_live_conn_str)
-
-            _preview_inv, _preview_prod = st.columns(2)
-            with _preview_inv:
-                st.markdown("**inventory** table")
-                try:
-                    _inv_df = pd.read_sql(
-                        "SELECT sku, item_name, price, stock_left, status FROM inventory ORDER BY item_name LIMIT 50",
-                        _live_conn,
-                    )
-                    if not _inv_df.empty:
-                        st.dataframe(_inv_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("No rows in inventory yet. Add products in the Products page.")
-                except Exception as _e:
-                    st.error(f"Could not fetch inventory: {_e}")
-
-            with _preview_prod:
-                st.markdown("**products** table")
-                try:
-                    _prod_df = pd.read_sql(
-                        "SELECT sku, name, category, price, active FROM products ORDER BY name LIMIT 50",
-                        _live_conn,
-                    )
-                    if not _prod_df.empty:
-                        st.dataframe(_prod_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("No rows in products yet. Add products in the Products page.")
-                except Exception as _e:
-                    st.error(f"Could not fetch products: {_e}")
-
-            _live_conn.close()
-        except Exception as _live_err:
-            st.error(f"Could not connect to Supabase: {_live_err}")
-
-    # ── How auto-sync works ───────────────────────────────────────────
     st.divider()
-    st.subheader("How auto-sync works")
-    st.markdown("""
-| Action in MERIT | What happens in Supabase |
-|---|---|
-| Add a product | Row inserted into `inventory` **and** `products` |
-| Edit a product (name, price, image) | Row updated in both tables |
-| Delete a product | Row deleted from both tables |
-| Adjust stock in Inventory page | `stock_left` and `status` updated in `inventory` |
-| Send an email order | Row inserted into `outbound_logs` |
 
-Your website subscribes to these tables via Supabase Realtime (see *Real-time Subscription* tab above).
-No polling, no manual export — changes appear on your site within milliseconds.
-""")
-
-    if _api_neon:
-        st.info(
-            "**Neon database is also configured.** "
-            "Neon stores the same data as Supabase but does not support real-time subscriptions. "
-            "For a live-updating website, use Supabase as shown above. "
-            "Neon is still a reliable cloud backup for your data."
-        )
+    # ── Tabs ─────────────────────────────────────────────────────────
+    _tab_ai, _tab_live, _tab_api, _tab_code, _tab_schema = st.tabs(
+        ["AI Prompts", "Live Preview", "REST Endpoints", "Code Snippets", "Schema & Security SQL"]
+    )
 
     # ── AI Prompts ────────────────────────────────────────────────────
     with _tab_ai:
         _sb_url_ai = _api_sb_url or "YOUR_SUPABASE_URL"
+        st.markdown("### Copy-paste prompts for AI website builders")
         st.caption(
-            "Every prompt below has your Supabase URL pre-filled and the exact schema MERIT uses. "
-            "Copy the one matching your platform, add your anon key, and paste it into the AI chat to start building."
-        )
-        st.info(
-            "**How to get your anon key:** Supabase Dashboard → Project Settings (gear icon) → API → "
-            "copy the **anon / public** key. It starts with `eyJ…`. Safe to expose in browser code when RLS is on."
+            "Pick the tab matching your platform, copy the prompt, paste it into the AI chat, "
+            "replace YOUR_SUPABASE_ANON_KEY with your real anon key, and the AI will build your storefront."
         )
 
         _ai_master, _ai_bolt, _ai_lovable, _ai_cursor, _ai_schema_tab = st.tabs(
@@ -3648,6 +3264,346 @@ GROUP BY t.tablename, t.rowsecurity
 ORDER BY t.tablename;
 -- Expected result: 3 rows, rowsecurity = true, inventory and products have 1 policy each"""
             st.code(_full_schema_sql, language="sql")
+
+    # ── Live Preview ─────────────────────────────────────────────────
+    with _tab_live:
+        st.markdown("### Live snapshot from your Supabase database")
+        st.caption("This is exactly the data your website will see when it reads from Supabase.")
+
+        _live_conn_str = _get_effective_supabase_conn_str(cfg)
+
+        # Validate format before attempting connection
+        if not _live_conn_str.startswith("postgresql://"):
+            st.error(
+                "**Connection string format is incorrect.** "
+                "It must start with `postgresql://`. "
+                "Go to **Settings → Database** and paste the full connection string from Supabase."
+            )
+        else:
+            if st.button("Load / Refresh Data", key="btn_api_refresh", type="primary"):
+                st.cache_data.clear()
+                st.rerun()
+
+            try:
+                _live_conn = _psycopg2_connect(_live_conn_str)
+
+                _preview_inv, _preview_prod = st.columns(2)
+                with _preview_inv:
+                    st.markdown("**Your products** (inventory table)")
+                    try:
+                        _inv_df = pd.read_sql(
+                            "SELECT sku, item_name AS name, category, price, stock_left, status "
+                            "FROM inventory ORDER BY item_name LIMIT 50",
+                            _live_conn,
+                        )
+                        if not _inv_df.empty:
+                            st.dataframe(_inv_df, use_container_width=True, hide_index=True)
+                            st.caption(f"{len(_inv_df)} products shown (max 50)")
+                        else:
+                            st.info("No products yet. Add some in the **Products** page.")
+                    except Exception as _e:
+                        st.error(f"Could not read products: {_e}")
+
+                with _preview_prod:
+                    st.markdown("**Category breakdown**")
+                    try:
+                        _cat_df = pd.read_sql(
+                            "SELECT category, COUNT(*) AS products, SUM(stock_left) AS total_stock "
+                            "FROM inventory GROUP BY category ORDER BY products DESC",
+                            _live_conn,
+                        )
+                        if not _cat_df.empty:
+                            st.dataframe(_cat_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No categories yet.")
+                    except Exception as _e:
+                        st.error(f"Could not read categories: {_e}")
+
+                _live_conn.close()
+            except Exception as _live_err:
+                _err_msg = str(_live_err)
+                if "password" in _err_msg.lower() or "authentication" in _err_msg.lower():
+                    st.error(
+                        "**Wrong database password.** "
+                        "Go to **Settings → Database** and check that the Database Password field matches "
+                        "the password you set when creating your Supabase project."
+                    )
+                elif "could not connect" in _err_msg.lower() or "timeout" in _err_msg.lower():
+                    st.error(
+                        "**Could not reach Supabase.** Check your internet connection and try again. "
+                        "If you are on a school network, try a personal hotspot."
+                    )
+                else:
+                    st.error(f"**Connection failed.** {_err_msg}")
+
+    # ── REST Endpoints ────────────────────────────────────────────────
+    with _tab_api:
+        st.markdown("### REST API Endpoints")
+        st.caption(
+            "These are the URLs your website can call to read products. "
+            "You normally don't need to use these manually — the AI Prompts tab generates code that calls them for you. "
+            "But they are here if you want to test or inspect them."
+        )
+        st.markdown(f"**Base URL:** `{_api_rest_base}`")
+        st.markdown("**Required headers on every request:**")
+        st.code(
+            f"apikey: YOUR_SUPABASE_ANON_KEY\nAuthorization: Bearer YOUR_SUPABASE_ANON_KEY",
+            language="http",
+        )
+        st.divider()
+
+        st.markdown("#### Products + live stock (`inventory` table)")
+        _inv_rows = [
+            ("GET", f"{_api_rest_base}/inventory?select=*",                                  "All products (all columns)"),
+            ("GET", f"{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name", "In-stock only, A to Z"),
+            ("GET", f"{_api_rest_base}/inventory?select=*&category=eq.Apparel",              "Filter by category"),
+            ("GET", f"{_api_rest_base}/inventory?sku=eq.SKU001&select=*",                    "One product by SKU"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_inv_rows, columns=["Method", "URL", "What it returns"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### Clean catalog (no stock numbers) — `products` table")
+        _prod_rows = [
+            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true",                   "All active products"),
+            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true&order=name",        "Active, A to Z"),
+            ("GET", f"{_api_rest_base}/products?category=eq.Apparel&active=eq.true&select=*", "Filter by category"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_prod_rows, columns=["Method", "URL", "What it returns"]),
+            use_container_width=True, hide_index=True,
+        )
+
+    # ── Code Snippets ─────────────────────────────────────────────────
+    with _tab_code:
+        st.markdown("### Ready-to-paste code snippets")
+        st.caption(
+            "Copy the snippet that matches your project. "
+            "Replace `YOUR_SUPABASE_ANON_KEY` with your actual anon key from Supabase Dashboard → Project Settings → API."
+        )
+
+        _ex_js, _ex_ts, _ex_react, _ex_rt = st.tabs(
+            ["JavaScript", "TypeScript / Next.js", "React Hook", "Real-time (live updates)"]
+        )
+
+        with _ex_js:
+            st.markdown("Works in any plain HTML/JS project or Bolt.new:")
+            st.code(f"""\
+// Step 1 — install:  npm install @supabase/supabase-js
+import {{ createClient }} from '@supabase/supabase-js'
+
+const supabase = createClient(
+  '{_sb_url_ph}',
+  'YOUR_SUPABASE_ANON_KEY'
+)
+
+// Fetch all in-stock products
+async function getProducts() {{
+  const {{ data, error }} = await supabase
+    .from('inventory')
+    .select('*')
+    .gt('stock_left', 0)       // only show products that have stock
+    .order('item_name')         // alphabetical order
+
+  if (error) throw error
+  return data  // each item has: sku, item_name, price, image_url, stock_left, category
+}}
+
+// Fetch by category (for filter buttons)
+async function getByCategory(category) {{
+  const {{ data }} = await supabase
+    .from('inventory')
+    .select('*')
+    .eq('category', category)
+    .gt('stock_left', 0)
+
+  return data
+}}
+""", language="javascript")
+
+        with _ex_ts:
+            st.markdown("For Next.js or any TypeScript project:")
+            st.code(f"""\
+// lib/supabase.ts
+import {{ createClient }} from '@supabase/supabase-js'
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+)
+
+// .env.local  (create this file in your project root)
+NEXT_PUBLIC_SUPABASE_URL={_sb_url_ph}
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+
+// types.ts
+export interface Product {{
+  sku: string
+  item_name: string
+  category: string
+  price: number
+  stock_left: number
+  status: string          // 'In stock' | 'Low stock' | 'Out of stock' | 'Backordered'
+  image_url: string       // full HTTPS URL — use directly in <img src>
+}}
+
+// lib/products.ts
+import {{ supabase }} from './supabase'
+import type {{ Product }} from './types'
+
+export async function getProducts(): Promise<Product[]> {{
+  const {{ data, error }} = await supabase
+    .from('inventory')
+    .select('*')
+    .gt('stock_left', 0)
+    .order('item_name')
+
+  if (error) throw error
+  return data as Product[]
+}}
+""", language="typescript")
+
+        with _ex_react:
+            st.markdown("A React hook that auto-refreshes when MERIT updates a product:")
+            st.code(f"""\
+// hooks/useProducts.ts
+import {{ useEffect, useState }} from 'react'
+import {{ supabase }} from '../lib/supabase'
+
+export function useProducts(category?: string) {{
+  const [products, setProducts] = useState([])
+  const [loading, setLoading]   = useState(true)
+
+  async function fetchProducts() {{
+    let q = supabase
+      .from('inventory')
+      .select('*')
+      .gt('stock_left', 0)
+      .order('item_name')
+
+    if (category) q = q.eq('category', category)
+
+    const {{ data }} = await q
+    setProducts(data ?? [])
+    setLoading(false)
+  }}
+
+  useEffect(() => {{
+    fetchProducts()
+
+    // Subscribe so the page updates automatically when you change products in MERIT
+    const channel = supabase
+      .channel('merit-live')
+      .on('postgres_changes', {{ event: '*', schema: 'public', table: 'inventory' }},
+        () => fetchProducts()
+      )
+      .subscribe()
+
+    return () => {{ supabase.removeChannel(channel) }}
+  }}, [category])
+
+  return {{ products, loading }}
+}}
+
+// Usage:
+// const {{ products, loading }} = useProducts()          — all products
+// const {{ products }} = useProducts('Apparel')          — filtered by category
+""", language="typescript")
+
+        with _ex_rt:
+            st.markdown(
+                "To make your site update **live** when you change something in MERIT, "
+                "first enable Replication in Supabase Dashboard → Database → Replication → toggle `inventory` ON, "
+                "then use this code:"
+            )
+            st.code(f"""\
+import {{ createClient }} from '@supabase/supabase-js'
+
+const supabase = createClient('{_sb_url_ph}', 'YOUR_SUPABASE_ANON_KEY')
+
+// This runs every time MERIT adds, edits, or deletes a product
+supabase
+  .channel('merit-sync')
+  .on('postgres_changes',
+    {{ event: '*', schema: 'public', table: 'inventory' }},
+    (payload) => {{
+      console.log('MERIT changed a product:', payload.eventType)
+      loadProducts()  // call your own function to re-fetch and re-render
+    }}
+  )
+  .subscribe()
+""", language="javascript")
+
+    # ── Schema & Security SQL ─────────────────────────────────────────
+    with _tab_schema:
+        st.markdown("### Schema & Security SQL")
+        st.markdown(
+            "If you ever need to re-create the tables, or you need to grant your website read access, "
+            "run the SQL below in **Supabase Dashboard → SQL Editor → New Query → Run**."
+        )
+
+        _schema_rls_intro, _schema_rls_sql = st.tabs(
+            ["What does this SQL do?", "Copy the SQL"]
+        )
+
+        with _schema_rls_intro:
+            st.markdown("""
+**The SQL in the next tab does three things:**
+
+1. **Creates the tables** MERIT needs (`inventory`, `products`, `outbound_logs`).
+   The `IF NOT EXISTS` means it is safe to run even if the tables already exist — it won't overwrite anything.
+
+2. **Enables Row Level Security (RLS)** — this is a Supabase feature that locks down your database
+   so that random people on the internet cannot add, change, or delete your products even if they
+   find your anon key. Think of it as a read-only lock.
+
+3. **Adds a read policy** — this tells Supabase that anyone with the anon key is allowed to
+   *read* (but not write) your products. This is what lets your website show the catalog.
+
+**When to run it:**
+- Once, right after creating your Supabase project and before going live with your website.
+  MERIT's "Setup Tables" button in Settings creates the tables for you, but does not add the
+  RLS policies — so you still need to run the Security section of this SQL.
+            """)
+
+        with _schema_rls_sql:
+            _full_schema_sql_tab = SETUP_SQL.rstrip() + """
+
+-- ════════════════════════════════════════════════════════════════════════
+-- ROW LEVEL SECURITY — run this so your website can read products
+-- ════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE inventory     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE outbound_logs ENABLE ROW LEVEL SECURITY;
+
+-- Remove old policies first (safe to re-run)
+DROP POLICY IF EXISTS "Public read inventory"     ON inventory;
+DROP POLICY IF EXISTS "Public read products"      ON products;
+DROP POLICY IF EXISTS "Public read outbound_logs" ON outbound_logs;
+
+-- Allow any visitor to read products (they cannot write — RLS blocks that)
+CREATE POLICY "Public read inventory"
+  ON inventory FOR SELECT USING (true);
+
+CREATE POLICY "Public read products"
+  ON products FOR SELECT USING (true);
+
+-- Uncomment the line below if you want your website to show order history too:
+-- CREATE POLICY "Public read outbound_logs" ON outbound_logs FOR SELECT USING (true);
+
+-- ════════════════════════════════════════════════════════════════════════
+-- VERIFY: run this separately to confirm everything is set up correctly
+-- Expected: 3 rows, rowsecurity = true, inventory and products show 1 policy
+-- ════════════════════════════════════════════════════════════════════════
+SELECT t.tablename, t.rowsecurity, COUNT(p.policyname) AS policies
+FROM pg_tables t
+LEFT JOIN pg_policies p ON p.tablename = t.tablename
+WHERE t.schemaname = 'public'
+  AND t.tablename IN ('inventory', 'products', 'outbound_logs')
+GROUP BY t.tablename, t.rowsecurity
+ORDER BY t.tablename;"""
+            st.code(_full_schema_sql_tab, language="sql")
 
 
 # ═════════════════════════════════════════════
