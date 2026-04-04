@@ -2251,18 +2251,6 @@ elif page == "Settings":
     st.divider()
     st.subheader("Gmail SMTP")
 
-    with st.expander("How to get a Gmail App Password", expanded=False):
-        st.markdown("""
-**You need a Gmail App Password — not your regular Gmail password.**
-
-1. Open [myaccount.google.com](https://myaccount.google.com) and sign in.
-2. Click **Security** in the left sidebar.
-3. Under *How you sign in to Google*, confirm **2-Step Verification** is **On**.
-4. Search for **App passwords** and click the result.
-5. Under *App name*, type `Email Sender`, then click **Create**.
-6. Copy the **16-character password** shown and paste it below.
-        """)
-
     col3, col4 = st.columns(2)
     with col3:
         inp_smtp_email = st.text_input(
@@ -2304,16 +2292,6 @@ elif page == "Settings":
     _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
 
     with _img_tab_fi:
-        with st.expander("How to get a Freeimage.host API key", expanded=False):
-            st.markdown("""
-1. Go to [freeimage.host](https://freeimage.host) and click **Sign up** (free, no credit card)
-2. Verify your email, then log in
-3. Click the **menu icon** (☰) in the top-left corner
-4. Click **API** in the menu
-5. Your API key is shown on that page — copy it
-6. Paste it in the field below and click **Save Settings**
-            """)
-
         _fi_l, _fi_r = st.columns([3, 1])
         with _fi_l:
             inp_freeimage_key = st.text_input(
@@ -2352,20 +2330,6 @@ elif page == "Settings":
                         st.error(f"Test failed: {exc}")
 
     with _img_tab_ih:
-        with st.expander("How to get an Imghippo API key", expanded=False):
-            st.markdown("""
-1. Sign up at [https://www.imghippo.com/](https://www.imghippo.com/)
-2. Navigate to API Keys at [https://www.imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
-3. Complete the API access form (5 steps):
-   - **Step 1:** Select Website/Web Application
-   - **Step 2:** Select Less than 1,000
-   - **Step 3:** Select Image upload and sharing
-   - **Step 4:** Skip (optional)
-   - **Step 5:** Select Yes, I agree
-4. Copy the generated API key, paste it in the field below, and click **Test Key**
-5. If it works, click **Save Settings**. If it fails, retry steps or try a different account.
-            """)
-
         _ib_l, _ib_r = st.columns([3, 1])
         with _ib_l:
             inp_imgbb_key = st.text_input(
@@ -2417,12 +2381,6 @@ elif page == "Settings":
     )
 
     _cfg_now = st.session_state.cfg
-    if _has_supabase(_cfg_now):
-        st.info(
-            "**Cloud database configured.** Writes go to both Supabase and local SQLite simultaneously. "
-            "If Supabase is temporarily unreachable, writes continue to local SQLite automatically."
-        )
-
     st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
     st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
 
@@ -2509,31 +2467,6 @@ elif page == "Settings":
                             st.caption(_f)
                 except Exception as exc:
                     st.error(f"Setup failed: {exc}")
-
-    # ── Save Settings ──
-    st.divider()
-    st.caption("All fields above are auto-saved as you type. Use this button to force-save.")
-
-    if st.button("Save Settings", type="primary", width="stretch"):
-        # Save config first
-        new_cfg = {
-            "from_name":                inp_from_name.strip(),
-            "subject":                  inp_subject.strip(),
-            "smtp_email":               inp_smtp_email.strip(),
-            "smtp_password":            re.sub(r"\s+", "", inp_smtp_pass.strip()),
-            "freeimage_api_key":        inp_freeimage_key.strip(),
-            "imghippo_api_key":         inp_imgbb_key.strip(),
-            "supabase_connection_string": inp_sb_conn.strip(),
-            "supabase_db_password":     inp_sb_pass.strip(),
-            "email_html_template":      cfg.get("email_html_template", ""),
-            "products":                 cfg.get("products", []),
-        }
-        save_config(new_cfg)
-        st.session_state.cfg = new_cfg
-
-        st.success("Settings saved!")
-        time.sleep(0.5)
-        st.rerun()
 
     # ── Secrets TOML ─────────────────────────────────────────────────
     st.divider()
