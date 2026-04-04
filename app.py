@@ -1148,6 +1148,41 @@ def _build_items_html(prods: list[str], products_lookup: dict[str, str] | None) 
     return "".join(rows)
 
 
+_DEFAULT_CAMPAIGN_TEMPLATE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#fff;border-radius:10px;overflow:hidden;
+                    box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:100%;">
+        <tr>
+          <td style="background:#18181b;padding:28px 36px;">
+            <p style="margin:0;font-size:20px;font-weight:700;color:#fff;">{{from_name}}</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 36px;">
+            <p style="margin:0 0 12px;font-size:16px;color:#111;">Hi {{name}},</p>
+            <p style="margin:0 0 24px;font-size:14px;color:#555;line-height:1.6;">
+              Write your campaign message here. You can use HTML to style it however you like.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#fafafa;padding:16px 36px;border-top:1px solid #ebebeb;">
+            <p style="margin:0;font-size:12px;color:#bbb;">Sent by {{from_name}}</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
 _DEFAULT_EMAIL_TEMPLATE = """\
 <!DOCTYPE html>
 <html>
@@ -2876,9 +2911,9 @@ If `image_url` is empty for a product, show a placeholder image. Images are alwa
 **Step 7 — Run the RLS SQL** (see the *Row Level Security* tab below) so public visitors can read but not write.
         """)
 
-    # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview ─
-    _tab_api, _tab_code, _tab_rls, _tab_live = st.tabs(
-        ["REST API Reference", "Code Examples", "Row Level Security SQL", "Live Data Preview"]
+    # ── Tabs: API Reference | Code Examples | RLS SQL | Live Preview | AI Prompts ─
+    _tab_api, _tab_code, _tab_rls, _tab_live, _tab_ai = st.tabs(
+        ["REST API Reference", "Code Examples", "Row Level Security SQL", "Live Data Preview", "AI Prompts"]
     )
 
     # ── REST API Reference ────────────────────────────────────────────
@@ -3262,6 +3297,132 @@ No polling, no manual export — changes appear on your site within milliseconds
             "Neon is still a reliable cloud backup for your data."
         )
 
+    # ── AI Prompts ────────────────────────────────────────────────────
+    with _tab_ai:
+        _sb_url_ai = _api_sb_url or "YOUR_SUPABASE_URL"
+        st.caption(
+            "Copy any of these prompts into Bolt.new, Lovable, Cursor, v0, or any AI coding tool. "
+            "Your Supabase URL is pre-filled where possible — just add your anon key."
+        )
+
+        _ai_storefront, _ai_product, _ai_cart, _ai_context = st.tabs(
+            ["Storefront / Product Grid", "Product Detail Page", "Cart & Checkout", "General Context Block"]
+        )
+
+        with _ai_storefront:
+            st.markdown("**Paste this into Bolt.new, Lovable, or Cursor to build a live product grid that auto-updates from MERIT.**")
+            _storefront_prompt = f"""\
+Build me a product storefront connected to my Supabase database.
+
+Supabase project URL: {_sb_url_ai}
+Supabase anon key: YOUR_SUPABASE_ANON_KEY  (get from Supabase Dashboard → Project Settings → API → anon/public)
+
+Database table: inventory
+Columns: sku, item_name, category, price, stock_left, status, image_url
+
+Requirements:
+- Fetch all products where stock_left > 0 and status = 'Active'
+- Display products in a responsive grid (3 columns on desktop, 1 on mobile)
+- Each card shows: product image (image_url), name (item_name), price, and an "Add to Cart" button
+- If image_url is empty or null, show a grey placeholder box
+- Add a category filter bar at the top so users can filter by category
+- Sort products alphabetically by item_name by default
+- Subscribe to Supabase Realtime on the inventory table so the grid updates live when I change products in MERIT
+- Use the Supabase JS client (@supabase/supabase-js)
+- Keep the design clean and modern"""
+            st.code(_storefront_prompt, language="text")
+
+        with _ai_product:
+            st.markdown("**Prompt for building an individual product detail page.**")
+            _product_prompt = f"""\
+Build a product detail page that pulls a single product from my Supabase inventory table.
+
+Supabase project URL: {_sb_url_ai}
+Supabase anon key: YOUR_SUPABASE_ANON_KEY
+
+Table: inventory
+Columns: sku, item_name, category, price, stock_left, status, image_url
+
+The page receives a SKU from the URL (e.g. /products/[sku]).
+It should:
+- Fetch the product where sku = [sku from URL]
+- Show a large product image on the left, product details on the right
+- Display: name, price, category, stock status (show "Out of Stock" badge if stock_left = 0)
+- If image_url is null or empty, show a placeholder
+- Include a back button to return to the product grid
+- Handle loading and error states gracefully"""
+            st.code(_product_prompt, language="text")
+
+        with _ai_cart:
+            st.markdown("**Prompt for adding cart and checkout flow. Paste after the storefront is built.**")
+            _cart_prompt = f"""\
+Add a cart and checkout flow to my storefront. The product data comes from Supabase (table: inventory).
+
+Supabase project URL: {_sb_url_ai}
+Supabase anon key: YOUR_SUPABASE_ANON_KEY
+
+Cart requirements:
+- Cart state stored in localStorage (no login required)
+- Each cart item has: sku, item_name, price, image_url, quantity
+- Cart icon in the header showing item count
+- Cart drawer/sidebar that slides in from the right
+- Quantity controls (+ / -) and remove button per item
+- Cart total calculated from price × quantity
+
+Checkout page requirements:
+- Form fields: First Name, Last Name, Email, optional notes
+- Order summary showing all items and total
+- On submit: send a POST request to my order endpoint (I will provide this separately)
+- Show a confirmation message after successful submission
+- Do NOT integrate a payment processor — this is a manual order flow"""
+            st.code(_cart_prompt, language="text")
+
+        with _ai_context:
+            st.markdown(
+                "**Copy this block and paste it at the start of any AI conversation** "
+                "to give the AI full context about your MERIT database schema."
+            )
+            _context_prompt = f"""\
+I have a product catalog managed by MERIT (a Streamlit app). The data lives in Supabase.
+
+Supabase URL: {_sb_url_ai}
+Anon key: YOUR_SUPABASE_ANON_KEY  (get from Supabase Dashboard → Project Settings → API → anon/public)
+
+Tables:
+
+inventory (use this for your website storefront):
+  sku          TEXT PRIMARY KEY
+  item_name    TEXT
+  category     TEXT
+  price        NUMERIC
+  stock_left   INTEGER
+  status       TEXT   -- 'Active' or 'Inactive'
+  image_url    TEXT   -- full public URL, use directly in <img src>
+
+products (clean catalog, no stock data):
+  sku          TEXT PRIMARY KEY
+  name         TEXT
+  category     TEXT
+  price        NUMERIC
+  image_url    TEXT
+  active       BOOLEAN
+
+outbound_logs (order history — read-only for the website):
+  id           SERIAL PRIMARY KEY
+  name         TEXT
+  email        TEXT
+  order_number TEXT
+  products     TEXT
+  total_cost   NUMERIC
+  created_at   TIMESTAMPTZ
+
+Rules:
+- Always filter inventory with: stock_left > 0 AND status = 'Active' for the public storefront
+- image_url is always a full external URL — use it directly in <img src>. Always handle null/empty with a fallback
+- The anon key is safe to expose in the browser when Row Level Security (RLS) is enabled
+- Never use the direct PostgreSQL connection string in the website — that is for backend use only"""
+            st.code(_context_prompt, language="text")
+
 
 # ═════════════════════════════════════════════
 # EMAIL SENDER PAGE
@@ -3302,8 +3463,8 @@ elif page == "Email Sender":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_single, tab_bulk, tab_csv, tab_excel, tab_template = st.tabs(
-        ["Single Entry", "Bulk Entry", "CSV Import", "Excel Import", "Email Template"]
+    tab_single, tab_bulk, tab_csv, tab_excel, tab_template, tab_campaign = st.tabs(
+        ["Single Entry", "Bulk Entry", "CSV Import", "Excel Import", "Email Template", "Email Campaigns"]
     )
 
     # ─ Single ───────────────────────────────────
@@ -3603,6 +3764,152 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             st.markdown("---")
             st.markdown("**Email preview** — sample order: Jane Smith · ORD-1001 · Blue T-Shirt, Black Jeans")
             st.components.v1.html(st.session_state["_tpl_preview_html"], height=800, scrolling=True)
+
+    # ── Email Campaigns ──────────────────────────
+    with tab_campaign:
+        st.markdown("#### Send a broadcast email to a list of contacts")
+        st.caption(
+            "Paste your contacts below, write a subject and HTML body, then send to everyone at once. "
+            "Uses the same Gmail credentials as the order sender. "
+            "Available variables: `{{name}}` and `{{from_name}}`."
+        )
+
+        _camp_cfg = st.session_state.cfg
+        _camp_from = _camp_cfg.get("from_name", "")
+        _camp_smtp_email = _camp_cfg.get("smtp_email", "").strip()
+        _camp_smtp_pass  = (_camp_cfg.get("smtp_password", "") or "").replace(" ", "")
+
+        if not _camp_smtp_email or not _camp_smtp_pass:
+            st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
+
+        _camp_col1, _camp_col2 = st.columns([1, 1])
+
+        with _camp_col1:
+            st.markdown("**Contacts**")
+            st.caption("One per line. Format: `Name, email@example.com` or just `email@example.com`")
+            _camp_contacts_raw = st.text_area(
+                "Contacts",
+                height=220,
+                key="camp_contacts",
+                label_visibility="collapsed",
+                placeholder="Jane Smith, jane@example.com\nJohn Doe, john@example.com\nanother@example.com",
+            )
+
+            _camp_subject = st.text_input(
+                "Subject Line",
+                key="camp_subject",
+                placeholder="Important update from your VEI firm",
+            )
+
+        with _camp_col2:
+            st.markdown("**HTML Template**")
+            st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
+            _camp_tpl_raw = st.text_area(
+                "Campaign HTML",
+                value=_DEFAULT_CAMPAIGN_TEMPLATE,
+                height=220,
+                key="camp_html",
+                label_visibility="collapsed",
+            )
+
+        _camp_prev_col, _camp_send_col = st.columns(2)
+        with _camp_prev_col:
+            if st.button("Preview Email", width="stretch", key="btn_camp_preview"):
+                _camp_preview_html = (
+                    _camp_tpl_raw
+                    .replace("{{name}}", "Jane Smith")
+                    .replace("{{from_name}}", _camp_from or "Your VEI Firm")
+                )
+                st.session_state["_camp_preview_html"] = _camp_preview_html
+
+        if "_camp_preview_html" in st.session_state:
+            with st.expander("Email Preview", expanded=True):
+                st.components.v1.html(st.session_state["_camp_preview_html"], height=500, scrolling=True)
+
+        # Parse contacts
+        def _parse_campaign_contacts(raw: str) -> list[dict]:
+            contacts = []
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "," in line:
+                    parts = line.split(",", 1)
+                    name  = parts[0].strip()
+                    email = parts[1].strip()
+                else:
+                    name  = line.split("@")[0].strip()
+                    email = line.strip()
+                if "@" in email:
+                    contacts.append({"name": name, "email": email})
+            return contacts
+
+        _camp_contacts_parsed = _parse_campaign_contacts(_camp_contacts_raw or "")
+        if _camp_contacts_parsed:
+            st.caption(f"{len(_camp_contacts_parsed)} contact{'s' if len(_camp_contacts_parsed) != 1 else ''} ready to send.")
+
+        with _camp_send_col:
+            _camp_send_disabled = not (
+                _camp_contacts_parsed and _camp_subject.strip()
+                and _camp_smtp_email and _camp_smtp_pass
+            )
+            if st.button(
+                f"Send to {len(_camp_contacts_parsed)} Contact{'s' if len(_camp_contacts_parsed) != 1 else ''}",
+                type="primary",
+                width="stretch",
+                key="btn_camp_send",
+                disabled=_camp_send_disabled,
+            ):
+                _camp_prog   = st.progress(0, text="Connecting to Gmail...")
+                _camp_log_ph = st.empty()
+                _camp_results = []
+                _camp_sent = 0
+                _camp_failed = 0
+
+                try:
+                    _camp_server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
+                    _camp_server.starttls()
+                    _camp_server.login(_camp_smtp_email, _camp_smtp_pass)
+                except Exception as _camp_exc:
+                    st.error(f"Could not connect to Gmail: {_camp_exc}")
+                    st.stop()
+
+                for _ci, _contact in enumerate(_camp_contacts_parsed):
+                    _camp_prog.progress(
+                        _ci / len(_camp_contacts_parsed),
+                        text=f"Sending {_ci + 1} of {len(_camp_contacts_parsed)}  —  {_contact['email']}",
+                    )
+                    _camp_html_rendered = (
+                        _camp_tpl_raw
+                        .replace("{{name}}", _contact["name"])
+                        .replace("{{from_name}}", _camp_from or "")
+                    )
+                    _camp_text_rendered = (
+                        f"Hi {_contact['name']},\n\n"
+                        + "Please view this email in an HTML-capable email client.\n\n"
+                        + (_camp_from or "")
+                    )
+                    _camp_msg = MIMEMultipart("alternative")
+                    _camp_msg["From"]    = f"{_camp_from} <{_camp_smtp_email}>"
+                    _camp_msg["To"]      = _contact["email"]
+                    _camp_msg["Subject"] = _camp_subject.strip()
+                    _camp_msg.attach(MIMEText(_camp_text_rendered, "plain"))
+                    _camp_msg.attach(MIMEText(_camp_html_rendered, "html"))
+
+                    try:
+                        _camp_server.send_message(_camp_msg)
+                        _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": "Sent"})
+                        _camp_sent += 1
+                    except Exception as _camp_err:
+                        _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": f"Failed: {str(_camp_err)[:60]}"})
+                        _camp_failed += 1
+
+                    _camp_log_ph.dataframe(pd.DataFrame(_camp_results), use_container_width=True, hide_index=True)
+                    time.sleep(0.2)
+
+                _camp_server.quit()
+                _camp_prog.progress(1.0, text="Done")
+                st.success(f"Campaign complete — {_camp_sent} sent, {_camp_failed} failed.")
 
     # ── Queue ───────────────────────────────────
 
