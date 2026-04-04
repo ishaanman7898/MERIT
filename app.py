@@ -1500,7 +1500,9 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
 if page == "Get Started":
     cfg = st.session_state.cfg
     _gs_has_sb = _has_supabase(cfg)
+    _gs_has_img = _has_image_host(cfg)
     _gs_has_smtp = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
+    _gs_has_identity = bool(cfg.get("from_name") and cfg.get("subject"))
     _gs_has_secrets = False
     try:
         _gs_has_secrets = hasattr(st, "secrets") and "merit" in st.secrets
@@ -1512,11 +1514,13 @@ if page == "Get Started":
 
     # ── Step status indicators ────────────────────────────────────────
     _step1_ok = _gs_has_sb
-    _step2_ok = _gs_has_smtp
-    _step3_ok = _gs_has_secrets
+    _step2_ok = _gs_has_img
+    _step3_ok = _gs_has_smtp
+    _step4_ok = _gs_has_identity
+    _step5_ok = _gs_has_secrets
 
     st.markdown("### Setup Checklist")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         if _step1_ok:
             st.success("Step 1 — Supabase Connected")
@@ -1524,14 +1528,24 @@ if page == "Get Started":
             st.error("Step 1 — Connect Supabase (required)")
     with col2:
         if _step2_ok:
-            st.success("Step 2 — Email Configured")
+            st.success("Step 2 — Image Hosting Ready")
         else:
-            st.warning("Step 2 — Configure Email")
+            st.warning("Step 2 — Add Image Hosting Key")
     with col3:
         if _step3_ok:
-            st.success("Step 3 — Secrets Saved (persists reboots)")
+            st.success("Step 3 — Email Configured")
         else:
-            st.warning("Step 3 — Save Secrets TOML (prevents settings loss)")
+            st.warning("Step 3 — Configure Email")
+    with col4:
+        if _step4_ok:
+            st.success("Step 4 — Sender Identity Set")
+        else:
+            st.warning("Step 4 — Set Sender Identity")
+    with col5:
+        if _step5_ok:
+            st.success("Step 5 — Secrets Saved (persists reboots)")
+        else:
+            st.warning("Step 5 — Save Secrets TOML (prevents settings loss)")
 
     st.divider()
 
@@ -1543,46 +1557,109 @@ so that your data survives app reboots, and powers the **API Endpoints** page so
 
 **Without Supabase:** products are only stored in a local SQLite file that gets wiped every time Streamlit restarts.
 
-#### How to set up:
-1. Go to [supabase.com](https://supabase.com) → Sign up for free → Create a new project
-2. **Write down the database password** you set during project creation (you'll need it in Step 3)
-3. Once the project is ready, click the **Connect** button (top right of your project dashboard)
-4. Go to the **Direct connection** tab, scroll down, and copy the connection string:
+---
+
+#### 1. Create your Supabase account
+Go to [supabase.com](https://supabase.com) and sign up for a free account.
+
+#### 2. Create a new project
+Once logged in, click **New Project**. Fill in the form:
+
+| Field | What to enter |
+|---|---|
+| **Organization** | Your personal org (already selected by default) |
+| **Project name** | `merit` (or anything you like — it's just a label) |
+| **Database password** | Choose a strong password — **write this down**, you'll need it later |
+| **Region** | Pick the region closest to you (e.g. `East US`, `West EU`) |
+| **Pricing plan** | **Free** — the free tier is more than enough for MERIT |
+
+Click **Create new project** and wait ~60 seconds for it to provision.
+
+#### 3. Get your connection string
+Once the project dashboard loads:
+1. Click the **Connect** button in the top-right corner of your project dashboard
+2. In the dialog that opens, click the **Direct connection** tab
+3. Copy the connection string — it looks like:
    `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres`
-5. Go to **Settings → Database** in MERIT and paste:
-   - The connection string into **Connection String**
-   - Your database password into **Database Password**
-6. Click **Setup Tables** — MERIT will create all required tables automatically
+
+> **Tip:** Leave everything else at default. You do not need to change any Supabase project settings.
+
+#### 4. Connect MERIT to Supabase
+In MERIT, go to **Settings → Database** (left sidebar) and paste:
+- The connection string into **Connection String**
+- Your database password into **Database Password**
+
+Then click **Setup Tables** — MERIT will create all required tables automatically.
 
 Once connected, the Step 1 indicator above turns green.
         """)
-        if not _step1_ok:
-            if st.button("Go to Settings → Database", type="primary"):
-                st.session_state["sidebar_page"] = "Settings"
-                st.rerun()
 
-    # ── Step 2: Email ────────────────────────────────────────────────
-    with st.expander("Step 2 — Configure Email Sending", expanded=not _step2_ok and _step1_ok):
+    # ── Step 2: Image Hosting ─────────────────────────────────────────
+    with st.expander("Step 2 — Set Up Image Hosting", expanded=not _step2_ok and _step1_ok):
         st.markdown("""
-MERIT sends order emails via your **VEI Google (Gmail) account**.
+Product images need to be hosted online so they show up in emails and on your website.
+MERIT supports two **free** image hosting services — pick one:
+
+---
+
+#### Option A — Freeimage.host (recommended)
+1. Go to [freeimage.host](https://freeimage.host) → click **API** (top menu) → sign up or log in
+2. After logging in, go back to the **API** page and copy your **API key**
+3. In MERIT → **Settings → Image Hosting**, paste the key into **Freeimage.host API Key**
+
+#### Option B — Imghippo
+1. Go to [imghippo.com](https://imghippo.com) → click **Get API Key** → sign up
+2. Copy the API key from your dashboard
+3. In MERIT → **Settings → Image Hosting**, paste the key into **Imghippo API Key**
+
+---
+
+You only need **one** of the two keys. Once a key is saved, MERIT automatically uploads and
+compresses product images whenever you add or edit a product.
+
+Once a key is saved, the Step 2 indicator above turns green.
+        """)
+
+    # ── Step 3: Email ────────────────────────────────────────────────
+    with st.expander("Step 3 — Configure Gmail SMTP", expanded=not _step3_ok and _step2_ok):
+        st.markdown("""
+MERIT sends order emails via your **VEI Google (Gmail) account**. To do this safely,
+Google requires you to generate a special **App Password** instead of using your normal password.
 
 #### How to set up:
-1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security** → **2-Step Verification** → turn it ON
-2. Then go to **Security** → **App Passwords** → generate a new app password for "Mail"
-3. Copy the 16-character password (e.g. `abcd efgh ijkl mnop`)
-4. In MERIT → **Settings → Email**, fill in:
-   - **From Name**: your name or company name
-   - **SMTP Email**: your Gmail address (e.g. `yourname@gmail.com`)
-   - **SMTP Password**: the 16-character app password — spaces are fine, MERIT strips them automatically
-5. Fields auto-save as you type — no save button needed
-        """)
-        if not _step2_ok:
-            if st.button("Go to Settings → Email"):
-                st.session_state["sidebar_page"] = "Settings"
-                st.rerun()
+1. Go to [myaccount.google.com](https://myaccount.google.com) and sign in
+2. Click **Security** in the left sidebar
+3. Under *How you sign in to Google*, confirm **2-Step Verification** is **On** — turn it on if not
+4. Search for **App passwords** at the top of the page and click the result
+5. Under *App name*, type `MERIT Email` then click **Create**
+6. Google shows a **16-character password** (e.g. `abcd efgh ijkl mnop`) — copy it now
+7. In MERIT → **Settings → Email**, fill in:
+   - **Gmail Address**: your Gmail address (e.g. `yourname@gmail.com`)
+   - **App Password**: the 16-character password — spaces are fine, MERIT strips them automatically
 
-    # ── Step 3: Streamlit Secrets ────────────────────────────────────
-    with st.expander("Step 3 — Save Secrets TOML (prevents settings loss on reboot)", expanded=not _step3_ok and _step1_ok):
+Fields auto-save as you type. Once both fields are filled, the Step 3 indicator above turns green.
+        """)
+
+    # ── Step 4: Sender Identity ───────────────────────────────────────
+    with st.expander("Step 4 — Set Sender Identity", expanded=not _step4_ok and _step3_ok):
+        st.markdown("""
+Sender Identity controls **who the email appears to come from** in the recipient's inbox.
+This is separate from the Gmail credentials — it's the display name and subject line your customers see.
+
+#### How to set up:
+1. In MERIT → **Settings → Email**, scroll to the **Sender Identity** section and fill in:
+   - **From Name**: the name shown in the recipient's inbox (e.g. `VEI Investments`, `Acme Trading`)
+   - **Default Subject Line**: the subject line for order emails (e.g. `Your Order Confirmation`)
+     - You can use `{order_number}` in the subject to insert the customer's order number automatically
+2. Fields auto-save as you type — no save button needed
+
+> **Tip:** Use your firm name as the From Name so customers immediately recognise who the email is from.
+
+Once both fields are filled, the Step 4 indicator above turns green.
+        """)
+
+    # ── Step 5: Streamlit Secrets ────────────────────────────────────
+    with st.expander("Step 5 — Save Secrets TOML (prevents settings loss on reboot)", expanded=not _step5_ok and _step4_ok):
         st.markdown("""
 **Why is this needed?**
 Streamlit Cloud restarts your app container periodically. When it does, any files written to disk
@@ -1592,18 +1669,14 @@ Streamlit Cloud restarts your app container periodically. When it does, any file
 your credentials there once, and MERIT reads from it automatically on every startup.
 
 #### How to save your secrets:
-1. Go to **Settings → Secrets TOML** and copy the generated TOML
+1. Go to **Settings → Secrets TOML** in MERIT and copy the generated TOML block
 2. Click **Manage app** in the bottom-right corner of your Streamlit app
 3. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
 4. Paste the TOML → click **Save**
 5. Streamlit reboots the app — your settings persist forever
 
-Once saved, the Step 3 indicator above turns green and **Get Started disappears from the sidebar**.
+Once saved, the Step 5 indicator above turns green and **Get Started disappears from the sidebar**.
         """)
-        if not _step3_ok:
-            if st.button("Go to Settings → Secrets TOML"):
-                st.session_state["sidebar_page"] = "Settings"
-                st.rerun()
 
     st.divider()
 
