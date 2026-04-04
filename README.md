@@ -64,50 +64,66 @@ You run MERIT from a web browser — no coding, no spreadsheets, no manually wri
 ## 2. The big picture — what accounts you need
 
 > **CRITICAL SETUP INSTRUCTION:**
-> Because this is a firm tool, you must sign up for everything and do all of these steps in your **VEI account** given to you by your facilitator or administrator. Do not use your personal accounts for firm operations.
+> This tool is strictly for your VEI firm. **Everything must be done with your VEI account (or firm email) provided by your teacher, facilitator, or administrator.** 
+> **DO NOT** use your personal emails, personal GitHub accounts, or personal Google accounts for any of these steps. This ensures your data stays with the firm and passes to the next class correctly.
 
-Before you can use every feature of MERIT, you need to set up a few free accounts. Here is the full list:
+Before using MERIT, you need to set up operations accounts. Remember: every single account below must be registered with your **VEI firm email**.
 
-| What | Why | Cost |
-|---|---|---|
-| **Gmail account** | MERIT sends emails through Gmail | Free |
-| **Freeimage.host account** | Stores your product photos online so they appear in emails | Free |
-| **Supabase account** (recommended) | Saves your products and inventory in the cloud so data is never lost | Free |
-| **GitHub account** | Needed to deploy the app on Streamlit Cloud | Free |
-| **Streamlit account** | Hosts the app in your browser for free | Free |
+| What | Why | Cost | Used with which email? |
+|---|---|---|---|
+| **Gmail account** | MERIT sends firm emails through Gmail | Free | VEI Firm Email ONLY |
+| **Freeimage.host account** | Stores your product photos online | Free | VEI Firm Email ONLY |
+| **Supabase account** (recommended) | Database to save your products in the cloud | Free | VEI Firm Email ONLY |
+| **GitHub account** | Used to fork the code & deploy to Streamlit | Free | VEI Firm Email ONLY |
+| **Streamlit account** | Hosts the app in your browser | Free | VEI Firm Email ONLY |
 
-> **VEI Firm tip:** Your firm may already have a shared Gmail address set up by your teacher or coordinator. Ask them for it. You still need to create a Gmail App Password yourself (the coordinator cannot do this for you — it is tied to whoever is logged in).
+> **VEI Firm Tip:** Your firm should have a shared Gmail address assigned to your department (like `acme-vei@gmail.com`). Use that address to sign up for all other services. You will also need to generate a Gmail App Password from that account (the teacher cannot bypass this for you).
 
 ---
 
 ## 3. Deploy the app (one-time setup)
 
-This section gets the app running in your browser. You only do this once.
+This section gets the app running on the internet so everyone in your firm can access it. Because you are using VEI accounts, please follow these steps precisely so the accounts link correctly.
 
-### Step 1 — Get the code on GitHub
+### Step 1 — Create a VEI GitHub account & Link it
 
-1. Make sure you are signed into [github.com](https://github.com)
-2. Go to the MERIT repository page
-3. Click the **Fork** button in the top-right corner
-4. On the "Create a new fork" page, just click **Create fork** — no changes needed
-5. You now have your own personal copy of MERIT under your GitHub account
+You need a GitHub account to hold the code before Streamlit can host it.
+1. Go to [github.com/signup](https://github.com/signup).
+2. Enter your **VEI firm email address** (e.g., your assigned `@school.edu` or firm email). **Do not use a personal email.**
+3. Create a strong password (save it in your firm's password manager if you have one).
+4. Enter a username related to your firm (e.g., `AcmeFirmVEI`).
+5. Complete the verification puzzle and click **Create account**.
+6. Check your VEI firm email inbox and paste the launch code GitHub sent you to verify everything.
 
-### Step 2 — Create a Streamlit account and deploy
+### Step 2 — Fork this repository with your VEI account
 
-1. Go to [share.streamlit.io](https://share.streamlit.io) and click **Sign up**
-2. Sign in using the **exact same GitHub account** you used to fork — this is important
-3. Click **Create app** on your Streamlit dashboard
-4. Select **"Deploy a public app from GitHub"**
-5. In the **Repository** dropdown, find your forked MERIT repo
-6. Set these fields:
-   - **Branch:** `master`
+"Forking" means taking a copy of the MERIT code and putting it into your new VEI GitHub account.
+1. Make sure you are signed into [github.com](https://github.com) with the VEI account you just made.
+2. Go to the original MERIT repository page.
+3. In the top-right corner of the page, click the **Fork** button.
+4. On the "Create a new fork" screen, ensure the "Owner" is your VEI account. Leave everything else as it is.
+5. Click the green **Create fork** button. 
+6. Wait a few seconds. You now have a complete copy of MERIT physically linked to your VEI firm's account!
+
+### Step 3 — Create a Streamlit account and deploy
+
+1. Keep your VEI GitHub account logged in on a tab.
+2. Go to [share.streamlit.io/signup](https://share.streamlit.io/signup).
+3. Click **Continue with GitHub**. (Because you are using the VEI GitHub account, Streamlit will automatically link the two! This is why using the VEI account across the board is so important).
+4. Authorize Streamlit if it asks for permission.
+5. On your Streamlit dashboard, click **Create app**.
+6. Select **"Deploy a public app from GitHub"**.
+7. In the **Repository** dropdown, find your forked MERIT repo (e.g., `AcmeFirmVEI/MERIT`).
+8. Check that these fields match exactly:
+   - **Branch:** `master` (or `main`)
    - **Main file path:** `app.py`
-   - **App URL:** type your firm name with no spaces (e.g. `acme-vei-merit`) — this becomes your URL like `acme-vei-merit.streamlit.app`
-7. Click **Deploy** — the app will be live in about 60 seconds
+   - **App URL:** Type your firm name with no spaces (like `acme-merit-firm`) — this will create your live web link: `https://acme-merit-firm.streamlit.app`.
+9. Click **Deploy**. Wait about 60 seconds.
 
-### Step 3 — Open the app and go to Settings
+### Step 4 — Open the app and go to Settings
 
-Once the app loads you will be shown a **Privacy Agreement** screen. Read it and click **I Agree — Continue to MERIT**. You only see this once — after agreeing it is saved and never shown again.
+Once the loading finishes, your app will be live on the internet! 
+You will see a **Privacy Agreement** screen first. Read it and click **I Agree — Continue to MERIT**.
 
 Then click **Settings** in the left sidebar and follow section 4 below.
 
