@@ -393,44 +393,114 @@ def upload_image(image_bytes: bytes, cfg: dict, name: str = "product") -> str:
 # Database helpers
 # ─────────────────────────────────────────────
 
-def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
-    """Connect via psycopg2, falling back to IPv4 if IPv6 fails.
+_SUPABASE_POOLER_REGIONS = [
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "ca-central-1", "eu-west-1", "eu-west-2", "eu-central-1",
+    "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "sa-east-1",
+]
 
-    Streamlit Cloud (and many school networks) cannot route IPv6 even when DNS
-    returns an AAAA record first. We detect the error and retry by resolving the
-    host to its IPv4 address, then reconnecting using libpq keyword=value format
-    so that both `host` (for SSL verification) and `hostaddr` (the actual IP to
-    dial) are set correctly. Appending hostaddr as a URL query parameter does NOT
-    work reliably — psycopg2 only honours it in the keyword=value DSN form.
+
+def _try_supabase_session_pooler(conn_str: str, connect_timeout: int) -> object:
+    """Try the Supabase Session Pooler as fallback when direct connection is IPv6-only.
+
+    Derives project-ref from the direct connection hostname (db.[ref].supabase.co),
+    builds pooler URLs (aws-0-[region].pooler.supabase.com:5432), and tries each
+    AWS region until one succeeds. The Session Pooler has an IPv4 A-record in every
+    region and bypasses the IPv6-only direct connection limitation.
+    """
+    import psycopg2  # type: ignore
+    import socket
+    import re
+    from urllib.parse import urlparse, unquote as _unquote, quote as _quote
+
+    _p = urlparse(conn_str)
+    _host = _p.hostname or ""
+    _m = re.match(r"^db\.([^.]+)\.supabase\.co$", _host)
+    if not _m:
+        raise RuntimeError(
+            "IPv6-only connection failed and host is not a recognisable Supabase direct-connection URL.\n"
+            "Use the Session Pooler connection string from Supabase → Connect → Session Pooler tab."
+        )
+    _ref  = _m.group(1)
+    _user = _unquote(_p.username or "postgres")
+    _pass = _unquote(_p.password or "")
+    _db   = (_p.path or "/postgres").lstrip("/") or "postgres"
+    # Session pooler username uses the project-ref suffix: postgres.[ref]
+    _pooler_user = f"postgres.{_ref}"
+
+    for _region in _SUPABASE_POOLER_REGIONS:
+        _pooler_host = f"aws-0-{_region}.pooler.supabase.com"
+        try:
+            socket.getaddrinfo(_pooler_host, 5432, socket.AF_INET)
+        except Exception:
+            continue
+        _pooler_url = (
+            f"postgresql://{_pooler_user}:{_quote(_pass, safe='')}@"
+            f"{_pooler_host}:5432/{_db}"
+        )
+        try:
+            _conn = psycopg2.connect(_pooler_url, connect_timeout=connect_timeout)
+            return _conn
+        except Exception as _pe:
+            if "Tenant or user not found" in str(_pe):
+                continue  # wrong region — try next
+            raise  # different error (e.g. wrong password) — stop trying
+
+    raise RuntimeError(
+        "Could not connect to Supabase via direct connection (IPv6-only) or any Session Pooler region.\n\n"
+        "Please check:\n"
+        "1. Your Supabase project is not paused (free tier pauses after 1 week of no activity).\n"
+        "   → Log in to supabase.com and click 'Restore project' if it shows as paused.\n"
+        "2. Use the Session Pooler connection string from Supabase → Connect → Session Pooler tab.\n"
+        "   It looks like: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres\n"
+        "3. Your database password is correct."
+    )
+
+
+def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
+    """Connect via psycopg2 with automatic fallbacks for IPv6-only Supabase projects.
+
+    Strategy:
+    1. Direct URL connect (works if IPv6 is available or host has IPv4)
+    2. Force IPv4 via libpq keyword DSN with hostaddr= (works if host has an A-record)
+    3. Supabase Session Pooler across all known AWS regions (IPv4, works even when
+       the direct-connection host is IPv6-only)
     """
     import psycopg2  # type: ignore
 
+    _IPV6_ERRORS = ("assign requested address", "Network is unreachable",
+                    "could not translate host name", "Name or service not known")
+
+    # ── Attempt 1: direct URL ────────────────────────────────────────────────
     try:
         return psycopg2.connect(conn_str, connect_timeout=connect_timeout)
-    except Exception as _e:
-        _msg = str(_e)
-        if "assign requested address" not in _msg and "Network is unreachable" not in _msg:
-            raise
-        # IPv6 unreachable — resolve to IPv4 and reconnect via keyword DSN
-        try:
-            import socket
-            from urllib.parse import urlparse, unquote as _unquote
-            _p    = urlparse(conn_str)
-            _host = _p.hostname or ""
-            _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
-            _dsn  = (
-                f"host={_host} "
-                f"hostaddr={_ipv4} "
-                f"port={_p.port or 5432} "
-                f"dbname={(_p.path or '/postgres').lstrip('/')} "
-                f"user={_unquote(_p.username or 'postgres')} "
-                f"password={_unquote(_p.password or '')} "
-                f"sslmode=require"
-            )
-            return psycopg2.connect(_dsn, connect_timeout=connect_timeout)
-        except Exception:
-            pass
-        raise
+    except Exception as _e1:
+        _msg1 = str(_e1)
+        if not any(x in _msg1 for x in _IPV6_ERRORS):
+            raise  # real error (wrong password, table missing, etc.) — surface it
+
+    # ── Attempt 2: force IPv4 via keyword DSN ───────────────────────────────
+    try:
+        import socket
+        from urllib.parse import urlparse, unquote as _unquote
+        _p    = urlparse(conn_str)
+        _host = _p.hostname or ""
+        _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
+        _dsn  = (
+            f"host={_host} "
+            f"hostaddr={_ipv4} "
+            f"port={_p.port or 5432} "
+            f"dbname={(_p.path or '/postgres').lstrip('/')} "
+            f"user={_unquote(_p.username or 'postgres')} "
+            f"password={_unquote(_p.password or '')} "
+            f"sslmode=require"
+        )
+        return psycopg2.connect(_dsn, connect_timeout=connect_timeout)
+    except Exception:
+        pass
+
+    # ── Attempt 3: Supabase Session Pooler (IPv4, all regions) ─────────────
+    return _try_supabase_session_pooler(conn_str, connect_timeout)
 
 
 
@@ -467,13 +537,26 @@ def _has_supabase(cfg: dict) -> bool:
 
 
 def _get_supabase_project_url(cfg: dict) -> str:
-    """Derive the Supabase project URL from the connection string (for API Endpoints)."""
+    """Derive the Supabase REST API URL from the connection string (for API Endpoints).
+
+    Handles both:
+    - Direct connection:  db.[ref].supabase.co  → https://[ref].supabase.co
+    - Session Pooler:     username = postgres.[ref]  → https://[ref].supabase.co
+    """
     import re as _re
+    from urllib.parse import urlparse as _up
     conn_str = _get_effective_supabase_conn_str(cfg)
     if conn_str:
+        # Direct connection format: db.[ref].supabase.co
         m = _re.search(r'@db\.([^.]+)\.supabase\.co', conn_str)
         if m:
             return f"https://{m.group(1)}.supabase.co"
+        # Session pooler format: username = postgres.[ref]
+        _p = _up(conn_str)
+        _u = (_p.username or "")
+        _pm = _re.match(r"^postgres\.([^@]+)$", _u)
+        if _pm:
+            return f"https://{_pm.group(1)}.supabase.co"
     return cfg.get("supabase_url", "").strip()   # fallback: old-style config
 
 
@@ -1523,43 +1606,57 @@ if page == "Get Started":
     with st.expander("Step 1 — Connect Supabase (REQUIRED)", expanded=not _step1_ok):
         st.markdown("""
 Supabase is **required** for MERIT to work properly. It stores your products and inventory in the cloud
-so that your data survives app reboots, and powers the **API Endpoints** page so your website auto-updates.
+so your data survives app reboots, and powers the **API Endpoints** page so your website auto-updates.
 
 **Without Supabase:** products are only stored in a local SQLite file that gets wiped every time Streamlit restarts.
 
 ---
 
-#### 1. Create your Supabase account
-Go to [supabase.com](https://supabase.com) and sign up for a free account.
+#### 1. Sign up for Supabase
+Go to [supabase.com](https://supabase.com) and click **Sign Up**. Use your email address.
+
+---
 
 #### 2. Create a new project
-Once logged in, click **New Project**. Fill in the form:
+
+Once logged in, click the green **New Project** button.
+
+Fill in the form **exactly** like this:
 
 | Field | What to enter |
 |---|---|
-| **Organization** | Your personal org (already selected by default) |
-| **Project name** | `merit` (or anything you like — it's just a label) |
-| **Database password** | Choose a strong password — **write this down**, you'll need it later |
-| **Region** | Pick the region closest to you (e.g. `East US`, `West EU`) |
-| **Pricing plan** | **Free** — the free tier is more than enough for MERIT |
+| **Organization** | Your email address (already pre-selected — leave it) |
+| **Project name** | Your **VEI firm name** (e.g. `BluePeak Ventures`) |
+| **Database password** | Make up your own password — **do NOT use "Generate"**. Use something you will remember, like `BluePeak2024!`. Write it down. |
+| **Region** | Pick the region **closest to where you are** (e.g. if you are in the US East, pick `East US (North Virginia)`) |
+| **Security options** | Leave at default — do not change anything here |
 
-Click **Create new project** and wait ~60 seconds for it to provision.
+Click **Create new project** and wait about 60 seconds while it provisions. The spinning icon will go away when it is ready.
+
+> **Important:** Supabase free projects **pause after 1 week of no activity**. If you get a connection error, log back into supabase.com and click **Restore project** — it takes about 30 seconds to wake up.
+
+---
 
 #### 3. Get your connection string
-Once the project dashboard loads:
-1. Click the **Connect** button in the top-right corner of your project dashboard
-2. In the dialog that opens, click the **Direct connection** tab
-3. Copy the connection string — it looks like:
-   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres`
 
-> **Tip:** Leave everything else at default. You do not need to change any Supabase project settings.
+Once the project is ready:
+
+1. Click the green **Connect** button at the **top right** of your project dashboard
+2. A dialog opens — scroll down and click the **Session Pooler** tab
+   *(do NOT use "Direct connection" — that uses IPv6 which many networks block)*
+3. Scroll down to **Connection string**
+4. Copy the URL — it looks like:
+   `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres`
+
+---
 
 #### 4. Connect MERIT to Supabase
-In MERIT, go to **Settings → Database** (left sidebar) and paste:
-- The connection string into **Connection String**
-- Your database password into **Database Password**
 
-Then click **Setup Tables** — MERIT will create all required tables automatically.
+Go to **Settings → Database Connections** (use the left sidebar) and paste:
+- **Connection String** — the `postgresql://...` URL you just copied
+- **Database Password** — the password you made up in step 2 (this replaces `[YOUR-PASSWORD]`)
+
+Click **Test Connection** to verify, then click **Setup Tables** to create all required tables.
 
 Once connected, the Step 1 indicator above turns green.
         """)
@@ -2459,8 +2556,8 @@ elif page == "Settings":
 
     inp_sb_conn = st.text_input(
         "Connection String",
-        placeholder="postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres",
-        help="From Supabase Dashboard → Connect button (top right) → Direct connection tab. Leave [YOUR-PASSWORD] as-is.",
+        placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        help="Supabase Dashboard → Connect → Session Pooler tab → Connection string. Leave [YOUR-PASSWORD] as-is — enter the password separately below.",
         key="inp_sb_conn",
         on_change=_auto_save_settings,
     )
