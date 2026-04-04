@@ -237,6 +237,7 @@ _SECRETS_CREDENTIAL_KEYS = [
     "subject",
     "freeimage_api_key",
     "imghippo_api_key",
+    "privacy_acknowledged",
 ]
 
 
@@ -998,6 +999,51 @@ if "queue" not in st.session_state:
 
 if "send_log" not in st.session_state:
     st.session_state.send_log = []
+
+# ─────────────────────────────────────────────
+# Privacy agreement gate (one-time, persists via TOML)
+# ─────────────────────────────────────────────
+
+if not st.session_state.cfg.get("privacy_acknowledged"):
+    st.title("Privacy & Data Agreement")
+    st.markdown("""
+Before using MERIT, please read and accept the following:
+
+---
+
+### How MERIT stores your data
+
+MERIT is a self-hosted app that **you** deploy on your own Streamlit Cloud account.
+When you enter credentials (Gmail App Password, Supabase connection string, image hosting API keys, etc.),
+here is exactly where they go:
+
+| Where your data is stored | Details |
+|---|---|
+| **Streamlit Secrets** | When you paste the Secrets TOML, your credentials are stored in **your** Streamlit project's encrypted secrets store — owned by you, on Streamlit's servers |
+| **config.json** | A local file in your deployed app container. It exists only while the container is running and is wiped on restart (which is why Streamlit Secrets is recommended) |
+| **Supabase** | Your product and inventory data lives in **your** Supabase project — you own that database |
+
+### What MERIT does NOT do
+
+- MERIT does **not** transmit your API keys, passwords, or credentials to any third party
+- MERIT does **not** have a central server — there is no "MERIT cloud" that receives your data
+- MERIT does **not** log, collect, or share your email addresses, customer data, or order information
+- The only outgoing connections MERIT makes are: Gmail SMTP (to send emails you initiate), Supabase/Neon (your own database), and image hosting services (Freeimage.host or Imghippo, to upload product images)
+
+### In plain English
+
+Your credentials are stored on **Streamlit's servers** (in your own account's encrypted secrets) and in **your own Supabase database**. They are used only to run this app for you. No one else — including the MERIT developer — can see them.
+
+---
+
+By clicking **I Agree**, you confirm that you have read and understood the above.
+    """)
+    st.divider()
+    if st.button("I Agree — Continue to MERIT", type="primary"):
+        st.session_state.cfg["privacy_acknowledged"] = "1"
+        save_config(st.session_state.cfg)
+        st.rerun()
+    st.stop()
 
 # ─────────────────────────────────────────────
 # Shared helpers

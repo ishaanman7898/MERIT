@@ -4,11 +4,25 @@ MERIT is a browser-based app built specifically for **Virtual Enterprise Interna
 
 ---
 
+## Try the app
+
+MERIT runs on two platforms. Test both links below and use whichever one opens on your school or work network — some networks block one but not the other.
+
+| Platform | Link | When to use |
+|---|---|---|
+| **Streamlit** (recommended) | [Open Streamlit app](https://ishaanman7898-merit-merit-app-bfhyad.streamlit.app) | Try this first — full-featured version |
+| **Gradio** (fallback) | Deploy your own — see [Section 3b](#3b-deploy-the-gradio-fallback-app) | Use this if Streamlit is blocked on your network |
+
+> **Which one should I use?** Try the Streamlit link first. If it loads, use that — it has every feature. If your school or work network blocks it, follow Section 3b to set up the Gradio version.
+
+---
+
 ## Table of Contents
 
 1. [What is MERIT and who is it for?](#1-what-is-merit-and-who-is-it-for)
 2. [The big picture — what accounts you need](#2-the-big-picture--what-accounts-you-need)
 3. [Deploy the app (one-time setup)](#3-deploy-the-app-one-time-setup)
+   - [3b. Deploy the Gradio fallback app](#3b-deploy-the-gradio-fallback-app)
 4. [Settings — step by step](#4-settings--step-by-step)
    - [4.1 Sender Identity](#41-sender-identity)
    - [4.2 Gmail App Password](#42-gmail-app-password)
@@ -93,7 +107,52 @@ This section gets the app running in your browser. You only do this once.
 
 ### Step 3 — Open the app and go to Settings
 
-Once the app loads, click **Settings** in the left sidebar. Follow section 4 below to fill everything in.
+Once the app loads you will be shown a **Privacy Agreement** screen. Read it and click **I Agree — Continue to MERIT**. You only see this once — after agreeing it is saved and never shown again.
+
+Then click **Settings** in the left sidebar and follow section 4 below.
+
+---
+
+## 3b. Deploy the Gradio fallback app
+
+Use this if Streamlit is blocked on your network. Gradio runs on Hugging Face Spaces (free).
+
+### Option A — Hugging Face Spaces (recommended, runs in your browser)
+
+1. Go to [huggingface.co](https://huggingface.co) → click **Sign Up** (free account)
+2. Click your profile picture → **New Space**
+3. Fill in the form:
+   - **Space name:** `merit-gradio` (or anything you like)
+   - **SDK:** choose **Gradio**
+   - **Visibility:** Private (recommended — keeps your config private)
+4. Click **Create Space**
+5. On the **Files** tab, upload these two files from your forked MERIT repo:
+   - `gradio_app.py` → rename to `app.py` when uploading
+   - `requirements_gradio.txt` → rename to `requirements.txt` when uploading
+6. Hugging Face will build and launch the app automatically (takes about 60 seconds)
+7. Your Gradio app URL will be: `https://huggingface.co/spaces/YOUR-USERNAME/merit-gradio`
+
+### Option B — Run locally (no account needed)
+
+If you just want to run it on your own laptop:
+
+```bash
+pip install gradio psycopg2-binary pandas Pillow
+python gradio_app.py
+```
+
+Then open [http://localhost:7860](http://localhost:7860) in your browser.
+
+### What the Gradio app includes
+
+| Feature | Available |
+|---|---|
+| Email Campaigns (broadcast emails to a contact list) | Yes |
+| Live product catalog from Supabase | Yes |
+| Settings (SMTP, Supabase, image hosting) | Yes |
+| Order queue with individual order emails | Streamlit only |
+| Inventory management | Streamlit only |
+| API Endpoints / AI Prompts | Streamlit only |
 
 ---
 
@@ -674,7 +733,42 @@ What to do:
 
 ---
 
-## 11. Frequently asked questions
+## 11. Privacy & data — how your credentials are stored
+
+When you first open MERIT you will see a one-time **Privacy Agreement** screen. Here is the full picture of what happens to your data.
+
+### Where your credentials go
+
+| Credential | Where it is stored |
+|---|---|
+| Gmail App Password | Streamlit Secrets (your own Streamlit project, encrypted) and/or `config.json` locally |
+| Supabase connection string | Same as above |
+| Image hosting API keys | Same as above |
+| Product & inventory data | Your own Supabase database — you own and control it |
+| Customer names & emails | Only in emails you send via Gmail. Logs stored in your own Supabase `outbound_logs` table |
+
+### What MERIT does NOT do
+
+- MERIT does **not** send your API keys, passwords, or credentials to any third party
+- MERIT does **not** have a central backend server — there is no "MERIT cloud" that receives your data
+- MERIT does **not** collect analytics, usage data, or telemetry of any kind
+- The only outgoing network connections MERIT makes are:
+  - **Gmail SMTP** (port 587) — to send the emails you initiate
+  - **Supabase / Neon** — to read and write your own database
+  - **Freeimage.host / Imghippo** — to upload product images you choose to upload
+
+### Streamlit Secrets
+
+When you paste the Secrets TOML into your Streamlit project settings, your credentials are stored in **Streamlit's encrypted secrets store** — tied to your Streamlit account, not shared with anyone. Streamlit is SOC 2 compliant. See [Streamlit's privacy policy](https://streamlit.io/privacy-policy) for details.
+
+### config.json
+
+This file is written to disk in the app container while it runs. It is listed in `.gitignore` and is never committed to GitHub. On Streamlit Cloud the container resets periodically, wiping this file — which is why Streamlit Secrets is the recommended way to persist credentials.
+
+---
+
+## 12. Frequently asked questions
+
 
 **Do I need to know how to code?**
 
