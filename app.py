@@ -1608,9 +1608,16 @@ MERIT supports two **free** image hosting services — pick one:
 3. In MERIT → **Settings → Image Hosting**, paste the key into **Freeimage.host API Key**
 
 #### Option B — Imghippo
-1. Go to [imghippo.com](https://imghippo.com) → click **Get API Key** → sign up
-2. Copy the API key from your dashboard
-3. In MERIT → **Settings → Image Hosting**, paste the key into **Imghippo API Key**
+1. Go to [imghippo.com](https://imghippo.com) → sign up for a free account
+2. After signing up, go directly to your API keys page: [imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
+3. Complete the API access form (5 quick steps):
+   - **Step 1:** Select *Website/Web Application*
+   - **Step 2:** Select *Less than 1,000*
+   - **Step 3:** Select *Image upload and sharing*
+   - **Step 4:** Skip (optional)
+   - **Step 5:** Select *Yes, I agree*
+4. Copy the generated **API Version 1** key
+5. In MERIT → **Settings → Image Hosting**, paste the key into **Imghippo API Key**
 
 ---
 
@@ -1648,12 +1655,12 @@ This is separate from the Gmail credentials — it's the display name and subjec
 
 #### How to set up:
 1. In MERIT → **Settings → Email**, scroll to the **Sender Identity** section and fill in:
-   - **From Name**: the name shown in the recipient's inbox (e.g. `VEI Investments`, `Acme Trading`)
-   - **Default Subject Line**: the subject line for order emails (e.g. `Your Order Confirmation`)
+   - **From Name**: your VEI firm name exactly as it appears in VEI (e.g. `Acme VEI`)
+   - **Default Subject Line**: `Your order is here` (or customise as you like)
      - You can use `{order_number}` in the subject to insert the customer's order number automatically
 2. Fields auto-save as you type — no save button needed
 
-> **Tip:** Use your firm name as the From Name so customers immediately recognise who the email is from.
+> **Tip:** Ask your firm coordinator for the exact firm name if you're unsure.
 
 Once both fields are filled, the Step 4 indicator above turns green.
         """)
@@ -2291,72 +2298,9 @@ elif page == "Settings":
     # ── VEI account note ─────────────────────────
     st.info(
         "**VEI Firms:** You must use your VEI account for all settings below. "
-        "Click **Getting Started** (below) to set everything up step by step. "
         "Your firm coordinator may have already set up a shared Gmail account and firm name — ask them for the details. "
         "All other keys (image hosting, database) are personal free accounts you create yourself."
     )
-
-    with st.expander("Getting Started — how to set everything up", expanded=False):
-        st.markdown("""
-### 1. Gmail SMTP (required for sending emails)
-1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security**
-2. Enable **2-Step Verification** (required)
-3. Search for **App passwords** → create one named `Email Sender`
-4. Copy the 16-character password and paste it below under **Gmail SMTP**
-
----
-
-### 2. Image Hosting — free (required for product images in emails)
-Choose **one** of these free services:
-
-**Freeimage.host** (recommended):
-1. Go to [freeimage.host](https://freeimage.host) → **Sign up**
-2. Log in → click the **menu icon (☰)** in the top-left → click **API**
-3. Copy your API key and paste it below under **Image Hosting → Freeimage.host**
-
-**Imghippo** (alternative):
-1. Sign up at [https://www.imghippo.com/](https://www.imghippo.com/)
-2. Navigate to API Keys at [https://www.imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
-3. Complete the API access form (5 steps):
-   - **Step 1:** Select Website/Web Application
-   - **Step 2:** Select Less than 1,000
-   - **Step 3:** Select Image upload and sharing
-   - **Step 4:** Skip (optional)
-   - **Step 5:** Select Yes, I agree
-4. Copy the generated API key and paste it below under **Image Hosting → Imghippo**
-5. Test the key, click **Save Settings**, and retry if it fails.
-
----
-
-### 3. Supabase — cloud Postgres (optional, recommended)
-1. Go to [supabase.com](https://supabase.com) → **Start your project** (free tier)
-2. Create a new project → choose a region close to you → set a strong DB password
-3. Once created, go to **Settings → API** in your project dashboard:
-   - Copy **Project URL** → `https://xxxx.supabase.co`
-   - Copy **Anon key** (starts with `eyJ…`)
-   - Copy **Service role key** (starts with `eyJ…`) — keep this secret
-4. For the **Personal Access Token** (needed for Setup Tables):
-   - Go to [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens)
-   - Click **Generate new token** → copy it (starts with `sbp_…`)
-5. Fill all four fields below and click **Save Settings**
-6. Click **Setup Tables** — it will create the `inventory` and `products` tables automatically
-
----
-
-### 4. Neon — serverless Postgres (optional, alternative to Supabase)
-1. Go to [neon.tech](https://neon.tech) → **Sign Up** (free tier)
-2. Create a new project
-3. Go to **Dashboard → Connection Details**
-4. Select **psql** from the dropdown → copy the connection string
-   - It looks like: `postgresql://user:pass@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require`
-5. Paste it below under **Neon**
-6. Click **Setup Tables** to create the schema
-
----
-
-### SQLite (built-in — no setup needed)
-Products and inventory are **always** saved to `data.db` in the app folder automatically. No account or keys required. Use Supabase/Neon if you want cloud backup or multi-device access.
-        """)
 
     # ── Sender Identity ─────────────────────────
     st.subheader("Sender Identity")
@@ -2364,7 +2308,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     with col1:
         inp_from_name = st.text_input(
             "From Name",
-            placeholder="Acme VEI Firm",
+            placeholder="Your VEI Firm Name",
             help="Displayed as the sender name in the recipient's inbox",
             key="_cfg_from_name",
             on_change=_auto_save_settings,
@@ -2372,7 +2316,7 @@ Products and inventory are **always** saved to `data.db` in the app folder autom
     with col2:
         inp_subject = st.text_input(
             "Default Subject Line",
-            placeholder="Your Order Confirmation",
+            placeholder="Your order is here",
             help="Use {order_number} to insert the order number",
             key="_cfg_subject",
             on_change=_auto_save_settings,
