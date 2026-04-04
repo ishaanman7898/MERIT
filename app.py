@@ -1656,6 +1656,9 @@ so your data survives app reboots, and powers the **API Endpoints** page so your
 
 ---
 
+**Step GIF Placeholder**
+
+
 #### 1. Sign up for Supabase
 Go to [supabase.com](https://supabase.com) and click **Sign Up**. Use your email address.
 
@@ -1713,7 +1716,10 @@ MERIT supports two **free** image hosting services — pick one:
 
 ---
 
-#### Option A — Freeimage.host (recommended)
+**Step GIF Placeholder**
+
+
+#### Option A ── Freeimage.host (recommended)
 1. Go to [freeimage.host](https://freeimage.host) → click **API** (top menu) → sign up or log in
 2. After logging in, go back to the **API** page and copy your **API key**
 3. In MERIT → **Settings → Image Hosting**, paste the key into **Freeimage.host API Key**
@@ -1744,6 +1750,9 @@ Once a key is saved, the Step 2 indicator above turns green.
 MERIT sends order emails via your **VEI Google (Gmail) account**. To do this safely,
 Google requires you to generate a special **App Password** instead of using your normal password.
 
+**Step GIF Placeholder**
+
+
 #### How to set up:
 1. Go to [myaccount.google.com](https://myaccount.google.com) and sign in
 2. Click **Security** in the left sidebar
@@ -1763,6 +1772,9 @@ Fields auto-save as you type. Once both fields are filled, the Step 3 indicator 
         st.markdown("""
 Sender Identity controls **who the email appears to come from** in the recipient's inbox.
 This is separate from the Gmail credentials — it's the display name and subject line your customers see.
+
+**Step GIF Placeholder**
+
 
 #### How to set up:
 1. In MERIT → **Settings → Email**, scroll to the **Sender Identity** section and fill in:
@@ -1785,6 +1797,9 @@ Streamlit Cloud restarts your app container periodically. When it does, any file
 
 **The fix:** Streamlit has a built-in **Secrets** store that persists across reboots. You paste
 your credentials there once, and MERIT reads from it automatically on every startup.
+
+**Step GIF Placeholder**
+
 
 #### How to save your secrets:
 1. Go to **Settings → Secrets TOML** in MERIT and copy the generated TOML block
