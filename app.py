@@ -1,6 +1,6 @@
 """
 MERIT — Mass Email & Inventory Tool for Virtual Enterprise (VEI) firms
-Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase / Neon database
+Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase database
 """
 
 import base64
@@ -230,7 +230,6 @@ END $$;
 _SECRETS_CREDENTIAL_KEYS = [
     "supabase_connection_string",
     "supabase_db_password",
-    "neon_connection_string",
     "smtp_email",
     "smtp_password",
     "from_name",
@@ -371,41 +370,42 @@ def upload_image(image_bytes: bytes, cfg: dict, name: str = "product") -> str:
 def _psycopg2_connect(conn_str: str, connect_timeout: int = 10):
     """Connect via psycopg2, falling back to IPv4 if IPv6 fails.
 
-    Some networks (and Streamlit Cloud) can't route IPv6 even when DNS returns
-    an AAAA record. We detect the 'Cannot assign requested address' error and
-    retry after resolving the host to an IPv4 address using the libpq `hostaddr`
-    parameter (which bypasses further DNS lookup).
+    Streamlit Cloud (and many school networks) cannot route IPv6 even when DNS
+    returns an AAAA record first. We detect the error and retry by resolving the
+    host to its IPv4 address, then reconnecting using libpq keyword=value format
+    so that both `host` (for SSL verification) and `hostaddr` (the actual IP to
+    dial) are set correctly. Appending hostaddr as a URL query parameter does NOT
+    work reliably — psycopg2 only honours it in the keyword=value DSN form.
     """
     import psycopg2  # type: ignore
 
-    def _try(s: str):
-        return psycopg2.connect(s, connect_timeout=connect_timeout)
-
     try:
-        return _try(conn_str)
+        return psycopg2.connect(conn_str, connect_timeout=connect_timeout)
     except Exception as _e:
         _msg = str(_e)
-        if "assign requested address" in _msg or "Network is unreachable" in _msg:
-            try:
-                import socket
-                from urllib.parse import urlparse
-                _host = urlparse(conn_str).hostname or ""
-                _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
-                _sep = "&" if "?" in conn_str else "?"
-                return _try(conn_str + _sep + f"hostaddr={_ipv4}")
-            except Exception:
-                pass
+        if "assign requested address" not in _msg and "Network is unreachable" not in _msg:
+            raise
+        # IPv6 unreachable — resolve to IPv4 and reconnect via keyword DSN
+        try:
+            import socket
+            from urllib.parse import urlparse
+            _p    = urlparse(conn_str)
+            _host = _p.hostname or ""
+            _ipv4 = socket.getaddrinfo(_host, None, socket.AF_INET)[0][4][0]
+            _dsn  = (
+                f"host={_host} "
+                f"hostaddr={_ipv4} "
+                f"port={_p.port or 5432} "
+                f"dbname={(_p.path or '/postgres').lstrip('/')} "
+                f"user={_p.username or 'postgres'} "
+                f"password={_p.password or ''} "
+                f"sslmode=require"
+            )
+            return psycopg2.connect(_dsn, connect_timeout=connect_timeout)
+        except Exception:
+            pass
         raise
 
-
-def _get_db_conn(cfg: dict):
-    """Return a psycopg2 connection to Neon, or None."""
-    try:
-        if cfg.get("neon_connection_string"):
-            return _psycopg2_connect(cfg["neon_connection_string"])
-    except Exception:
-        pass
-    return None
 
 
 def _get_effective_supabase_conn_str(cfg: dict) -> str:
@@ -447,7 +447,7 @@ def _get_supabase_project_url(cfg: dict) -> str:
 
 
 def _has_any_db(cfg: dict) -> bool:
-    return True  # SQLite is always available; Neon/Supabase are optional extras
+    return True  # SQLite is always available; Supabase is optional
 
 
 def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
@@ -491,24 +491,6 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         results.append("SQLite")
     except Exception as exc:
         results.append(f"SQLite failed: {exc}")
-
-    # ── Neon (psycopg2) ────────────────────────────────────────────
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg is not None:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT(sku) DO UPDATE SET
-                            item_name=EXCLUDED.item_name, category=EXCLUDED.category,
-                            price=EXCLUDED.price, image_url=EXCLUDED.image_url
-                    """, (row["sku"],row["item_name"],row["category"],row["price"],row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
-            conn_pg.close()
-            results.append("Neon")
-        except Exception as exc:
-            results.append(f"Neon failed: {exc}")
 
     # ── Supabase (psycopg2 direct connection) ───────────────────────
     conn_sb = _get_supabase_conn(cfg)
@@ -569,16 +551,6 @@ def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, s
         results.append("SQLite")
     except Exception as exc: results.append(f"SQLite failed: {exc}")
 
-    # Neon
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg is not None:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    cur.execute("UPDATE inventory SET original_stock=%s WHERE sku=%s", (stock, sku))
-            results.append("Neon")
-        except Exception as exc: results.append(f"Neon failed: {exc}")
-
     # Supabase
     conn_sb = _get_supabase_conn(cfg)
     if conn_sb is not None:
@@ -619,27 +591,6 @@ def adjust_inventory_sqlite(sku: str, delta: int, note: str = "") -> tuple[bool,
     except Exception as exc:
         return False, str(exc)
 
-def adjust_inventory_neon(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
-    conn = _get_db_conn(cfg)
-    if conn is None:
-        return False, "Neon not configured"
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT stock_left FROM inventory WHERE sku=%s", (sku,))
-                row = cur.fetchone()
-                if row is None:
-                    return False, "SKU not found in Neon"
-                new_stock = row[0] + delta
-                status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
-                cur.execute("UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s", (new_stock, status, sku))
-                if delta > 0:
-                    cur.execute("UPDATE inventory SET original_stock = original_stock + %s WHERE sku=%s", (delta, sku))
-        conn.close()
-        return True, f"Neon stock → {new_stock}"
-    except Exception as exc:
-        return False, str(exc)
-
 def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
     conn = _get_supabase_conn(cfg)
     if conn is None:
@@ -663,7 +614,7 @@ def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, st
 
 
 def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
-    """Delete a product from ALL configured databases (SQLite, Neon, Supabase)."""
+    """Delete a product from ALL configured databases (SQLite, Supabase)."""
     results = []
 
     # ── SQLite (always) ──────────────────────────────────────────────
@@ -676,22 +627,6 @@ def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
         results.append("SQLite")
     except Exception as exc:
         results.append(f"SQLite failed: {exc}")
-
-    # ── Neon ─────────────────────────────────────────────────────────
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg is not None:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    cur.execute("DELETE FROM inventory WHERE sku=%s", (sku,))
-                    try:
-                        cur.execute("DELETE FROM products WHERE sku=%s", (sku,))
-                    except Exception:
-                        pass
-            conn_pg.close()
-            results.append("Neon")
-        except Exception as exc:
-            results.append(f"Neon failed: {exc}")
 
     # ── Supabase ─────────────────────────────────────────────────────
     conn_sb = _get_supabase_conn(cfg)
@@ -728,21 +663,6 @@ def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
     except Exception as exc:
         results.append(f"SQLite failed: {exc}")
 
-    # Neon
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg is not None:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    cur.execute(
-                        "UPDATE inventory SET stock_left=%s, status=%s WHERE sku=%s",
-                        (stock, status, sku),
-                    )
-            conn_pg.close()
-            results.append("Neon")
-        except Exception as exc:
-            results.append(f"Neon failed: {exc}")
-
     # Supabase
     conn_sb = _get_supabase_conn(cfg)
     if conn_sb is not None:
@@ -776,28 +696,6 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
 
     if not records:
         return 0, []
-
-    # ── Neon ──────────────────────────────────────────────────────────
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg is not None:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    for rec in records:
-                        cur.execute("""
-                            INSERT INTO inventory (sku, item_name, category, price, stock_left, status, image_url)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT(sku) DO UPDATE SET
-                                item_name=EXCLUDED.item_name, category=EXCLUDED.category,
-                                price=EXCLUDED.price, stock_left=EXCLUDED.stock_left,
-                                status=EXCLUDED.status, image_url=EXCLUDED.image_url
-                        """, (rec.get("sku"), rec.get("item_name"), rec.get("category"),
-                              rec.get("price"), rec.get("stock_left"), rec.get("status"),
-                              rec.get("image_url")))
-            conn_pg.close()
-            synced = len(records)
-        except Exception as exc:
-            errors.append(f"Neon sync failed: {exc}")
 
     # ── Supabase ──────────────────────────────────────────────────────
     conn_sb = _get_supabase_conn(cfg)
@@ -838,19 +736,6 @@ def _fetch_inventory_supabase(conn_str: str) -> list | None:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_inventory_neon(conn_str: str) -> list | None:
-    try:
-        conn = _psycopg2_connect(conn_str)
-        df = pd.read_sql("SELECT * FROM inventory ORDER BY item_name", conn)
-        conn.close()
-        if not df.empty:
-            return df.to_dict("records")
-    except Exception:
-        pass
-    return None
-
-
-@st.cache_data(ttl=30, show_spinner=False)
 def _fetch_inventory_sqlite_cached() -> list | None:
     df = load_inventory_from_sqlite()
     if not df.empty:
@@ -859,16 +744,10 @@ def _fetch_inventory_sqlite_cached() -> list | None:
 
 
 def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
-    """Load inventory preferring Supabase > Neon > SQLite (results cached 30 s)."""
+    """Load inventory preferring Supabase > SQLite (results cached 30 s)."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         rows = _fetch_inventory_supabase(_sb_cs)
-        if rows:
-            return pd.DataFrame(rows)
-
-    conn_str = cfg.get("neon_connection_string", "").strip()
-    if conn_str:
-        rows = _fetch_inventory_neon(conn_str)
         if rows:
             return pd.DataFrame(rows)
 
@@ -879,16 +758,10 @@ def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
 
 
 def load_products_for_catalog(cfg: dict) -> list[dict]:
-    """Load product list preferring Supabase > Neon > SQLite > config.json (cached 30 s)."""
+    """Load product list preferring Supabase > SQLite > config.json (cached 30 s)."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         rows = _fetch_inventory_supabase(_sb_cs)
-        if rows:
-            return rows
-
-    conn_str = cfg.get("neon_connection_string", "").strip()
-    if conn_str:
-        rows = _fetch_inventory_neon(conn_str)
         if rows:
             return rows
 
@@ -922,19 +795,6 @@ def save_outbound_log(log: dict, cfg: dict):
         conn.close()
     except Exception: pass
 
-    # Neon
-    conn_pg = _get_db_conn(cfg)
-    if conn_pg:
-        try:
-            with conn_pg:
-                with conn_pg.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO outbound_logs (recipient_name, recipient_email, order_number, products_list, subtotal, tax, shipping, total_cost)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (row["name"], row["email"], row["order"], row["prods"], row["sub"], row["tax"], row["ship"], row["cost"]))
-            conn_pg.close()
-        except Exception: pass
-
     # Supabase
     conn_sb = _get_supabase_conn(cfg)
     if conn_sb is not None:
@@ -952,21 +812,11 @@ def save_outbound_log(log: dict, cfg: dict):
 
 
 def load_outbound_logs(cfg: dict) -> pd.DataFrame:
-    """Load outbound logs from cloud (preferring Supabase > Neon) or local SQLite."""
+    """Load outbound logs from Supabase or local SQLite."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         try:
             conn = _psycopg2_connect(_sb_cs)
-            df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
-            conn.close()
-            df = df.rename(columns={"created_at": "timestamp"})
-            return df
-        except Exception: pass
-
-    conn_str = cfg.get("neon_connection_string", "").strip()
-    if conn_str:
-        try:
-            conn = _psycopg2_connect(conn_str)
             df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY created_at DESC LIMIT 500", conn)
             conn.close()
             df = df.rename(columns={"created_at": "timestamp"})
@@ -1028,7 +878,7 @@ here is exactly where they go:
 - MERIT does **not** transmit your API keys, passwords, or credentials to any third party
 - MERIT does **not** have a central server — there is no "MERIT cloud" that receives your data
 - MERIT does **not** log, collect, or share your email addresses, customer data, or order information
-- The only outgoing connections MERIT makes are: Gmail SMTP (to send emails you initiate), Supabase/Neon (your own database), and image hosting services (Freeimage.host or Imghippo, to upload product images)
+- The only outgoing connections MERIT makes are: Gmail SMTP (to send emails you initiate), Supabase (your own database), and image hosting services (Freeimage.host or Imghippo, to upload product images)
 
 ### In plain English
 
@@ -1794,7 +1644,7 @@ elif page == "Products":
             "No image hosting key set. Go to **Settings → Image Hosting** to add one. "
             "Free options: [freeimage.host](https://freeimage.host) or [imghippo.com](https://imghippo.com)."
         )
-    _has_cloud_db = _has_supabase(cfg) or cfg.get("neon_connection_string")
+    _has_cloud_db = _has_supabase(cfg)
     if not _has_cloud_db:
         st.warning(
             "⚠️ **Supabase not configured.** Products are only saved locally to `data.db` on this machine. "
@@ -1810,8 +1660,7 @@ elif page == "Products":
 
     # Compute sync targets for display in this page
     _p_has_sb = _has_supabase(cfg)
-    _p_has_neon = bool(cfg.get("neon_connection_string"))
-    _p_sync = ["SQLite"] + (["Neon"] if _p_has_neon else []) + (["Supabase"] if _p_has_sb else [])
+    _p_sync = ["SQLite"] + (["Supabase"] if _p_has_sb else [])
     _p_sync_str = " + ".join(_p_sync)
 
     tab_catalog, tab_add, tab_edit, tab_delete = st.tabs(
@@ -1823,7 +1672,7 @@ elif page == "Products":
         if not products:
             st.info("No products yet. Go to the **Add Products** tab to get started.")
         else:
-            if _p_has_sb or _p_has_neon:
+            if _p_has_sb:
                 st.caption(f"Syncing to: **{_p_sync_str}**")
             
             st.caption(f"Showing {len(products)} product{'s' if len(products) != 1 else ''}.")
@@ -2152,9 +2001,7 @@ elif page == "Inventory":
             st.info("No products found. Add products in the **Products** page first.")
         else:
             _has_sb_inv = _has_supabase(cfg)
-            _has_neon = bool(cfg.get("neon_connection_string"))
             _sync_targets = ["SQLite"]
-            if _has_neon:    _sync_targets.append("Neon")
             if _has_sb_inv:  _sync_targets.append("Supabase")
 
             st.caption(
@@ -2172,8 +2019,7 @@ elif page == "Inventory":
                         if _adelta == 0:
                             continue
                         adjust_inventory_sqlite(_asku, _adelta)
-                        if _has_neon:     adjust_inventory_neon(_asku, _adelta, cfg)
-                        if _has_supabase: adjust_inventory_supabase(_asku, _adelta, cfg)
+                        if _has_sb_inv: adjust_inventory_supabase(_asku, _adelta, cfg)
                         _adj_applied += 1
                     if _adj_applied:
                         st.toast("Stock updated successfully.", icon="✅")
@@ -2236,8 +2082,7 @@ elif page == "Inventory":
                                 ok, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
                                 if not ok:
                                     st.toast("Something went wrong. Please try again.", icon="❌")
-                                if _has_neon:     adjust_inventory_neon(_psku, int(_delta_val), cfg)
-                                if _has_supabase: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
+                                if _has_sb_inv: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
                                 st.toast(f"Stock updated: {_pname}", icon="✅")
                                 _clear_data_caches()
                                 time.sleep(0.5)
@@ -2356,7 +2201,6 @@ elif page == "Settings":
         "inp_imgbb_key":        "imghippo_api_key",
         "inp_sb_pass":          "supabase_db_password",
         "inp_sb_conn":          "supabase_connection_string",
-        "inp_neon":             "neon_connection_string",
     }
 
     # Initialise session state keys from cfg (once per session)
@@ -2567,213 +2411,110 @@ elif page == "Settings":
     st.divider()
     st.subheader("Database Connections")
     st.caption(
-        "Connect Supabase or Neon to persist products and inventory. "
+        "Connect Supabase to persist products and inventory. "
         "Click **Setup Tables** to create the schema automatically. "
-        "If a cloud database goes offline, all writes fall back to local SQLite automatically. "
-        "Use **Sync Local → Cloud** below to push your local data back up once the cloud is reachable again."
+        "If the cloud database goes offline, all writes fall back to local SQLite automatically."
     )
 
-    # ── Offline fallback + sync notice ──────────
     _cfg_now = st.session_state.cfg
-    _cloud_configured = bool(
-        _cfg_now.get("neon_connection_string") or _has_supabase(_cfg_now)
+    if _has_supabase(_cfg_now):
+        st.info(
+            "**Cloud database configured.** Writes go to both Supabase and local SQLite simultaneously. "
+            "If Supabase is temporarily unreachable, writes continue to local SQLite automatically."
+        )
+
+    st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
+    st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
+
+    inp_sb_conn = st.text_input(
+        "Connection String",
+        placeholder="postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres",
+        help="From Supabase Dashboard → Connect button (top right) → Direct connection tab. Leave [YOUR-PASSWORD] as-is.",
+        key="inp_sb_conn",
+        on_change=_auto_save_settings,
     )
-    if _cloud_configured:
-        _sync_col1, _sync_col2 = st.columns([3, 1])
-        with _sync_col1:
-            st.info(
-                "**Cloud database configured.** Writes go to both your cloud database and local SQLite simultaneously. "
-                "If your cloud database is temporarily unreachable, writes continue to local SQLite automatically. "
-                "Use **Sync Local → Cloud** to push any locally-saved data up to the cloud."
-            )
-        with _sync_col2:
-            st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
-            if st.button("Sync Local → Cloud", width="stretch", key="btn_sync_sqlite"):
-                with st.spinner("Syncing local SQLite data to cloud…"):
-                    _synced, _sync_errs = sync_sqlite_to_cloud(st.session_state.cfg)
-                if _sync_errs:
-                    st.warning(f"Synced {_synced} rows with issues: " + "; ".join(_sync_errs))
-                else:
-                    st.success(f"Synced {_synced} rows to cloud successfully.")
+    inp_sb_pass = st.text_input(
+        "Database Password",
+        type="password",
+        placeholder="Your Supabase database password",
+        help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
+        key="inp_sb_pass",
+        on_change=_auto_save_settings,
+    )
 
-    db_tab_sb, db_tab_neon = st.tabs(["Supabase", "Neon"])
+    # Show resolved connection status
+    _sb_conn_val = inp_sb_conn.strip()
+    _sb_pass_val = inp_sb_pass.strip()
+    _sb_effective = ""
+    if _sb_conn_val:
+        if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
+            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _sb_pass_val)
+        elif "[YOUR-PASSWORD]" not in _sb_conn_val:
+            _sb_effective = _sb_conn_val
 
-    with db_tab_sb:
-        st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
-        st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
+    if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
+        st.warning("Enter your **Database Password** above to complete the connection string.")
+    elif _sb_effective:
+        st.caption("Connection string is ready. Click **Test Connection** to verify.")
 
-        inp_sb_conn = st.text_input(
-            "Connection String",
-            placeholder="postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxxxxxxxx.supabase.co:5432/postgres",
-            help="From Supabase Dashboard → Connect button (top right) → Direct connection tab. Leave [YOUR-PASSWORD] as-is.",
-            key="inp_sb_conn",
-            on_change=_auto_save_settings,
-        )
-        inp_sb_pass = st.text_input(
-            "Database Password",
-            type="password",
-            placeholder="Your Supabase database password",
-            help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
-            key="inp_sb_pass",
-            on_change=_auto_save_settings,
-        )
-
-        # Show resolved connection status
-        _sb_conn_val = inp_sb_conn.strip()
-        _sb_pass_val = inp_sb_pass.strip()
-        _sb_effective = ""
-        if _sb_conn_val:
-            if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
-                _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _sb_pass_val)
-            elif "[YOUR-PASSWORD]" not in _sb_conn_val:
-                _sb_effective = _sb_conn_val
-
-        if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
-            st.warning("Enter your **Database Password** above to complete the connection string.")
-        elif _sb_effective:
-            st.caption("Connection string is ready. Click **Test Connection** to verify.")
-
-        col_sb_test, col_sb_setup = st.columns(2)
-        with col_sb_test:
-            if st.button(
-                "Test Connection",
-                width="stretch",
-                key="btn_test_sb",
-                disabled=not _sb_effective,
-            ):
-                with st.spinner("Connecting to Supabase..."):
-                    try:
-                        _conn = _psycopg2_connect(_sb_effective)
-                        _conn.close()
-                        st.toast("Supabase connection success!", icon="☁️")
-                        st.success("Connected to Supabase successfully.")
-                    except Exception as exc:
-                        st.error(f"Connection failed: {exc}")
-
-        with col_sb_setup:
-            if st.button(
-                "Setup Tables",
-                type="primary",
-                width="stretch",
-                key="btn_setup_sb",
-                disabled=not _sb_effective,
-            ):
-                with st.spinner("Creating tables in Supabase..."):
-                    try:
-                        _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
-                        _cur = _conn.cursor()
-                        _statements = [
-                            s.strip() for s in SETUP_SQL.split(";")
-                            if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
-                        ]
-                        _ok, _fail = 0, []
-                        for _stmt in _statements:
-                            try:
-                                _cur.execute(_stmt)
-                                _ok += 1
-                            except Exception as _se:
-                                _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
-                        _conn.commit()
-                        _cur.close()
-                        _conn.close()
-                        if not _fail:
-                            st.toast("Supabase tables ready!", icon="📦")
-                            st.success("Tables created successfully. You can now use the API Endpoints page.")
-                        else:
-                            st.warning(f"{_ok} OK, {len(_fail)} failed:")
-                            for _f in _fail:
-                                st.caption(_f)
-                    except Exception as exc:
-                        st.error(f"Setup failed: {exc}")
-
-    with db_tab_neon:
-        with st.expander("Where do I find the Neon connection string?", expanded=False):
-            st.markdown("""
-1. Open your **Neon Console** and select your project.
-2. Click **Dashboard** in the left sidebar.
-3. Click the **Connect** button in your dashboard, then press **Copy** next to the connection string and paste it in the field below — you're done!
-4. Under **Connection string**, make sure the dropdown says **psql** or **postgresql**.
-5. Copy the string — it looks like:
-   `postgresql://neondb_owner:[password]@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require`
-
-**Common mistake:** Do NOT paste the REST API URL (`https://ep-…apirest…`).
-That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection string.
-            """)
-
-        inp_neon = st.text_input(
-            "PostgreSQL Connection String",
-            type="password",
-            placeholder="postgresql://neondb_owner:[password]@ep-xxxx.us-east-2.aws.neon.tech/neondb?sslmode=require",
-            help="Neon Console → Dashboard → Connection string (must start with postgresql:// or postgres://)",
-            key="inp_neon",
-            on_change=_auto_save_settings,
-        )
-
-        # Warn immediately if they pasted the REST URL instead
-        _neon_val = inp_neon.strip()
-        if _neon_val.startswith("https://") or _neon_val.startswith("http://"):
-            st.error(
-                "That looks like the **REST API URL**, not the PostgreSQL connection string. "
-                "Expand the guide above to find the correct `postgresql://` string."
-            )
-
-        _neon_is_valid_dsn = bool(
-            _neon_val and (
-                _neon_val.startswith("postgresql://") or _neon_val.startswith("postgres://")
-            )
-        )
-
-        with st.expander("SQL that will be executed (editable)", expanded=False):
-            neon_sql = st.text_area(
-                "Schema SQL",
-                value=SETUP_SQL,
-                height=320,
-                key="neon_sql_editor",
-                help="Edit this SQL to add your own tables, indexes, or constraints before running.",
-                label_visibility="collapsed",
-            )
-        st.caption("You can add your own CREATE TABLE statements before clicking Setup.")
-
-        col_neon_test, col_neon_setup = st.columns(2)
-        with col_neon_test:
-            if st.button(
-                "Test Connection",
-                width="stretch",
-                key="btn_test_neon",
-                disabled=not _neon_is_valid_dsn,
-            ):
+    col_sb_test, col_sb_setup = st.columns(2)
+    with col_sb_test:
+        if st.button(
+            "Test Connection",
+            width="stretch",
+            key="btn_test_sb",
+            disabled=not _sb_effective,
+        ):
+            with st.spinner("Connecting to Supabase..."):
                 try:
-                    with _psycopg2_connect(_neon_val) as conn:
-                        pass
-                    st.success("Connected to Neon successfully.")
+                    _conn = _psycopg2_connect(_sb_effective)
+                    _conn.close()
+                    st.toast("Supabase connection success!", icon="☁️")
+                    st.success("Connected to Supabase successfully.")
                 except Exception as exc:
                     st.error(f"Connection failed: {exc}")
 
-        with col_neon_setup:
-            if st.button(
-                "Setup Tables",
-                type="primary",
-                width="stretch",
-                key="btn_setup_neon",
-                disabled=not _neon_is_valid_dsn,
-            ):
-                with st.spinner("Setting up Neon tables..."):
-                    try:
-                        _run_sql = st.session_state.get("neon_sql_editor", SETUP_SQL)
-                        with _psycopg2_connect(_neon_val) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute(_run_sql)
-                            conn.commit()
-                        st.toast("Neon tables ready!", icon="📦")
-                        st.success("Tables created successfully (or already exist).")
-                    except Exception as exc:
-                        st.error(f"Setup failed: {exc}")
+    with col_sb_setup:
+        if st.button(
+            "Setup Tables",
+            type="primary",
+            width="stretch",
+            key="btn_setup_sb",
+            disabled=not _sb_effective,
+        ):
+            with st.spinner("Creating tables in Supabase..."):
+                try:
+                    _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
+                    _cur = _conn.cursor()
+                    _statements = [
+                        s.strip() for s in SETUP_SQL.split(";")
+                        if s.strip() and not all(l.startswith("--") for l in s.strip().splitlines() if l.strip())
+                    ]
+                    _ok, _fail = 0, []
+                    for _stmt in _statements:
+                        try:
+                            _cur.execute(_stmt)
+                            _ok += 1
+                        except Exception as _se:
+                            _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                    _conn.commit()
+                    _cur.close()
+                    _conn.close()
+                    if not _fail:
+                        st.toast("Supabase tables ready!", icon="📦")
+                        st.success("Tables created successfully. You can now use the API Endpoints page.")
+                    else:
+                        st.warning(f"{_ok} OK, {len(_fail)} failed:")
+                        for _f in _fail:
+                            st.caption(_f)
+                except Exception as exc:
+                    st.error(f"Setup failed: {exc}")
 
-    # ── Save Settings (force-save + cloud sync) ──
+    # ── Save Settings ──
     st.divider()
-    st.caption("All fields above are auto-saved as you type. Use this button to force-save and sync products to the cloud.")
+    st.caption("All fields above are auto-saved as you type. Use this button to force-save.")
 
-    if st.button("Save & Sync to Cloud", type="primary", width="stretch"):
+    if st.button("Save Settings", type="primary", width="stretch"):
         # Save config first
         new_cfg = {
             "from_name":                inp_from_name.strip(),
@@ -2784,25 +2525,13 @@ That is Neon's HTTP API — psycopg2 requires the `postgresql://` connection str
             "imghippo_api_key":         inp_imgbb_key.strip(),
             "supabase_connection_string": inp_sb_conn.strip(),
             "supabase_db_password":     inp_sb_pass.strip(),
-            "neon_connection_string":   inp_neon.strip(),
             "email_html_template":      cfg.get("email_html_template", ""),
             "products":                 cfg.get("products", []),
         }
         save_config(new_cfg)
         st.session_state.cfg = new_cfg
 
-        # Auto-sync products to cloud if setup
-        _synced = 0
-        if _has_supabase(new_cfg) or new_cfg.get("neon_connection_string"):
-            with st.spinner("Auto-syncing products to cloud..."):
-                _local_prods = load_products_for_catalog(new_cfg)
-                for p in _local_prods:
-                    _ok, _ = save_product_to_db(p, new_cfg)
-                    if _ok: _synced += 1
-        
-        if _synced:
-            st.toast(f"Synced {_synced} products to cloud.", icon="🌥️")
-        st.success("Settings saved and synced!")
+        st.success("Settings saved!")
         time.sleep(0.5)
         st.rerun()
 
@@ -4242,7 +3971,6 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
 
             # ── Deduct inventory for every successfully sent order ──────
             _has_sb_send  = _has_supabase(cfg)
-            _has_neon_send = bool(cfg.get("neon_connection_string","").strip())
             _deductions: dict[str, int] = {}
             for _si, _sorder in enumerate(queue):
                 if results[_si]["Status"] == "Sent":
@@ -4254,7 +3982,6 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             if _deductions:
                 for _dsku, _dqty in _deductions.items():
                     adjust_inventory_sqlite(_dsku, -_dqty)
-                    if _has_neon_send:  adjust_inventory_neon(_dsku, -_dqty, cfg)
                     if _has_sb_send:    adjust_inventory_supabase(_dsku, -_dqty, cfg)
                 _clear_data_caches()
 
