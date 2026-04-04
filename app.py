@@ -2436,13 +2436,239 @@ elif page == "Settings":
 
     # ── VEI account note ─────────────────────────
     st.info(
-        "**VEI Firms:** You must use your VEI account for all settings below. "
+        "**VEI Firms:** Use your VEI account for all settings below. "
         "Your firm coordinator may have already set up a shared Gmail account and firm name — ask them for the details. "
         "All other keys (image hosting, database) are personal free accounts you create yourself."
     )
 
-    # ── Sender Identity ─────────────────────────
-    st.subheader("Sender Identity")
+    # ── Auto-test helpers (pending-flag pattern) ─────────────────────
+    # on_change callbacks set a flag; the flag is consumed on the NEXT render to run the test.
+
+    def _on_sb_change():
+        _auto_save_settings()
+        st.session_state.pop("_sb_test_result", None)
+        st.session_state["_sb_test_pending"] = True
+
+    def _on_smtp_change():
+        _auto_save_settings()
+        st.session_state.pop("_smtp_test_result", None)
+        st.session_state["_smtp_test_pending"] = True
+
+    def _on_fi_change():
+        _auto_save_settings()
+        st.session_state.pop("_fi_test_result", None)
+        st.session_state["_fi_test_pending"] = True
+
+    def _on_ih_change():
+        _auto_save_settings()
+        st.session_state.pop("_ih_test_result", None)
+        st.session_state["_ih_test_pending"] = True
+
+    # ── Step 1: Database (Supabase) ──────────────────────────────────
+    st.subheader("Step 1 — Database Connection (Supabase)")
+    st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
+
+    inp_sb_conn = st.text_input(
+        "Connection String",
+        placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        help="Supabase Dashboard → Connect → Session Pooler tab → Connection string. Leave [YOUR-PASSWORD] as-is — enter the password separately below.",
+        key="inp_sb_conn",
+        on_change=_on_sb_change,
+    )
+    inp_sb_pass = st.text_input(
+        "Database Password",
+        type="password",
+        placeholder="Your Supabase database password",
+        help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
+        key="inp_sb_pass",
+        on_change=_on_sb_change,
+    )
+
+    # Build effective connection string
+    _sb_conn_val = inp_sb_conn.strip()
+    _sb_pass_val = inp_sb_pass.strip()
+    _sb_effective = ""
+    if _sb_conn_val:
+        if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
+            from urllib.parse import quote as _url_quote_sb
+            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _url_quote_sb(_sb_pass_val, safe=""))
+        elif "[YOUR-PASSWORD]" not in _sb_conn_val:
+            _sb_effective = _sb_conn_val
+
+    if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
+        st.warning("Enter your **Database Password** above to complete the connection string.")
+
+    # Auto-test on field change
+    if st.session_state.pop("_sb_test_pending", False) and _sb_effective:
+        with st.spinner("Testing Supabase connection..."):
+            try:
+                _tc = _psycopg2_connect(_sb_effective)
+                _tc.close()
+                st.session_state["_sb_test_result"] = ("ok", "Connected to Supabase successfully.")
+            except Exception as _tce:
+                st.session_state["_sb_test_result"] = ("err", str(_tce))
+
+    if "_sb_test_result" in st.session_state:
+        _sbr = st.session_state["_sb_test_result"]
+        if _sbr[0] == "ok":
+            st.success(_sbr[1])
+        else:
+            st.error(f"Connection failed: {_sbr[1]}")
+
+    if st.button("Setup Tables", type="primary", width="stretch", key="btn_setup_sb", disabled=not _sb_effective):
+        with st.spinner("Creating tables in Supabase..."):
+            try:
+                _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
+                _cur = _conn.cursor()
+                _statements = _split_sql_statements(SETUP_SQL)
+                _ok, _fail = 0, []
+                for _stmt in _statements:
+                    try:
+                        _cur.execute(_stmt)
+                        _ok += 1
+                    except Exception as _se:
+                        _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                _conn.commit()
+                _cur.close()
+                _conn.close()
+                if not _fail:
+                    st.toast("Supabase tables ready!", icon="📦")
+                    st.success(
+                        "Tables created successfully. You can now use the API Endpoints page. "
+                        "Go back to **Get Started** and finish the remaining steps."
+                    )
+                else:
+                    st.warning(f"{_ok} OK, {len(_fail)} failed:")
+                    for _f in _fail:
+                        st.caption(_f)
+            except Exception as exc:
+                st.error(f"Setup failed: {exc}")
+
+    # ── Step 2: Image Hosting ────────────────────────────────────────
+    st.divider()
+    st.subheader("Step 2 — Image Hosting")
+    st.caption("Choose one free service. Product images are uploaded automatically when you add a product.")
+
+    _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
+
+    with _img_tab_fi:
+        inp_freeimage_key = st.text_input(
+            "Freeimage.host API Key",
+            type="password",
+            placeholder="your_api_key_here",
+            help="freeimage.host → Menu → API → copy your key",
+            key="inp_freeimage_key",
+            on_change=_on_fi_change,
+        )
+        # Auto-test on key change
+        if st.session_state.pop("_fi_test_pending", False) and inp_freeimage_key.strip():
+            with st.spinner("Testing Freeimage.host API key..."):
+                try:
+                    import requests as _rq
+                    import base64 as _b64
+                    _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                    _fi_resp = _rq.post(
+                        "https://freeimage.host/api/1/upload",
+                        data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
+                        files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
+                        timeout=20,
+                    )
+                    _fi_body = _fi_resp.json() if _fi_resp.content else {}
+                    if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
+                        st.session_state["_fi_test_result"] = ("ok", "Freeimage.host key works!")
+                    else:
+                        st.session_state["_fi_test_result"] = ("err", _fi_body.get("status_txt", _fi_resp.text[:150]))
+                except Exception as _fie:
+                    st.session_state["_fi_test_result"] = ("err", str(_fie))
+        if "_fi_test_result" in st.session_state:
+            _fir = st.session_state["_fi_test_result"]
+            st.success(_fir[1]) if _fir[0] == "ok" else st.error(f"Test failed: {_fir[1]}")
+
+    with _img_tab_ih:
+        inp_imgbb_key = st.text_input(
+            "Imghippo API Key",
+            type="password",
+            placeholder="your_imghippo_api_key",
+            help="imghippo.com → Settings → API Keys → Generate",
+            key="inp_imgbb_key",
+            on_change=_on_ih_change,
+        )
+        # Auto-test on key change
+        if st.session_state.pop("_ih_test_pending", False) and inp_imgbb_key.strip():
+            with st.spinner("Testing Imghippo API key..."):
+                try:
+                    import requests as _rq
+                    import base64 as _b64
+                    _ih_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                    _ih_resp = _rq.post(
+                        "https://api.imghippo.com/v1/upload",
+                        data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
+                        files={"file": ("test.jpg", io.BytesIO(_ih_raw), "image/jpeg")},
+                        timeout=20,
+                    )
+                    _ih_body = _ih_resp.json() if _ih_resp.content else {}
+                    if _ih_resp.status_code == 200 and _ih_body.get("success"):
+                        st.session_state["_ih_test_result"] = ("ok", "Imghippo key works!")
+                    elif _ih_resp.status_code == 401:
+                        st.session_state["_ih_test_result"] = ("err", "Invalid API key — check for typos.")
+                    elif _ih_resp.status_code == 429:
+                        st.session_state["_ih_test_result"] = ("warn", "Rate limited — wait a minute and try again.")
+                    else:
+                        st.session_state["_ih_test_result"] = ("err", f"Error {_ih_resp.status_code}: {_ih_body.get('message', _ih_resp.text[:150])}")
+                except Exception as _ihe:
+                    st.session_state["_ih_test_result"] = ("err", str(_ihe))
+        if "_ih_test_result" in st.session_state:
+            _ihr = st.session_state["_ih_test_result"]
+            if _ihr[0] == "ok":
+                st.success(_ihr[1])
+            elif _ihr[0] == "warn":
+                st.warning(_ihr[1])
+            else:
+                st.error(f"Test failed: {_ihr[1]}")
+
+    # ── Step 3: Gmail SMTP ───────────────────────────────────────────
+    st.divider()
+    st.subheader("Step 3 — Gmail SMTP")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        inp_smtp_email = st.text_input(
+            "Gmail Address",
+            placeholder="yourname@gmail.com",
+            help="The Gmail account emails will be sent from",
+            key="_cfg_smtp_email",
+            on_change=_on_smtp_change,
+        )
+    with col4:
+        inp_smtp_pass = st.text_input(
+            "App Password",
+            type="password",
+            placeholder="xxxx xxxx xxxx xxxx",
+            help="The 16-character app password from your Google account",
+            key="_cfg_smtp_pass",
+            on_change=_on_smtp_change,
+        )
+
+    # Auto-test on field change (runs when both fields are filled)
+    if st.session_state.pop("_smtp_test_pending", False) and inp_smtp_email.strip() and inp_smtp_pass.strip():
+        with st.spinner("Testing Gmail SMTP connection..."):
+            try:
+                _srv = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+                _srv.starttls()
+                _srv.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
+                _srv.quit()
+                st.session_state["_smtp_test_result"] = ("ok", "SMTP connection successful.")
+            except Exception as _smtpe:
+                st.session_state["_smtp_test_result"] = ("err", str(_smtpe))
+
+    if "_smtp_test_result" in st.session_state:
+        _smr = st.session_state["_smtp_test_result"]
+        st.success(_smr[1]) if _smr[0] == "ok" else st.error(f"Connection failed: {_smr[1]}")
+
+    # ── Step 4: Sender Identity ──────────────────────────────────────
+    st.divider()
+    st.subheader("Step 4 — Sender Identity")
+
     col1, col2 = st.columns(2)
     with col1:
         inp_from_name = st.text_input(
@@ -2461,231 +2687,16 @@ elif page == "Settings":
             on_change=_auto_save_settings,
         )
 
-    # ── Gmail SMTP ──────────────────────────────
+    # ── Step 5: Secrets TOML ─────────────────────────────────────────
     st.divider()
-    st.subheader("Gmail SMTP")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        inp_smtp_email = st.text_input(
-            "Gmail Address",
-            placeholder="yourname@gmail.com",
-            help="The Gmail account emails will be sent from",
-            key="_cfg_smtp_email",
-            on_change=_auto_save_settings,
-        )
-    with col4:
-        inp_smtp_pass = st.text_input(
-            "App Password",
-            type="password",
-            placeholder="xxxx xxxx xxxx xxxx",
-            help="The 16-character app password from your Google account",
-            key="_cfg_smtp_pass",
-            on_change=_auto_save_settings,
-        )
-
-    st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
-    can_test = bool(inp_smtp_email.strip() and inp_smtp_pass.strip())
-    if st.button("Test SMTP Connection", width="stretch", disabled=not can_test):
-        with st.spinner("Testing connection to Gmail SMTP..."):
-            try:
-                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-                server.starttls()
-                server.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
-                server.quit()
-                st.toast("SMTP connection success!", icon="📧")
-                st.success("SMTP connection successful.")
-            except Exception as exc:
-                st.error(f"Connection failed: {exc}")
-
-    # ── Image Hosting ─────────────────────────────
-    st.divider()
-    st.subheader("Image Hosting")
-    st.caption("Choose one free image hosting service. Product images are uploaded automatically.")
-
-    _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
-
-    with _img_tab_fi:
-        _fi_l, _fi_r = st.columns([3, 1])
-        with _fi_l:
-            inp_freeimage_key = st.text_input(
-                "Freeimage.host API Key",
-                type="password",
-                placeholder="your_api_key_here",
-                help="freeimage.host → Menu → API → copy your key",
-                key="inp_freeimage_key",
-                on_change=_auto_save_settings,
-            )
-        with _fi_r:
-            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-            if st.button("Test Key", width="stretch", key="btn_test_fi", disabled=not inp_freeimage_key):
-                with st.spinner("Testing Freeimage.host API..."):
-                    try:
-                        import requests  # type: ignore
-                        _test_path = Path(__file__).parent / "TESTPRODUCT.png"
-                        if _test_path.exists():
-                            _fi_raw = _test_path.read_bytes()
-                        else:
-                            import base64 as _b64
-                            _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                        _fi_resp = requests.post(
-                            "https://freeimage.host/api/1/upload",
-                            data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
-                            files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
-                            timeout=20,
-                        )
-                        _fi_body = _fi_resp.json() if _fi_resp.content else {}
-                        if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
-                            st.toast("Freeimage.host key verified!", icon="🖼️")
-                            st.success("Freeimage.host key works!")
-                        else:
-                            st.error(f"Error: {_fi_body.get('status_txt', _fi_resp.text[:150])}")
-                    except Exception as exc:
-                        st.error(f"Test failed: {exc}")
-
-    with _img_tab_ih:
-        _ib_l, _ib_r = st.columns([3, 1])
-        with _ib_l:
-            inp_imgbb_key = st.text_input(
-                "Imghippo API Key",
-                type="password",
-                placeholder="your_imghippo_api_key",
-                help="imghippo.com → Settings → API Keys → Generate",
-                key="inp_imgbb_key",
-                on_change=_auto_save_settings,
-            )
-        with _ib_r:
-            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
-            if st.button("Test Key", width="stretch", key="btn_test_imgbb", disabled=not inp_imgbb_key):
-                with st.spinner("Testing Imghippo API..."):
-                    try:
-                        import requests  # type: ignore
-                        _test_path = Path(__file__).parent / "TESTPRODUCT.png"
-                        if _test_path.exists():
-                            _raw = _test_path.read_bytes()
-                        else:
-                            import base64 as _b64
-                            _raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                        _resp = requests.post(
-                            "https://api.imghippo.com/v1/upload",
-                            data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
-                            files={"file": ("test.jpg", io.BytesIO(_raw), "image/jpeg")},
-                            timeout=20,
-                        )
-                        _body = _resp.json() if _resp.content else {}
-                        if _resp.status_code == 200 and _body.get("success"):
-                            st.toast("Imghippo key verified!", icon="🖼️")
-                            st.success("Imghippo key works!")
-                        elif _resp.status_code == 401:
-                            st.error("Invalid API key — check for typos.")
-                        elif _resp.status_code == 429:
-                            st.warning("Rate limited — wait a minute and try again.")
-                        else:
-                            st.error(f"Error {_resp.status_code}: {_body.get('message', _resp.text[:150])}")
-                    except Exception as exc:
-                        st.error(f"Test failed: {exc}")
-
-    # ── Database Connections ────────────────────
-    st.divider()
-    st.subheader("Database Connections")
-    st.caption(
-        "Connect Supabase to persist products and inventory. "
-        "Click **Setup Tables** to create the schema automatically. "
-        "If the cloud database goes offline, all writes fall back to local SQLite automatically."
+    st.subheader("Step 5 — Secrets TOML (Last Step of Get Started)")
+    st.warning(
+        "**Complete Steps 1–4 above before doing this.** "
+        "This step saves all your credentials into Streamlit's secrets store so they survive app reboots."
     )
-
-    _cfg_now = st.session_state.cfg
-    st.markdown("#### Connect Supabase (required for API Endpoints & cloud sync)")
-    st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
-
-    inp_sb_conn = st.text_input(
-        "Connection String",
-        placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
-        help="Supabase Dashboard → Connect → Session Pooler tab → Connection string. Leave [YOUR-PASSWORD] as-is — enter the password separately below.",
-        key="inp_sb_conn",
-        on_change=_auto_save_settings,
-    )
-    inp_sb_pass = st.text_input(
-        "Database Password",
-        type="password",
-        placeholder="Your Supabase database password",
-        help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
-        key="inp_sb_pass",
-        on_change=_auto_save_settings,
-    )
-
-    # Show resolved connection status
-    _sb_conn_val = inp_sb_conn.strip()
-    _sb_pass_val = inp_sb_pass.strip()
-    _sb_effective = ""
-    if _sb_conn_val:
-        if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
-            from urllib.parse import quote as _url_quote_sb
-            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _url_quote_sb(_sb_pass_val, safe=""))
-        elif "[YOUR-PASSWORD]" not in _sb_conn_val:
-            _sb_effective = _sb_conn_val
-
-    if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
-        st.warning("Enter your **Database Password** above to complete the connection string.")
-    elif _sb_effective:
-        st.caption("Connection string is ready. Click **Test Connection** to verify.")
-
-    col_sb_test, col_sb_setup = st.columns(2)
-    with col_sb_test:
-        if st.button(
-            "Test Connection",
-            width="stretch",
-            key="btn_test_sb",
-            disabled=not _sb_effective,
-        ):
-            with st.spinner("Connecting to Supabase..."):
-                try:
-                    _conn = _psycopg2_connect(_sb_effective)
-                    _conn.close()
-                    st.toast("Supabase connection success!", icon="☁️")
-                    st.success("Connected to Supabase successfully.")
-                except Exception as exc:
-                    st.error(f"Connection failed: {exc}")
-
-    with col_sb_setup:
-        if st.button(
-            "Setup Tables",
-            type="primary",
-            width="stretch",
-            key="btn_setup_sb",
-            disabled=not _sb_effective,
-        ):
-            with st.spinner("Creating tables in Supabase..."):
-                try:
-                    _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
-                    _cur = _conn.cursor()
-                    _statements = _split_sql_statements(SETUP_SQL)
-                    _ok, _fail = 0, []
-                    for _stmt in _statements:
-                        try:
-                            _cur.execute(_stmt)
-                            _ok += 1
-                        except Exception as _se:
-                            _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
-                    _conn.commit()
-                    _cur.close()
-                    _conn.close()
-                    if not _fail:
-                        st.toast("Supabase tables ready!", icon="📦")
-                        st.success("Tables created successfully. You can now use the API Endpoints page.")
-                    else:
-                        st.warning(f"{_ok} OK, {len(_fail)} failed:")
-                        for _f in _fail:
-                            st.caption(_f)
-                except Exception as exc:
-                    st.error(f"Setup failed: {exc}")
-
-    # ── Secrets TOML ─────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Secrets TOML — Prevent Settings Loss on Reboot")
     st.markdown("""
 Streamlit Cloud wipes the local filesystem on every reboot, so `config.json` disappears.
-**Fix this in one step:** generate the TOML below, copy it, and paste it into Streamlit's built-in secrets store.
+**Fix this in one step:** copy the TOML below and paste it into Streamlit's built-in secrets store.
 MERIT reads from `st.secrets` automatically on startup — your settings will survive reboots forever.
 
 **How to paste it:**
@@ -2711,7 +2722,7 @@ MERIT reads from `st.secrets` automatically on startup — your settings will su
 
     _has_toml_data = any(_toml_cfg.get(k) for k in _SECRETS_CREDENTIAL_KEYS)
     if not _has_toml_data:
-        st.info("Fill in your Supabase and email settings above, then come back here to generate your TOML.")
+        st.info("Fill in Steps 1–4 above first, then come back here to generate your TOML.")
 
     _gs_secrets_active = False
     try:
