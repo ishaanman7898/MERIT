@@ -18,13 +18,30 @@ MERIT is the definitive productivity tool for Virtual Enterprise International (
 
 ## Getting Started
 
-Setting up MERIT takes less than five minutes. Follow these four steps to enable your firm's online capabilities.
-
-### 1. Connect Your Database (Supabase)
-Supabase acts as the central database for MERIT. It stores your products and inventory securely in the cloud.
-
 > [!IMPORTANT]
 > Use your official VEI Firm Email for all account registrations to ensure access remains consistent for future firm members.
+
+### 1. Fork and Deploy to Streamlit Cloud
+Start here — you need a running app before you can configure anything.
+
+#### Fork the repository
+1. Go to the MERIT GitHub repository page.
+2. Click **Fork** in the top-right corner.
+3. Under "Owner", select your personal GitHub account (or your firm's organization).
+4. Click **Create fork**. You now have your own copy of MERIT.
+
+#### Deploy on Streamlit Cloud
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with the same GitHub account you used to fork.
+2. Click **Create app**.
+3. Under "Repository", select your forked MERIT repository.
+4. Set **Main file path** to `app.py`.
+5. Click **Deploy**. Streamlit will build and launch your app in about a minute.
+6. Once live, you will get a public URL (e.g. `https://yourname-merit-app-xxxxx.streamlit.app`). Share this with your firm.
+
+---
+
+### 2. Connect Your Database (Supabase)
+Supabase acts as the central database for MERIT. It stores your products and inventory securely in the cloud.
 
 1. Create a project at Supabase.com.
 2. Copy your Connection String from the Connect button (found in the Session Pooler tab).
@@ -32,7 +49,7 @@ Supabase acts as the central database for MERIT. It stores your products and inv
 
 ---
 
-### 2. Enable Image Hosting
+### 3. Enable Image Hosting
 Product images must be hosted online to appear in emails and on your storefront.
 
 1. Obtain a free API key from freeimage.host or imghippo.com.
@@ -41,7 +58,7 @@ Product images must be hosted online to appear in emails and on your storefront.
 
 ---
 
-### 3. Configure Gmail SMTP
+### 4. Configure Gmail SMTP
 MERIT sends emails through your firm's Gmail account. An App Password is required for secure authentication.
 
 1. Access your Google Account Security settings.
@@ -51,30 +68,12 @@ MERIT sends emails through your firm's Gmail account. An App Password is require
 
 ---
 
-### 4. Deploy to Streamlit Cloud
-Host your application on the web so your entire firm can access it from any browser.
-
-#### Step 1 — Fork the repository
-1. Go to the MERIT GitHub repository page.
-2. Click **Fork** in the top-right corner.
-3. Under "Owner", select your personal GitHub account (or your firm's organization if you have one).
-4. Click **Create fork**. You now have your own copy of MERIT.
-
-#### Step 2 — Deploy on Streamlit Cloud
-1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with the same GitHub account you used to fork.
-2. Click **Create app**.
-3. Under "Repository", select your forked MERIT repository.
-4. Set **Main file path** to `app.py`.
-5. Click **Deploy**. Streamlit will build and launch your app in about a minute.
-6. Once live, you'll get a public URL (e.g. `https://yourname-merit-app-xxxxx.streamlit.app`). Share this with your firm.
-
-#### Step 3 — Save your settings so they survive restarts
+### 5. Save Your Settings (Prevents Settings Loss on Restart)
 Streamlit Cloud restarts your app periodically and wipes any saved files. To keep your settings:
 
-1. Open your live MERIT app and complete steps 1-4 above (database, image hosting, Gmail, sender identity).
-2. Go to **Settings → Secrets TOML** and copy the generated block.
-3. In Streamlit Cloud, open your app → click **Manage app** (bottom-right) → **Settings** → **Secrets**.
-4. Paste the TOML block and click **Save**. Your credentials are now safe across restarts.
+1. After completing steps 2-4 in the MERIT app, go to **Settings → Secrets TOML** and copy the generated block.
+2. In Streamlit Cloud, open your app → click **Manage app** (bottom-right) → **Settings** → **Secrets**.
+3. Paste the TOML block and click **Save**. Your credentials are now safe across restarts.
 
 ---
 
