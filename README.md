@@ -38,6 +38,9 @@ Start here — you need a running app before you can configure anything.
 5. Click **Deploy**. Streamlit will build and launch your app in about a minute.
 6. Once live, you will get a public URL (e.g. `https://yourname-merit-app-xxxxx.streamlit.app`). Share this with your firm.
 
+> [!NOTE]
+> **Open your deployed app and go to Get Started — complete every step inside the app.** The steps below in this document are quick-reference summaries. If this is your first time setting up MERIT, it is strongly encouraged to follow the Get Started page in your live app — it walks you through everything with detailed instructions.
+
 ---
 
 ### 2. Connect Your Database (Supabase)
