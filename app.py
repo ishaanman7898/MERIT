@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS inventory (
     price      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     stock_left INTEGER        NOT NULL DEFAULT 0,
     status         TEXT           NOT NULL DEFAULT 'In stock',
-    image_url      TEXT           NOT NULL DEFAULT 'N/A',
+    image_url      TEXT           NOT NULL DEFAULT 'N/A', -- one URL or comma-separated multiple: "url1,url2"
     original_stock INTEGER        NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     CONSTRAINT inventory_sku_unique UNIQUE (sku)
@@ -211,8 +211,8 @@ CREATE TABLE IF NOT EXISTS products (
     price           NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     description     TEXT           NOT NULL DEFAULT '',
     buy_button_url  TEXT           NOT NULL DEFAULT '',
-    image_url       TEXT           NOT NULL DEFAULT 'N/A',
-    active          BOOLEAN        NOT NULL DEFAULT TRUE,
+    image_url       TEXT           NOT NULL DEFAULT 'N/A', -- one URL or comma-separated multiple: "url1,url2"
+    active          BOOLEAN        NOT NULL DEFAULT TRUE,  -- true = In Store, false = Out of Store
     created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     CONSTRAINT products_sku_unique UNIQUE (sku)
 );
@@ -1188,7 +1188,10 @@ def _build_items_html(prods: list[str], products_lookup: dict[str, str] | None) 
                     if p_lower in k.lower() or k.lower() in p_lower:
                         img_url = v
                         break
-        if img_url:
+        # Support comma-separated image URLs — use only the first one for emails
+        if img_url and "," in img_url:
+            img_url = img_url.split(",")[0].strip()
+        if img_url and img_url not in ("N/A", ""):
             rows.append(
                 f'<tr><td style="padding:4px 0;">'
                 f'<table cellpadding="0" cellspacing="0" style="background:#f9fafb;'
@@ -1875,7 +1878,9 @@ elif page == "Products":
             for i, prod in enumerate(products):
                 _sku = prod.get("sku", "N/A")
                 _name = prod.get("item_name", "Unknown")
-                _img = prod.get("image_url", "N/A")
+                _img_raw = prod.get("image_url", "N/A")
+                # Use first URL when multiple images are stored comma-separated
+                _img = _img_raw.split(",")[0].strip() if _img_raw and "," in _img_raw else _img_raw
                 has_img = bool(_img and _img not in ("N/A", ""))
 
                 _c_img, _c_txt, _c_act = st.columns([1, 5, 2], vertical_alignment="center")
@@ -1895,24 +1900,27 @@ elif page == "Products":
                         st.caption(f"🛒 [Buy Button]({prod['buy_button_url']})")
                 
                 with _c_act:
-                    with st.popover("Replace Image", width="stretch"):
-                        st.markdown("##### Upload New Image")
+                    with st.popover("Add Image", width="stretch"):
+                        st.markdown("##### Add Product Image")
                         _new_file = st.file_uploader("img", type=["jpg","jpeg","png","webp"], key=f"cat_repl_{_sku}_{i}", label_visibility="collapsed")
                         if _new_file and _has_image_host(cfg):
                             if st.button("Upload & Save", key=f"cat_repl_btn_{_sku}_{i}", type="primary", width="stretch"):
                                 with st.spinner("Uploading..."):
                                     try:
                                         _new_url = upload_image(_new_file.read(), cfg, name=_name)
-                                        prod["image_url"] = _new_url
+                                        _cur_urls_cat = [u.strip() for u in str(_img_raw).split(",") if u.strip() and u.strip() != "N/A"]
+                                        _cur_urls_cat.insert(0, _new_url)  # prepend so new image becomes the primary
+                                        _combined_url = ",".join(_cur_urls_cat)
+                                        prod["image_url"] = _combined_url
                                         save_product_to_db(prod, cfg)
                                         _cfg_prods = [dict(p) for p in cfg.get("products", [])]
                                         for _cpc in _cfg_prods:
                                             if _cpc.get("sku") == _sku:
-                                                _cpc["image_url"] = _new_url
+                                                _cpc["image_url"] = _combined_url
                                         cfg["products"] = _cfg_prods
                                         save_config(cfg)
                                         st.session_state.cfg = cfg
-                                        st.toast("Image updated.", icon="✅")
+                                        st.toast("Image added.", icon="✅")
                                         _clear_data_caches()
                                         time.sleep(0.5)
                                         st.rerun()
@@ -1925,6 +1933,7 @@ elif page == "Products":
     # ══ ADD PRODUCTS ════════════════════════════
     with tab_add:
         st.subheader("Add Products")
+        st.info("Everything you type in the product names must be the same as in the VEI Store Manager and the Wholesale Marketplace for inventory deduction to work correctly.")
         st.caption(f"Add products individually or in bulk. Syncing to: **{_p_sync_str}**")
         
         _add_single_exp = st.expander("Add Single Product", expanded=True)
@@ -1945,14 +1954,17 @@ elif page == "Products":
                 p_store_status  = st.selectbox("Store Status", ["In Store", "Out of Store"], index=0, key="p_store_status",
                                                help="In Store = visible on your storefront. Out of Store = hidden from customers.")
             with col_right:
-                p_image = st.file_uploader(
-                    "Product Image",
+                p_images = st.file_uploader(
+                    "Product Images",
                     type=["jpg", "jpeg", "png", "webp"],
                     key="p_image",
-                    help="Compressed and uploaded to Imghippo automatically.",
+                    accept_multiple_files=True,
+                    help="Upload one or more images. Multiple images are stored as a comma-separated list; the first image appears in emails and on the storefront.",
                 )
-                if p_image:
-                    st.image(p_image, width="stretch")
+                if p_images:
+                    _prev_cols = st.columns(min(len(p_images), 3))
+                    for _pi, _pf in enumerate(p_images):
+                        _prev_cols[_pi % 3].image(_pf, use_container_width=True)
 
             if st.button("Add Product", type="primary", width="stretch", key="btn_add_product"):
                 if not p_sku.strip():
@@ -1961,15 +1973,21 @@ elif page == "Products":
                     st.error("Product Name is required.")
                 else:
                     image_url = "N/A"
-                    if p_image:
+                    if p_images:
                         if not _has_image_host(cfg):
-                            st.warning("Image skipped — add an image hosting key in Settings first.")
+                            st.warning("Images skipped — add an image hosting key in Settings first.")
                         else:
-                            with st.spinner("Processing image and adding product..."):
-                                try:
-                                    image_url = upload_image(p_image.read(), cfg, name=p_name.strip())
-                                except Exception as _img_err:
-                                    st.error(f"Image upload failed: {_img_err}")
+                            with st.spinner(f"Uploading {len(p_images)} image(s) and adding product..."):
+                                _uploaded_urls = []
+                                for _img_file in p_images:
+                                    try:
+                                        _img_file.seek(0)
+                                        _url = upload_image(_img_file.read(), cfg, name=p_name.strip())
+                                        _uploaded_urls.append(_url)
+                                    except Exception as _img_err:
+                                        st.error(f"Image upload failed: {_img_err}")
+                                if _uploaded_urls:
+                                    image_url = ",".join(_uploaded_urls)
                     product = {
                         "sku":            p_sku.strip().upper(),
                         "item_name":      p_name.strip(),
@@ -2086,6 +2104,26 @@ elif page == "Products":
             )
             _eprod = next((p for p in products if p["sku"] == _edit_sku), None)
             if _eprod:
+                # Show current images (comma-separated support)
+                _cur_img_raw = str(_eprod.get("image_url", "N/A"))
+                _cur_urls = [u.strip() for u in _cur_img_raw.split(",") if u.strip() and u.strip() != "N/A"]
+                if _cur_urls:
+                    st.markdown("**Current images** (first is used in emails and storefront)")
+                    _img_disp_cols = st.columns(min(len(_cur_urls), 4))
+                    for _ci, _curl in enumerate(_cur_urls):
+                        with _img_disp_cols[_ci % 4]:
+                            st.image(_curl, use_container_width=True)
+                            if st.button(f"Remove image {_ci + 1}", key=f"rm_img_{_edit_sku}_{_ci}", use_container_width=True):
+                                _new_urls = [u for i, u in enumerate(_cur_urls) if i != _ci]
+                                _eprod["image_url"] = ",".join(_new_urls) if _new_urls else "N/A"
+                                save_product_to_db(_eprod, cfg)
+                                _cp2 = cfg.get("products", [])
+                                cfg["products"] = [dict(p, image_url=_eprod["image_url"]) if p.get("sku") == _edit_sku else p for p in _cp2]
+                                save_config(cfg)
+                                st.session_state.cfg = cfg
+                                _clear_data_caches()
+                                st.rerun()
+
                 with st.form(key=f"edit_form_{_edit_sku}"):
                     _e_c1, _e_c2 = st.columns(2)
                     with _e_c1:
@@ -2103,15 +2141,25 @@ elif page == "Products":
                             placeholder="https://portal.veinternational.org/buybuttons/us019814/btn/product-name/",
                             help="VEI buy button link consumers click to purchase.",
                         )
-                        _e_file       = st.file_uploader("Replace image", type=["jpg", "png", "webp", "jpeg"], key=f"e_file_{_edit_sku}")
+                        _e_files = st.file_uploader(
+                            "Add images",
+                            type=["jpg", "png", "webp", "jpeg"],
+                            key=f"e_file_{_edit_sku}",
+                            accept_multiple_files=True,
+                            help="Upload new images to add to this product. Existing images are kept unless you remove them above.",
+                        )
 
                     if st.form_submit_button("Save Changes", type="primary", width="stretch"):
                         with st.spinner("Saving..."):
-                            _final_url = _eprod.get("image_url", "N/A")
-                            if _e_file and _has_image_host(cfg):
-                                try:
-                                    _final_url = upload_image(_e_file.read(), cfg, name=_e_name.strip())
-                                except: pass
+                            _existing_urls = [u.strip() for u in str(_eprod.get("image_url", "N/A")).split(",") if u.strip() and u.strip() != "N/A"]
+                            if _e_files and _has_image_host(cfg):
+                                for _ef in _e_files:
+                                    try:
+                                        _new_u = upload_image(_ef.read(), cfg, name=_e_name.strip() or _edit_sku)
+                                        _existing_urls.append(_new_u)
+                                    except Exception as _eu_err:
+                                        st.error(f"Image upload failed: {_eu_err}")
+                            _final_url = ",".join(_existing_urls) if _existing_urls else "N/A"
 
                             _upd = {
                                 "sku":            _edit_sku,
@@ -2590,14 +2638,21 @@ elif page == "Settings":
                     )
                     _fi_body = _fi_resp.json() if _fi_resp.content else {}
                     if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
-                        st.session_state["_fi_test_result"] = ("ok", "Freeimage.host key works!")
+                        st.session_state["_fi_test_result"] = ("ok", "Freeimage.host key verified.")
                     else:
-                        st.session_state["_fi_test_result"] = ("err", _fi_body.get("status_txt", _fi_resp.text[:150]))
+                        _fi_err = str(_fi_body.get("status_txt") or f"HTTP {_fi_resp.status_code}")[:120]
+                        st.session_state["_fi_test_result"] = ("err", _fi_err)
                 except Exception as _fie:
-                    st.session_state["_fi_test_result"] = ("err", str(_fie))
+                    _fi_em = str(_fie)
+                    if len(_fi_em) > 200 or "DeltaGenerator" in _fi_em:
+                        _fi_em = "Connection failed — check your internet connection and try again."
+                    st.session_state["_fi_test_result"] = ("err", _fi_em[:200])
         if "_fi_test_result" in st.session_state:
             _fir = st.session_state["_fi_test_result"]
-            st.success(_fir[1]) if _fir[0] == "ok" else st.error(f"Test failed: {_fir[1]}")
+            if _fir[0] == "ok":
+                st.success("Key verified — Freeimage.host is working.")
+            else:
+                st.error(f"Key test failed: {_fir[1]}")
 
     with _img_tab_ih:
         inp_imgbb_key = st.text_input(
@@ -2623,23 +2678,26 @@ elif page == "Settings":
                     )
                     _ih_body = _ih_resp.json() if _ih_resp.content else {}
                     if _ih_resp.status_code == 200 and _ih_body.get("success"):
-                        st.session_state["_ih_test_result"] = ("ok", "Imghippo key works!")
+                        st.session_state["_ih_test_result"] = ("ok", "Imghippo key verified.")
                     elif _ih_resp.status_code == 401:
                         st.session_state["_ih_test_result"] = ("err", "Invalid API key — check for typos.")
                     elif _ih_resp.status_code == 429:
                         st.session_state["_ih_test_result"] = ("warn", "Rate limited — wait a minute and try again.")
                     else:
-                        st.session_state["_ih_test_result"] = ("err", f"Error {_ih_resp.status_code}: {_ih_body.get('message', _ih_resp.text[:150])}")
+                        st.session_state["_ih_test_result"] = ("err", f"HTTP {_ih_resp.status_code} — check your key.")
                 except Exception as _ihe:
-                    st.session_state["_ih_test_result"] = ("err", str(_ihe))
+                    _ih_em = str(_ihe)
+                    if len(_ih_em) > 200 or "DeltaGenerator" in _ih_em:
+                        _ih_em = "Connection failed — check your internet connection and try again."
+                    st.session_state["_ih_test_result"] = ("err", _ih_em[:200])
         if "_ih_test_result" in st.session_state:
             _ihr = st.session_state["_ih_test_result"]
             if _ihr[0] == "ok":
-                st.success(_ihr[1])
+                st.success("Key verified — Imghippo is working.")
             elif _ihr[0] == "warn":
                 st.warning(_ihr[1])
             else:
-                st.error(f"Test failed: {_ihr[1]}")
+                st.error(f"Key test failed: {_ihr[1]}")
 
     # ── Step 3: Gmail SMTP ───────────────────────────────────────────
     st.divider()
@@ -2674,11 +2732,17 @@ elif page == "Settings":
                 _srv.quit()
                 st.session_state["_smtp_test_result"] = ("ok", "SMTP connection successful.")
             except Exception as _smtpe:
-                st.session_state["_smtp_test_result"] = ("err", str(_smtpe))
+                _smtp_em = str(_smtpe)
+                if len(_smtp_em) > 300 or "DeltaGenerator" in _smtp_em:
+                    _smtp_em = "Login failed — check your Gmail address and App Password."
+                st.session_state["_smtp_test_result"] = ("err", _smtp_em[:300])
 
     if "_smtp_test_result" in st.session_state:
         _smr = st.session_state["_smtp_test_result"]
-        st.success(_smr[1]) if _smr[0] == "ok" else st.error(f"Connection failed: {_smr[1]}")
+        if _smr[0] == "ok":
+            st.success("Gmail connected successfully.")
+        else:
+            st.error(f"Connection failed: {_smr[1]}")
 
     # ── Step 4: Sender Identity ──────────────────────────────────────
     st.divider()
@@ -2810,8 +2874,8 @@ elif page == "API Endpoints":
             "replace YOUR_SUPABASE_ANON_KEY with your real anon key, and the AI will build your storefront."
         )
 
-        _ai_master, _ai_bolt, _ai_lovable, _ai_cursor, _ai_schema_tab = st.tabs(
-            ["Master Context Block", "Bolt.new", "Lovable", "Cursor / v0 / General", "Full Schema SQL"]
+        _ai_master, _ai_bolt, _ai_lovable, _ai_cursor = st.tabs(
+            ["Master Context Block", "Bolt.new", "Lovable", "Cursor / v0 / General"]
         )
 
         # ── shared schema text used across all prompts ──────────────────
@@ -2819,100 +2883,103 @@ elif page == "API Endpoints":
 === MERIT DATABASE SCHEMA (Supabase / PostgreSQL) ===
 
 Supabase project URL : {_sb_url_ai}
-Supabase anon key    : YOUR_SUPABASE_ANON_KEY   ← replace this
+Supabase anon key    : YOUR_SUPABASE_ANON_KEY   ← replace this with your actual anon key
 
---- TABLE: inventory  (use for storefront — has live stock) ---
+--- TABLE: inventory  (PRIMARY table for storefront — has live stock levels) ---
 Column          Type              Notes
 -----------     ----------------  -----------------------------------------
-id              BIGSERIAL PK      auto-increment, do not reference in queries
-sku             TEXT NOT NULL     unique product code, use as the URL slug
-item_name       TEXT NOT NULL     product display name
-category        TEXT              product category (use for filters)
+id              BIGSERIAL PK      auto-increment primary key, do not use in app logic
+sku             TEXT NOT NULL     unique product code — use as the URL slug (e.g. /products/SKU-001)
+item_name       TEXT NOT NULL     product display name — show this as the product title
+category        TEXT              product category — use for filter buttons
 price           NUMERIC(10,2)     retail price in USD
-stock_left      INTEGER           units currently in stock
-status          TEXT              'In stock' | 'Low stock' | 'Out of stock' | 'Backordered'
-image_url       TEXT              full public HTTPS URL — use directly in <img src="">
-original_stock  INTEGER           initial stock set when product was added
-created_at      TIMESTAMPTZ       when the row was created
+stock_left      INTEGER           units currently in stock — deducted automatically when MERIT sends order emails
+status          TEXT              stock status label: 'In stock' | 'Low stock' | 'Out of stock' | 'Backordered'
+image_url       TEXT              one or more images — may be a single HTTPS URL or multiple URLs separated by commas
+                                  ALWAYS take only the FIRST URL if there are multiple: image_url.split(',')[0]
+original_stock  INTEGER           initial stock set when the product was first added
+created_at      TIMESTAMPTZ       timestamp when the product was created
 
-STOREFRONT QUERY RULE:
-  Show only products where stock_left > 0
-  (status reflects the same thing but stock_left > 0 is the canonical filter)
+CRITICAL STOREFRONT RULES:
+  1. ONLY show products where stock_left > 0 (out-of-stock products must be hidden or greyed out)
+  2. Use the status field for badge text but stock_left > 0 is the definitive in-stock check
+  3. The inventory table is updated in real time — subscribe to Supabase Realtime for live updates
 
---- TABLE: products  (clean catalog, no stock data) ---
+--- TABLE: products  (clean catalog — use when you need description and buy button) ---
 Column          Type              Notes
 -----------     ----------------  -----------------------------------------
 id              BIGSERIAL PK
-sku             TEXT NOT NULL     matches inventory.sku
-name            TEXT NOT NULL     product display name
-category        TEXT
-price           NUMERIC(10,2)
-description     TEXT              product description (may be empty)
-buy_button_url  TEXT              VEI buy button link — e.g. https://portal.veinternational.org/buybuttons/us019814/btn/product-name/
-                                  Render this as the "Buy Now" / "Add to Cart" button href.
-                                  If empty string, disable or hide the buy button.
-image_url       TEXT              full public HTTPS URL
-active          BOOLEAN           true = In Store (visible), false = Out of Store (hidden)
+sku             TEXT NOT NULL     matches inventory.sku — use to JOIN or cross-reference
+name            TEXT NOT NULL     product display name (same as inventory.item_name)
+category        TEXT              product category
+price           NUMERIC(10,2)     retail price in USD
+description     TEXT              full product description — show on product detail page (may be empty string)
+buy_button_url  TEXT              direct VEI buy link — e.g. https://portal.veinternational.org/buybuttons/us019814/btn/product-name/
+                                  Use as the href for the "Buy Now" button. If empty string → hide or disable the button.
+image_url       TEXT              same format as inventory.image_url — take first URL if comma-separated
+active          BOOLEAN           store status: true = In Store (show to customers), false = Out of Store (hide from customers)
+                                  ALWAYS filter: active = true when fetching for the storefront
 created_at      TIMESTAMPTZ
 
-USE CASE: Use products table when you want a clean catalog without stock numbers.
-Filter: active = true (only show In Store products)
+CRITICAL: Always filter products WHERE active = true. Out of Store products must never appear on the storefront.
 
 BUY BUTTON RULE:
-  Each product's buy_button_url is a direct VEI interface link.
-  Use it as the href for your "Buy Now" button — do NOT wrap in your own cart logic.
-  Example: <a href="{{product.buy_button_url}}" target="_blank">Buy Now</a>
-  If buy_button_url is empty → hide or grey out the Buy Now button.
+  buy_button_url is a direct VEI purchase link managed by VEI International.
+  Render it as: <a href="{{product.buy_button_url}}" target="_blank" rel="noopener">Buy Now</a>
+  Do NOT wrap it in your own cart logic — clicking it goes directly to the VEI purchase interface.
+  If buy_button_url is an empty string → hide or disable the Buy Now button entirely.
 
---- TABLE: outbound_logs  (order history — read-only from website) ---
+--- TABLE: outbound_logs  (order history — read-only for website display) ---
 Column            Type              Notes
 -----------       ----------------  -----------------------------------------
 id                BIGSERIAL PK
-recipient_name    TEXT
-recipient_email   TEXT
-order_number      TEXT
-products_list     TEXT              comma-separated product names
-subtotal          NUMERIC(10,2)
-tax               NUMERIC(10,2)
-shipping          NUMERIC(10,2)
-total_cost        NUMERIC(10,2)
-created_at        TIMESTAMPTZ
+recipient_name    TEXT              customer name
+recipient_email   TEXT              customer email
+order_number      TEXT              order reference number
+products_list     TEXT              comma-separated list of product names ordered
+subtotal          NUMERIC(10,2)     order subtotal before tax and shipping
+tax               NUMERIC(10,2)     tax amount
+shipping          NUMERIC(10,2)     shipping amount
+total_cost        NUMERIC(10,2)     final total (subtotal + tax + shipping)
+created_at        TIMESTAMPTZ       when the order email was sent
 
 === IMAGE RULES ===
-- image_url is ALWAYS a full public HTTPS URL (hosted on Freeimage.host or Imghippo)
-- Use it directly in <img src={{product.image_url}}>
-- If image_url is 'N/A', null, or empty string → show a grey placeholder div
-- NEVER try to proxy or re-upload images — they are already hosted
+- image_url stores one OR multiple images separated by commas: "https://url1.com" or "https://url1.com,https://url2.com"
+- ALWAYS use only the FIRST image for display: const imgSrc = product.image_url?.split(',')[0]?.trim() || ''
+- If the first URL is 'N/A', empty, or null → show a grey placeholder div instead of a broken image
+- Never proxy, re-upload, or modify image URLs — they are already hosted on a CDN
+- Use onError fallback: <img src={{imgSrc}} onError={{e => e.target.style.display='none'}} />
+
+=== STORE STATUS RULES ===
+- inventory table: filter WHERE stock_left > 0 to show only in-stock products
+- products table: filter WHERE active = true to show only "In Store" products
+- A product can be "In Store" (active=true) but still out of stock (stock_left=0)
+  In that case show it with an "Out of stock" badge but hide the buy button
 
 === RLS (ROW LEVEL SECURITY) ===
-The following policies must be in place so anonymous visitors can read but not write.
-Run this SQL in Supabase Dashboard → SQL Editor → New Query:
+These policies allow any visitor with the anon key to read — but not write — your data.
+Run this SQL once in Supabase Dashboard → SQL Editor → New Query:
 
   ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
   ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
   ALTER TABLE outbound_logs ENABLE ROW LEVEL SECURITY;
 
-  CREATE POLICY "Public read inventory"
-    ON inventory FOR SELECT USING (true);
+  CREATE POLICY "Public read inventory" ON inventory FOR SELECT USING (true);
+  CREATE POLICY "Public read products"  ON products  FOR SELECT USING (true);
 
-  CREATE POLICY "Public read products"
-    ON products FOR SELECT USING (true);
+MERIT writes data using the direct PostgreSQL connection string (server-side, bypasses RLS).
+The anon key used by the website is strictly read-only — visitors cannot modify any data.
 
-MERIT writes to the database using the direct PostgreSQL connection string (bypasses RLS).
-The anon key used by the website is read-only — it cannot INSERT, UPDATE, or DELETE.
-
-=== SUPABASE REALTIME ===
-To enable live updates when MERIT changes a product:
-1. Supabase Dashboard → Database → Replication
-2. Toggle ON for: inventory, products
-3. Subscribe in your JS code using supabase.channel(...)
+=== SUPABASE REALTIME (live inventory updates) ===
+1. Supabase Dashboard → Database → Replication → toggle ON for: inventory, products
+2. In your JS/TS code subscribe to changes so the UI updates automatically when MERIT sends an order email and deducts stock
 
 === ENV VARIABLES ===
-For Bolt.new / Lovable / Vite projects use:
+For Bolt.new / Lovable / Vite projects:
   VITE_SUPABASE_URL      = {_sb_url_ai}
   VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY
 
-For Next.js projects use:
+For Next.js projects:
   NEXT_PUBLIC_SUPABASE_URL      = {_sb_url_ai}
   NEXT_PUBLIC_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
 
@@ -2928,31 +2995,43 @@ For Next.js projects use:
 {_schema_block}
 
 === WHAT TO BUILD ===
-Build a modern product storefront website that reads from the Supabase database described above.
+Build a modern, professional product storefront for a VEI (Virtual Enterprise International) firm.
+Read data from the Supabase database described above. Do NOT create or modify any database tables.
+
+CRITICAL RULES (apply these before writing any code):
+- image_url may contain multiple comma-separated URLs — ALWAYS use only the FIRST: url?.split(',')[0]?.trim()
+- Show grey placeholder when image is missing, 'N/A', or empty
+- inventory table: only show WHERE stock_left > 0
+- products table: only show WHERE active = true (In Store)
+- buy_button_url is a direct VEI purchase link — use as Buy Now href, never add custom cart logic around it
 
 Requirements:
-1. Product grid — responsive 3-column layout (1 col mobile, 2 col tablet, 3 col desktop)
-   - Each card: product image, name (item_name), price, stock status badge, "Add to Cart" button
-   - Only show products where stock_left > 0
-   - Grey placeholder when image_url is 'N/A' or empty
+1. Product grid — responsive layout (1 col mobile, 2 col tablet, 3 col desktop)
+   - Fetch from inventory WHERE stock_left > 0, ORDER BY item_name
+   - Each card: product image (first URL only), item_name, price, stock status badge, Buy Now button
+   - Buy Now button = <a href={{buy_button_url}} target="_blank">Buy Now</a>; hide if buy_button_url is empty
+   - Status badges: "In stock" green, "Low stock" amber, "Out of stock" red
 
 2. Category filter — horizontal pill buttons at the top, "All" selected by default
-   - Fetch distinct categories from the inventory table
-   - Clicking a category filters the grid instantly (client-side)
+   - Fetch distinct category values from the inventory table (WHERE stock_left > 0)
+   - Client-side filtering — clicking a pill instantly filters the product grid
 
 3. Product detail page — route: /products/[sku]
-   - Large image left, details right
-   - Show: name, price, category, description (from products table), stock status
-   - "Out of Stock" badge when stock_left = 0, grey out the Add to Cart button
+   - Fetch from inventory (stock) and products (description, buy_button_url, active) by sku
+   - Large image left (first URL), details right
+   - Show: item_name, price, category, description, status badge
+   - Buy Now button → href=buy_button_url; disable and grey out when stock_left = 0 or Out of Store
 
-4. Cart — localStorage, no login required
-   - Slide-in drawer, quantity +/-, remove button, subtotal
-   - Cart icon in header with item count badge
+4. Cart — localStorage only, no login required
+   - Slide-in drawer on right, triggered by header cart icon (shows item count badge)
+   - Quantity +/-, remove button, item subtotal, grand total
+   - Checkout modal: Name, Email, Message → confirmation on submit
 
-5. Realtime — subscribe to inventory table changes
-   - When MERIT updates a product, the grid refreshes automatically without page reload
+5. Realtime — subscribe to Supabase Realtime on the inventory table
+   - On any change (INSERT/UPDATE/DELETE) → refetch the product list automatically
+   - This keeps stock levels live when MERIT processes orders and deducts inventory
 
-6. RLS — run the RLS SQL above in Supabase before going live"""
+6. RLS — run the RLS SQL (in the Schema & Security SQL tab) in Supabase before going live"""
             st.code(_master_prompt, language="text")
 
         # ── Bolt.new ────────────────────────────────────────────────────
@@ -2965,38 +3044,51 @@ Requirements:
 4. Then paste the prompt below into the chat
             """)
             _bolt_prompt = f"""\
-I already have a Supabase database set up and connected. Do NOT create new tables.
+I already have a Supabase database set up and connected. Do NOT create any new tables or modify existing ones.
 
 {_schema_block}
 
-Build a VEI (Virtual Enterprise International) firm product storefront using the schema above.
+Build a VEI (Virtual Enterprise International) firm product storefront using the exact schema above.
 
 Tech stack: React + Vite + Tailwind CSS + @supabase/supabase-js
 
+IMPORTANT RULES BEFORE YOU START:
+- Do not invent column names — use only the exact columns listed in the schema above
+- image_url may contain multiple URLs separated by commas — always use only the FIRST one: item.image_url?.split(',')[0]?.trim()
+- Only show products from inventory WHERE stock_left > 0
+- Only show products from products table WHERE active = true (In Store)
+- buy_button_url links directly to the VEI purchase page — do not wrap in custom cart logic
+
 Pages to build:
 1. / (Home) — product grid
-   - Fetch from inventory where stock_left > 0
+   - Fetch from inventory WHERE stock_left > 0, ORDER BY item_name ASC
    - Responsive grid: 1 col (mobile) → 2 col (tablet) → 3 col (desktop)
-   - Product card: <img src={{item.image_url}} /> with grey fallback, item_name, price formatted as $X.XX,
-     stock status badge (green = In stock, yellow = Low stock, red = Out of stock), Add to Cart button
-   - Category filter pills at top (fetch distinct categories, All selected by default)
+   - Product card:
+     • Image: const src = item.image_url?.split(',')[0]?.trim(); show grey placeholder if src is 'N/A' or empty
+     • item_name as title, price formatted as $X.XX
+     • Status badge: green = "In stock", amber = "Low stock", red = "Out of stock"
+     • "Buy Now" button → href=item.buy_button_url, target="_blank"; hide button if buy_button_url is empty
+   - Category filter pills at top (fetch distinct category values from inventory, "All" selected by default)
    - Sort toggle: A-Z / Price Low-High / Price High-Low
 
 2. /products/:sku — product detail
-   - Pull single product where sku = route param
-   - Large image + details panel with description from products table
-   - Add to Cart button disabled + greyed when stock_left = 0
+   - Fetch from inventory WHERE sku = route param (for stock data)
+   - Also fetch from products WHERE sku = route param (for description and buy_button_url)
+   - Large image left, details right
+   - Show: item_name, price, category, status badge, stock_left count, description
+   - "Buy Now" button → href=products.buy_button_url; disable and grey out if stock_left = 0 or buy_button_url is empty
    - Breadcrumb: Home → [category] → [item_name]
 
-3. Cart (slide-in drawer, not a page)
+3. Cart (slide-in drawer, not a separate page)
    - State in localStorage key "merit_cart"
-   - Each item: {{ sku, item_name, price, image_url, quantity }}
+   - Each item: {{ sku, item_name, price, image_url (first URL only), quantity }}
    - +/- quantity buttons, remove button, item subtotal, grand total
-   - "Checkout" button → opens a modal form (Name, Email, notes) → shows order confirmation on submit
+   - Checkout modal: Name, Email, Message fields → confirmation message on submit (no backend needed)
 
 Supabase Realtime:
-- Subscribe to postgres_changes on inventory table
-- On any change event → refetch the product list so the page stays live
+- Subscribe to postgres_changes on the inventory table
+- On any INSERT, UPDATE, or DELETE event → refetch the product list immediately
+- This keeps stock levels live as MERIT processes orders
 
 Use the exact env var names: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY"""
             st.code(_bolt_prompt, language="text")
@@ -3011,44 +3103,57 @@ Use the exact env var names: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY"""
             """)
             _lovable_prompt = f"""\
 I have an existing Supabase database. DO NOT run any CREATE TABLE or ALTER TABLE statements.
-My tables already exist. Only read from them using SELECT queries through the Supabase client.
+My tables already exist. Only read from them using SELECT queries via the Supabase JS client.
 
 {_schema_block}
 
-Build a product storefront for my VEI firm with the following pages and features.
+Build a product storefront for my VEI (Virtual Enterprise International) firm.
 
-Design: clean, minimal, white background, dark navy header, rounded product cards with subtle shadows.
+Design: clean and professional, white background, dark navy (#18181b) header, rounded product cards with subtle shadows, mobile-first responsive layout.
+
+CRITICAL IMAGE RULE:
+  image_url may contain multiple comma-separated URLs. Always take only the first:
+  const imgSrc = row.image_url?.split(',')[0]?.trim() || ''
+  Show a grey placeholder if imgSrc is empty, null, or 'N/A'.
+
+CRITICAL STORE STATUS RULES:
+  - inventory table: only show rows WHERE stock_left > 0
+  - products table: only show rows WHERE active = true (In Store)
+  - Always apply both filters — never show out-of-stock or Out-of-Store products
 
 --- PAGE: / (Product Catalog) ---
-- Fetch all rows from inventory where stock_left > 0, ordered by item_name ASC
-- Display in a responsive product grid
-- Each card shows:
-    • Product image from image_url (if image_url = 'N/A' or empty → show grey box with "No image" text)
+- Query: SELECT * FROM inventory WHERE stock_left > 0 ORDER BY item_name ASC
+- Responsive product grid (1 col mobile, 2 col tablet, 3 col desktop)
+- Each product card:
+    • Product image (first URL from image_url, grey placeholder if missing)
     • item_name as card title
     • price formatted as "$X.XX"
-    • A coloured badge for status: "In stock" → green, "Low stock" → amber, "Out of stock" → red
-    • "Add to Cart" button (disabled and greyed when stock_left = 0)
-- Horizontal category filter at top (distinct values from inventory.category)
-- Search bar that filters item_name in real-time (client-side)
+    • Status badge: "In stock" → green, "Low stock" → amber, "Out of stock" → red/grey
+    • "Buy Now" button → href = buy_button_url from products table (JOIN on sku); hide if buy_button_url is empty
+- Horizontal category filter pills at top (distinct inventory.category values, "All" default)
+- Client-side search bar filtering item_name in real time
 
 --- PAGE: /product/:sku ---
-- Fetch single product from inventory where sku = URL param
-- Two-column layout: image left (large), details right
-- Show: item_name, price, category, stock_left (e.g. "12 in stock"), status badge, description (from products table if available)
-- Add to Cart button
-- Back link to catalog
+- Fetch from inventory WHERE sku = URL param (stock data)
+- Also fetch from products WHERE sku = URL param (description, buy_button_url, active status)
+- Two-column layout: large image left, details panel right
+- Show: item_name, price, category, status badge, description
+- "Buy Now" button → href = products.buy_button_url, opens in new tab; grey out if stock_left = 0 or buy_button_url empty
+- Back link: ← Back to catalog
 
 --- COMPONENT: Cart Drawer ---
-- Triggered by cart icon in navbar (shows count badge)
-- Slide in from right
-- Line items: image thumbnail, name, $price × quantity, remove button
+- Triggered by cart icon in navbar (shows item count badge)
+- Slides in from the right side
+- Line items: image thumbnail (first URL), item_name, $price × qty, remove button
 - Order total at bottom
-- "Request Order" button → opens a modal with: Name, Email, Message fields → on submit show thank-you confirmation
+- "Request Order" button → modal form (Name, Email, Message) → thank-you message on submit
 
 --- REALTIME ---
-Connect to Supabase Realtime on the inventory table. On INSERT, UPDATE, or DELETE events re-fetch the catalog so changes from MERIT appear instantly on the site.
+Subscribe to Supabase Realtime on the inventory table (postgres_changes, event: '*').
+On any change event (INSERT/UPDATE/DELETE) → refetch the catalog immediately.
+This ensures stock levels update automatically when MERIT sends order emails.
 
---- ENV VARS needed ---
+--- ENV VARS ---
 VITE_SUPABASE_URL      = {_sb_url_ai}
 VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
             st.code(_lovable_prompt, language="text")
@@ -3061,8 +3166,8 @@ Paste the prompt below into the AI chat after opening your project.
 For **v0.dev** just paste it directly into the v0 prompt bar.
             """)
             _cursor_prompt = f"""\
-I need to build a product storefront that reads from my Supabase database.
-Use the schema and rules below exactly — do not invent column names or table structures.
+I need to build a product storefront that reads from my existing Supabase database.
+Use ONLY the exact column names and table structures listed below. Do not invent new columns or tables.
 
 {_schema_block}
 
@@ -3071,108 +3176,74 @@ Use the schema and rules below exactly — do not invent column names or table s
 Step 1 — Supabase client setup
   import {{ createClient }} from '@supabase/supabase-js'
   const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,   // or VITE_SUPABASE_URL for Vite
+    process.env.NEXT_PUBLIC_SUPABASE_URL,   // or import.meta.env.VITE_SUPABASE_URL for Vite
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   )
 
-Step 2 — Fetch in-stock products
+Step 2 — Fetch in-stock, In-Store products (inventory table)
   const {{ data: products }} = await supabase
     .from('inventory')
     .select('sku, item_name, category, price, stock_left, status, image_url')
-    .gt('stock_left', 0)
-    .order('item_name')
+    .gt('stock_left', 0)       // only in-stock products
+    .order('item_name', {{ ascending: true }})
 
-Step 3 — Fetch a single product by SKU
-  const {{ data }} = await supabase
-    .from('inventory')
-    .select('*')
-    .eq('sku', sku)
-    .single()
+Step 3 — Parse product image (may have multiple comma-separated URLs)
+  // ALWAYS use only the first URL:
+  const getImage = (url) => {{
+    const first = url?.split(',')[0]?.trim() || ''
+    return first && first !== 'N/A' ? first : null
+  }}
+  // In JSX:
+  const imgSrc = getImage(product.image_url)
+  <img src={{imgSrc || '/placeholder.png'}} alt={{product.item_name}}
+       onError={{e => {{ e.target.src = '/placeholder.png' }}}} />
 
-Step 4 — Fetch distinct categories for the filter bar
-  const {{ data: cats }} = await supabase
-    .from('inventory')
-    .select('category')
-  const categories = [...new Set(cats.map(r => r.category).filter(Boolean))]
+Step 4 — Fetch a single product by SKU (join both tables)
+  // inventory row (stock data):
+  const {{ data: inv }} = await supabase.from('inventory').select('*').eq('sku', sku).single()
+  // products row (description, buy_button_url, active/store status):
+  const {{ data: prod }} = await supabase.from('products').select('*').eq('sku', sku).single()
 
-Step 5 — Product image rendering
-  // image_url is a full HTTPS URL from Freeimage.host or Imghippo
-  // Always provide a fallback:
-  <img
-    src={{product.image_url !== 'N/A' ? product.image_url : '/placeholder.png'}}
-    alt={{product.item_name}}
-    onError={{(e) => {{ e.target.src = '/placeholder.png' }}}}
-  />
+Step 5 — Fetch distinct categories for the filter bar
+  const {{ data: cats }} = await supabase.from('inventory').select('category').gt('stock_left', 0)
+  const categories = [...new Set(cats?.map(r => r.category).filter(Boolean))]
 
-Step 6 — Subscribe to Realtime (live updates from MERIT)
+Step 6 — Buy Now button rules
+  // buy_button_url is a direct VEI purchase link — do NOT add custom cart logic
+  // Show the button only if buy_button_url is non-empty AND stock_left > 0:
+  {{prod?.buy_button_url && inv?.stock_left > 0 && (
+    <a href={{prod.buy_button_url}} target="_blank" rel="noopener">Buy Now</a>
+  )}}
+
+Step 7 — Store status filter (products table)
+  // When reading from the products table, always filter WHERE active = true:
+  const {{ data }} = await supabase.from('products').select('*').eq('active', true)
+
+Step 8 — Subscribe to Realtime (inventory updates from MERIT)
   const channel = supabase
     .channel('merit-inventory')
     .on('postgres_changes', {{ event: '*', schema: 'public', table: 'inventory' }},
-      () => fetchProducts()  // re-fetch on any change
+      () => fetchProducts()   // re-fetch on any stock change
     )
     .subscribe()
-  // Cleanup: supabase.removeChannel(channel)
+  // Cleanup on unmount: supabase.removeChannel(channel)
 
-Step 7 — Run RLS SQL in Supabase SQL Editor before deploying:
+Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
   ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
   ALTER TABLE products  ENABLE ROW LEVEL SECURITY;
   CREATE POLICY "Public read inventory" ON inventory FOR SELECT USING (true);
   CREATE POLICY "Public read products"  ON products  FOR SELECT USING (true);
 
 === BUILD THE FOLLOWING ===
-- Responsive product grid (3 cols desktop, 1 col mobile) from the inventory table
-- Category filter pills
-- Product detail page routed by SKU
-- Cart stored in localStorage (sku, item_name, price, image_url, quantity)
-- Simple checkout modal (Name, Email, Message) with confirmation on submit
-- Realtime subscription so the page auto-updates when I change products in MERIT"""
+- Responsive product grid (3 cols desktop, 1 col mobile) from inventory table (stock_left > 0 only)
+- Category filter pills using distinct inventory.category values
+- Product detail page /products/[sku] — show description from products table, buy_button_url as Buy Now link
+- Store status awareness: Out of Store products (active = false) are never shown
+- Multiple image support: always extract first URL from comma-separated image_url
+- Cart stored in localStorage (sku, item_name, price, first image URL, quantity)
+- Checkout modal (Name, Email, Message) with confirmation on submit
+- Realtime subscription so the page updates automatically when MERIT sends order emails and deducts stock"""
             st.code(_cursor_prompt, language="text")
-
-        # ── Full Schema SQL ─────────────────────────────────────────────
-        with _ai_schema_tab:
-            st.markdown(
-                "**Paste this SQL into Supabase Dashboard → SQL Editor → New Query and click Run.** "
-                "This creates all tables MERIT needs AND adds the public-read RLS policies your website requires. "
-                "If tables already exist the `IF NOT EXISTS` clauses make it safe to re-run."
-            )
-            _full_schema_sql = SETUP_SQL.rstrip() + """
-
--- ── Row Level Security (required for website access) ─────────────────────────
--- Run this after creating the tables.
--- This lets any visitor with the anon key READ products.
--- MERIT writes using the direct connection string which bypasses RLS entirely.
-
-ALTER TABLE inventory     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE products      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE outbound_logs ENABLE ROW LEVEL SECURITY;
-
--- Drop policies first in case you are re-running this script
-DROP POLICY IF EXISTS "Public read inventory"     ON inventory;
-DROP POLICY IF EXISTS "Public read products"      ON products;
-DROP POLICY IF EXISTS "Public read outbound_logs" ON outbound_logs;
-
-CREATE POLICY "Public read inventory"
-  ON inventory FOR SELECT USING (true);
-
-CREATE POLICY "Public read products"
-  ON products FOR SELECT USING (true);
-
--- outbound_logs: uncomment the line below if you want the website to show order history
--- CREATE POLICY "Public read outbound_logs" ON outbound_logs FOR SELECT USING (true);
-
--- ── Verify everything ─────────────────────────────────────────────────────────
-SELECT
-  t.tablename,
-  t.rowsecurity,
-  COUNT(p.policyname) AS policies
-FROM pg_tables t
-LEFT JOIN pg_policies p ON p.tablename = t.tablename
-WHERE t.schemaname = 'public'
-  AND t.tablename IN ('inventory', 'products', 'outbound_logs')
-GROUP BY t.tablename, t.rowsecurity
-ORDER BY t.tablename;
--- Expected result: 3 rows, rowsecurity = true, inventory and products have 1 policy each"""
-            st.code(_full_schema_sql, language="sql")
 
     # ── Live Preview ─────────────────────────────────────────────────
     with _tab_live:
@@ -3532,6 +3603,9 @@ elif page == "Email Sender":
     # Build catalog lookup once — used for image-match warnings and inventory deduction
     # Load from cloud/SQLite so deductions work even when cfg["products"] is stale
     _catalog_products = load_products_for_catalog(cfg)
+
+    if not _catalog_products:
+        st.warning("No products found. Add products in the **Products** page first — each product must be named exactly as it appears in the VEI Store Manager and Wholesale Marketplace so images and inventory deduction work correctly.")
     _catalog_name_lower: set[str] = {
         str(p.get("item_name", "")).lower().strip()
         for p in _catalog_products if p.get("item_name")
@@ -3595,12 +3669,33 @@ elif page == "Email Sender":
             if not s_name.strip() or not s_email.strip() or not s_order.strip() or not s_prods.strip() or s_cost <= 0:
                 st.error("All fields marked with * are required.")
             else:
-                with st.spinner("Adding to queue..."):
                     if add_to_queue(s_name, s_email, s_order, s_prods, s_sub, s_tax, s_ship, s_cost, s_disc):
                         st.toast(f"Added {s_name} to queue.", icon="👤")
                         st.success(f"Added {s_name} to the queue.")
                         time.sleep(0.5)
                         st.rerun()
+
+        if st.button("Preview Order Email", key="preview_single", width="stretch"):
+            if not s_name.strip() or not s_email.strip() or not s_prods.strip():
+                st.error("Name, Email, and Products are required for a preview.")
+            else:
+                _preview_order = {
+                    "name": s_name,
+                    "email": s_email,
+                    "order_number": s_order or "ORD-PREVIEW",
+                    "products": s_prods,
+                    "subtotal": s_sub,
+                    "tax": s_tax,
+                    "shipping": s_ship,
+                    "total_cost": s_cost or (s_sub + s_tax + s_ship - s_disc),
+                    "discount": s_disc,
+                }
+                st.session_state["_tpl_preview_html"] = build_html(
+                    _preview_order,
+                    cfg.get("from_name") or "Your VEI Firm",
+                    template=cfg.get("email_html_template") or None,
+                )
+                st.rerun()
 
     # ─ Bulk ─────────────────────────────────────
     with tab_bulk:
@@ -3860,7 +3955,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
     with tab_campaign:
         st.markdown("#### Send a broadcast email to a list of contacts")
         st.caption(
-            "Paste your contacts below, write a subject and HTML body, then send to everyone at once. "
+            "Add contacts below, write a subject and HTML body, then send to everyone at once. "
             "Uses the same Gmail credentials as the order sender. "
             "Available variables: `{{name}}` and `{{from_name}}`."
         )
@@ -3873,35 +3968,59 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if not _camp_smtp_email or not _camp_smtp_pass:
             st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
 
-        _camp_col1, _camp_col2 = st.columns([1, 1])
+        # ── Contacts table (bulk-entry style) ─────────────────────────────
+        st.markdown("**Contacts**")
+        if "camp_contact_ids" not in st.session_state:
+            st.session_state.camp_contact_ids = list(range(3))
+            st.session_state.camp_contact_next = 3
 
-        with _camp_col1:
-            st.markdown("**Contacts**")
-            st.caption("One per line. Format: `Name, email@example.com` or just `email@example.com`")
-            _camp_contacts_raw = st.text_area(
-                "Contacts",
-                height=220,
-                key="camp_contacts",
-                label_visibility="collapsed",
-                placeholder="Jane Smith, jane@example.com\nJohn Doe, john@example.com\nanother@example.com",
-            )
+        _CC = [3, 4, 0.45]
+        _cch = st.columns(_CC)
+        for _lbl, _col in zip(["Name", "Email *", ""], _cch):
+            _col.caption(_lbl)
 
-            _camp_subject = st.text_input(
-                "Subject Line",
-                key="camp_subject",
-                placeholder="Important update from your VEI firm",
-            )
+        for _cid in list(st.session_state.camp_contact_ids):
+            _crow = st.columns(_CC)
+            with _crow[0]:
+                st.text_input("name", key=f"cc_name_{_cid}", placeholder="Jane Smith", label_visibility="collapsed")
+            with _crow[1]:
+                st.text_input("email", key=f"cc_email_{_cid}", placeholder="jane@example.com", label_visibility="collapsed")
+            with _crow[2]:
+                if st.button("×", key=f"cc_del_{_cid}", use_container_width=True):
+                    st.session_state.camp_contact_ids.remove(_cid)
+                    st.rerun()
 
-        with _camp_col2:
-            st.markdown("**HTML Template**")
-            st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
-            _camp_tpl_raw = st.text_area(
-                "Campaign HTML",
-                value=_DEFAULT_CAMPAIGN_TEMPLATE,
-                height=220,
-                key="camp_html",
-                label_visibility="collapsed",
-            )
+        _cc_btn1, _cc_btn2 = st.columns([1, 4])
+        with _cc_btn1:
+            if st.button("+ Add Row", key="cc_add_row", use_container_width=True):
+                st.session_state.camp_contact_ids.append(st.session_state.camp_contact_next)
+                st.session_state.camp_contact_next += 1
+                st.rerun()
+
+        _camp_contacts_parsed = []
+        for _cid in st.session_state.camp_contact_ids:
+            _cnm = str(st.session_state.get(f"cc_name_{_cid}", "")).strip()
+            _cem = str(st.session_state.get(f"cc_email_{_cid}", "")).strip()
+            if _cem and "@" in _cem:
+                _camp_contacts_parsed.append({"name": _cnm or _cem.split("@")[0], "email": _cem})
+
+        st.divider()
+
+        _camp_subject = st.text_input(
+            "Subject Line",
+            key="camp_subject",
+            placeholder="Important update from your VEI firm",
+        )
+
+        st.markdown("**HTML Template**")
+        st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
+        _camp_tpl_raw = st.text_area(
+            "Campaign HTML",
+            value=_DEFAULT_CAMPAIGN_TEMPLATE,
+            height=220,
+            key="camp_html",
+            label_visibility="collapsed",
+        )
 
         _camp_prev_col, _camp_send_col = st.columns(2)
         with _camp_prev_col:
@@ -3917,27 +4036,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             with st.expander("Email Preview", expanded=True):
                 st.components.v1.html(st.session_state["_camp_preview_html"], height=500, scrolling=True)
 
-        # Parse contacts
-        def _parse_campaign_contacts(raw: str) -> list[dict]:
-            contacts = []
-            for line in raw.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if "," in line:
-                    parts = line.split(",", 1)
-                    name  = parts[0].strip()
-                    email = parts[1].strip()
-                else:
-                    name  = line.split("@")[0].strip()
-                    email = line.strip()
-                if "@" in email:
-                    contacts.append({"name": name, "email": email})
-            return contacts
 
-        _camp_contacts_parsed = _parse_campaign_contacts(_camp_contacts_raw or "")
-        if _camp_contacts_parsed:
-            st.caption(f"{len(_camp_contacts_parsed)} contact{'s' if len(_camp_contacts_parsed) != 1 else ''} ready to send.")
 
         with _camp_send_col:
             _camp_send_disabled = not (
@@ -4008,10 +4107,14 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
     queue = st.session_state.queue
 
     # Build product image lookup for the queue preview and email sending
+    # Use only the first image URL if multiple are stored comma-separated
+    def _first_img(url: str) -> str:
+        return url.split(",")[0].strip() if url and "," in url else url
+
     _products_lookup: dict[str, str] = {
-        p["item_name"]: p["image_url"]
+        p["item_name"]: _first_img(p["image_url"])
         for p in _catalog_products
-        if p.get("image_url") and p["image_url"] not in ("N/A", "")
+        if p.get("image_url") and _first_img(p["image_url"]) not in ("N/A", "")
     }
 
     if not queue:
