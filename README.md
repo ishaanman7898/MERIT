@@ -2,7 +2,7 @@
 
 MERIT is the definitive productivity tool for Virtual Enterprise International (VEI) firms. Automate order confirmations, manage a professional product catalog, and track live inventory from a single dashboard. No coding or complex spreadsheets required.
 
-[Launch Streamlit App](https://ishaanman7898-merit-merit-app-bfhyad.streamlit.app) • [Documentation](#getting-started) • [API Reference](#api-endpoints)
+[Documentation](#getting-started) • [API Reference](#api-endpoints)
 
 ---
 
@@ -52,12 +52,29 @@ MERIT sends emails through your firm's Gmail account. An App Password is require
 ---
 
 ### 4. Deploy to Streamlit Cloud
-Host your application on the web to allow access for your entire firm.
+Host your application on the web so your entire firm can access it from any browser.
 
-1. Fork this repository to your firm's GitHub account.
-2. Sign in to Streamlit Cloud using GitHub.
-3. Click Create App and select your forked MERIT repository.
-4. Click Deploy to launch your firm's application.
+#### Step 1 — Fork the repository
+1. Go to the MERIT GitHub repository page.
+2. Click **Fork** in the top-right corner.
+3. Under "Owner", select your personal GitHub account (or your firm's organization if you have one).
+4. Click **Create fork**. You now have your own copy of MERIT.
+
+#### Step 2 — Deploy on Streamlit Cloud
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with the same GitHub account you used to fork.
+2. Click **Create app**.
+3. Under "Repository", select your forked MERIT repository.
+4. Set **Main file path** to `app.py`.
+5. Click **Deploy**. Streamlit will build and launch your app in about a minute.
+6. Once live, you'll get a public URL (e.g. `https://yourname-merit-app-xxxxx.streamlit.app`). Share this with your firm.
+
+#### Step 3 — Save your settings so they survive restarts
+Streamlit Cloud restarts your app periodically and wipes any saved files. To keep your settings:
+
+1. Open your live MERIT app and complete steps 1-4 above (database, image hosting, Gmail, sender identity).
+2. Go to **Settings → Secrets TOML** and copy the generated block.
+3. In Streamlit Cloud, open your app → click **Manage app** (bottom-right) → **Settings** → **Secrets**.
+4. Paste the TOML block and click **Save**. Your credentials are now safe across restarts.
 
 ---
 
@@ -94,7 +111,10 @@ A: No coding is required. The setup involves standard copy and paste operations 
 A: Yes. Once Supabase is connected, all firm members can manage inventory and send emails simultaneously.
 
 **Q: What if Streamlit is inaccessible at school?**  
-A: Please consult your IT department to whitelist the Streamlit domain (streamlit.app) for educational use.
+A: Some school networks block Streamlit. You may need to use your personal laptop or even your phone to run the app and set it up — but once everything is configured and your Secrets TOML is saved, your firm can use the app from any browser and device. The one-time setup effort is worth it: MERIT saves hours of manual email and inventory work every week.
+
+**Q: Can I run MERIT on my phone?**  
+A: Yes. The setup steps work fine from a phone or tablet browser. Just open your Streamlit app URL, fill in your credentials, and copy the Secrets TOML before the session ends.
 
 ---
 
