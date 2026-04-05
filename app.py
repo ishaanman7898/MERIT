@@ -2983,6 +2983,48 @@ For Next.js projects:
   NEXT_PUBLIC_SUPABASE_URL      = {_sb_url_ai}
   NEXT_PUBLIC_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
 
+        # ── Fetch real product data from Supabase for AI prompts ─────────
+        _products_block = ""
+        try:
+            _ai_conn_str = _get_effective_supabase_conn_str(cfg)
+            if _ai_conn_str.startswith("postgresql://"):
+                _ai_conn = _psycopg2_connect(_ai_conn_str)
+                try:
+                    import pandas as _pd_ai
+                    _ai_prods_df = _pd_ai.read_sql(
+                        "SELECT sku, name, category, price, description, buy_button_url, active "
+                        "FROM products ORDER BY name",
+                        _ai_conn,
+                    )
+                    if not _ai_prods_df.empty:
+                        _prod_lines = []
+                        for _, _r in _ai_prods_df.iterrows():
+                            _desc = str(_r.get("description") or "").strip()
+                            _buy  = str(_r.get("buy_button_url") or "").strip()
+                            _active = "In Store" if _r.get("active") else "Out of Store"
+                            _line = (
+                                f"  SKU: {_r['sku']} | Name: {_r['name']} | "
+                                f"Category: {_r.get('category', '')} | "
+                                f"Price: ${float(_r.get('price') or 0):.2f} | "
+                                f"Status: {_active} | "
+                                f"Description: {_desc if _desc else '(none)'} | "
+                                f"Buy URL: {_buy if _buy else '(none)'}"
+                            )
+                            _prod_lines.append(_line)
+                        _products_block = (
+                            "\n\n=== YOUR ACTUAL PRODUCTS (live from Supabase) ===\n"
+                            "Use these exact descriptions and buy button URLs when building the storefront.\n"
+                            "Do NOT invent descriptions or buy links — use only what is listed here.\n\n"
+                            + "\n".join(_prod_lines)
+                            + "\n\nNOTE: buy_button_url values above are the real VEI purchase links. "
+                            "Use them as the href for every Buy Now button. "
+                            "If a product's Buy URL is '(none)', hide the Buy Now button for that product."
+                        )
+                finally:
+                    _ai_conn.close()
+        except Exception:
+            pass  # If fetch fails, prompts still work — AI will query Supabase itself
+
         # ── Master Context Block ────────────────────────────────────────
         with _ai_master:
             st.markdown(
@@ -3032,6 +3074,7 @@ Requirements:
    - This keeps stock levels live when MERIT processes orders and deducts inventory
 
 6. RLS — run the RLS SQL (in the Schema & Security SQL tab) in Supabase before going live"""
+            _master_prompt += _products_block
             st.code(_master_prompt, language="text")
 
         # ── Bolt.new ────────────────────────────────────────────────────
@@ -3091,6 +3134,7 @@ Supabase Realtime:
 - This keeps stock levels live as MERIT processes orders
 
 Use the exact env var names: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY"""
+            _bolt_prompt += _products_block
             st.code(_bolt_prompt, language="text")
 
         # ── Lovable ─────────────────────────────────────────────────────
@@ -3156,6 +3200,7 @@ This ensures stock levels update automatically when MERIT sends order emails.
 --- ENV VARS ---
 VITE_SUPABASE_URL      = {_sb_url_ai}
 VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
+            _lovable_prompt += _products_block
             st.code(_lovable_prompt, language="text")
 
         # ── Cursor / v0 / General ───────────────────────────────────────
@@ -3243,6 +3288,7 @@ Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
 - Cart stored in localStorage (sku, item_name, price, first image URL, quantity)
 - Checkout modal (Name, Email, Message) with confirmation on submit
 - Realtime subscription so the page updates automatically when MERIT sends order emails and deducts stock"""
+            _cursor_prompt += _products_block
             st.code(_cursor_prompt, language="text")
 
     # ── Live Preview ─────────────────────────────────────────────────
