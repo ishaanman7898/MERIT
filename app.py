@@ -1640,9 +1640,9 @@ if _has_users and _login_secrets_active:
                         st.warning("Please enter your email and password.")
         st.stop()
 else:
-    # Legacy single-password fallback (backward compatibility / pre-setup)
+    # Legacy single-password fallback — only active once secrets are saved (same rule as multi-user gate)
     _app_pwd = _auth_cfg.get("app_login_password")
-    if _app_pwd and not st.session_state.get("authenticated"):
+    if _app_pwd and _login_secrets_active and not st.session_state.get("authenticated"):
         st.markdown("""
             <style>[data-testid="stSidebar"] { display: none; }</style>
         """, unsafe_allow_html=True)
@@ -5248,13 +5248,6 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
 
     # ── Email Campaigns ──────────────────────────
     with tab_campaign:
-        st.markdown("#### Send a broadcast email to a list of contacts")
-        st.caption(
-            "Add contacts via CSV upload or by pasting text, write a subject and HTML body, then send to everyone at once. "
-            "Uses the same Gmail credentials as the order sender. "
-            "Available variables: `{{name}}` and `{{from_name}}`."
-        )
-
         _camp_cfg = st.session_state.cfg
         _camp_from = _camp_cfg.get("from_name", "")
         _camp_smtp_email = _camp_cfg.get("smtp_email", "").strip()
@@ -5263,17 +5256,22 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if not _camp_smtp_email or not _camp_smtp_pass:
             st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
 
-        # ── Contacts Entry ─────────────────────────────────────────────
-        st.markdown("**Contacts**")
-        _camp_ct1, _camp_ct2 = st.tabs(["Upload CSV", "Paste Text"])
+        _camp_mode = st.radio(
+            "Campaign Mode",
+            ["Upload CSV", "Paste Contacts", "Email Template"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="camp_mode_radio",
+        )
 
-        _camp_contacts_parsed = []
+        # Resolve contacts from whichever source was used last
+        _camp_contacts_parsed: list[dict] = st.session_state.get("_camp_csv_contacts") or []
 
-        with _camp_ct1:
+        # ── Upload CSV ────────────────────────────────────────────────
+        if _camp_mode == "Upload CSV":
             st.caption(
-                "Upload a CSV file with at minimum an **Email** column. "
-                "Include a **Name** column for personalized greetings. "
-                "Any extra columns (e.g. company, city) are ignored."
+                "Upload a CSV with at minimum an **Email** column. "
+                "Include a **Name** column for personalized greetings."
             )
             with st.expander("CSV format example"):
                 st.code("Name,Email\nJane Smith,jane@example.com\nJohn Doe,john@veinternational.org", language="text")
@@ -5286,7 +5284,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     _c_email_col = next((c for c in _cdf.columns if "email" in c.lower()), None)
                     _c_name_col  = next((c for c in _cdf.columns if "name" in c.lower()), None)
                     if not _c_email_col:
-                        st.error(f"No email column found. Columns in file: {list(_cdf.columns)}")
+                        st.error(f"No email column found. Columns: {list(_cdf.columns)}")
                     else:
                         _file_contacts: list[dict] = []
                         for _, _ccr in _cdf.iterrows():
@@ -5296,50 +5294,33 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                             if validate_email(_cem):
                                 _file_contacts.append({"name": _cnm, "email": _cem})
                         if _file_contacts:
+                            st.session_state["_camp_csv_contacts"] = _file_contacts
+                            _camp_contacts_parsed = _file_contacts
                             st.success(f"CSV loaded — **{len(_file_contacts)}** valid contact(s)")
-                            st.dataframe(
-                                pd.DataFrame(_file_contacts[:15]),
-                                use_container_width=True, hide_index=True,
-                            )
+                            st.dataframe(pd.DataFrame(_file_contacts[:15]), use_container_width=True, hide_index=True)
                             if len(_file_contacts) > 15:
                                 st.caption(f"… and {len(_file_contacts) - 15} more")
-                            st.session_state["_camp_csv_contacts"] = _file_contacts
                         else:
-                            st.warning("No valid email addresses found in the CSV.")
+                            st.warning("No valid email addresses found.")
                             st.session_state.pop("_camp_csv_contacts", None)
                 except Exception as _cfe:
                     st.error(f"CSV read error: {_cfe}")
             elif st.session_state.get("_camp_csv_contacts"):
-                st.info(f"Using previously loaded CSV — {len(st.session_state['_camp_csv_contacts'])} contact(s). Upload a new file to change.")
-            # Use CSV contacts if available
-            if st.session_state.get("_camp_csv_contacts"):
-                _camp_contacts_parsed = st.session_state["_camp_csv_contacts"]
+                st.info(f"{len(st.session_state['_camp_csv_contacts'])} contact(s) loaded from CSV. Upload a new file to replace.")
+                st.dataframe(pd.DataFrame(st.session_state["_camp_csv_contacts"][:10]), use_container_width=True, hide_index=True)
 
-        with _camp_ct2:
-            st.caption(
-                "Paste contacts — one per line. "
-                "Accepted: `Name, email`  ·  `email`  ·  tab-separated spreadsheet paste."
-            )
+        # ── Paste Contacts ────────────────────────────────────────────
+        elif _camp_mode == "Paste Contacts":
+            st.caption("One contact per line. Accepted: `Name, email`  ·  `email only`  ·  tab-separated paste from a spreadsheet.")
             with st.expander("Example formats"):
-                st.code("""\
-# Format 1: Name, Email (recommended)
-Jane Smith, jane@example.com
-John Doe, john@veinternational.org
-
-# Format 2: Email only
-jane@example.com
-
-# Format 3: Tab-separated (paste from spreadsheet)
-Jane Smith\tjane@example.com""", language=None)
-
+                st.code("Jane Smith, jane@example.com\njohn@veinternational.org\nJohn Doe\tjohn@veinternational.org", language=None)
             _camp_contacts_raw = st.text_area(
                 "Contact List",
                 placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org",
-                height=180,
+                height=200,
                 key="camp_contacts_bulk",
                 label_visibility="collapsed",
             )
-
             _text_contacts: list[dict] = []
             if _camp_contacts_raw.strip():
                 for _line in _camp_contacts_raw.strip().split("\n"):
@@ -5350,9 +5331,8 @@ Jane Smith\tjane@example.com""", language=None)
                         _parts = [p.strip() for p in _line.split("\t")]
                         for _p in _parts:
                             if "@" in _p:
-                                _em2 = _p
-                                _nm2 = next((pp for pp in _parts if pp != _p and "@" not in pp), _em2.split("@")[0])
-                                _text_contacts.append({"name": _nm2, "email": _em2})
+                                _nm2 = next((pp for pp in _parts if pp != _p and "@" not in pp), _p.split("@")[0])
+                                _text_contacts.append({"name": _nm2, "email": _p})
                                 break
                     elif "," in _line:
                         _pts = [p.strip() for p in _line.split(",", 1)]
@@ -5361,19 +5341,15 @@ Jane Smith\tjane@example.com""", language=None)
                         elif len(_pts) == 2 and "@" in _pts[0]:
                             _text_contacts.append({"name": _pts[1], "email": _pts[0]})
                     elif "@" in _line:
-                        _et = _line.strip()
-                        _text_contacts.append({"name": _et.split("@")[0].replace(".", " ").title(), "email": _et})
+                        _text_contacts.append({"name": _line.split("@")[0].replace(".", " ").title(), "email": _line})
                 if _text_contacts:
-                    # text contacts override CSV when in this tab
+                    st.session_state["_camp_csv_contacts"] = _text_contacts
                     _camp_contacts_parsed = _text_contacts
+                    st.success(f"**{len(_text_contacts)}** contact(s) parsed")
 
-        if _camp_contacts_parsed:
-            st.success(f"✅ **{len(_camp_contacts_parsed)}** contact(s) ready to send")
-
-        st.divider()
-
-        # ── AI Template Prompt ──────────────────────────────────────────
-        _camp_ai_prompt = """\
+        # ── Email Template ────────────────────────────────────────────
+        elif _camp_mode == "Email Template":
+            _camp_ai_prompt = """\
 You are building an HTML email template for a marketing/broadcast campaign.
 Use ONLY these variables (double curly braces, exactly as shown):
   {{name}}         — recipient's name
@@ -5387,106 +5363,104 @@ Requirements:
 
 Design brief: [describe your campaign style here — e.g. "modern and bold, high contrast, blue background with white text, include a 'Shop Now' button style link"]
 """
-        with st.expander("AI prompt — copy this into any AI to generate a campaign template"):
-            st.code(_camp_ai_prompt, language=None)
-            st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
+            with st.expander("AI prompt — paste into any AI to generate a template"):
+                st.code(_camp_ai_prompt, language=None)
+                st.caption("Replace the design brief, paste into your AI, then copy the HTML back here.")
 
-        st.divider()
-
-        _camp_subject = st.text_input(
-            "Subject Line",
-            key="camp_subject",
-            placeholder="Important update from your VEI firm",
-        )
-
-        st.markdown("**HTML Template**")
-        st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
-        _camp_tpl_raw = st.text_area(
-            "Campaign HTML",
-            value=_DEFAULT_CAMPAIGN_TEMPLATE,
-            height=220,
-            key="camp_html",
-            label_visibility="collapsed",
-        )
-
-        _camp_prev_col, _camp_send_col = st.columns(2)
-        with _camp_prev_col:
-            if st.button("Preview Email", width="stretch", key="btn_camp_preview"):
-                _camp_preview_html = (
-                    _camp_tpl_raw
-                    .replace("{{name}}", "Jane Smith")
-                    .replace("{{from_name}}", _camp_from or "Your VEI Firm")
-                )
-                st.session_state["_camp_preview_html"] = _camp_preview_html
-
-        if "_camp_preview_html" in st.session_state:
-            with st.expander("Email Preview", expanded=True):
-                st.components.v1.html(st.session_state["_camp_preview_html"], height=500, scrolling=True)
-
-
-
-        with _camp_send_col:
-            _camp_send_disabled = not (
-                _camp_contacts_parsed and _camp_subject.strip()
-                and _camp_smtp_email and _camp_smtp_pass
+            _camp_subject = st.text_input(
+                "Subject Line",
+                key="camp_subject",
+                placeholder="Important update from your VEI firm",
             )
-            if st.button(
-                f"Send to {len(_camp_contacts_parsed)} Contact{'s' if len(_camp_contacts_parsed) != 1 else ''}",
-                type="primary",
-                width="stretch",
-                key="btn_camp_send",
-                disabled=_camp_send_disabled,
-            ):
-                _camp_prog   = st.progress(0, text="Connecting to Gmail...")
-                _camp_log_ph = st.empty()
-                _camp_results = []
-                _camp_sent = 0
-                _camp_failed = 0
 
-                try:
-                    _camp_server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
-                    _camp_server.starttls()
-                    _camp_server.login(_camp_smtp_email, _camp_smtp_pass)
-                except Exception as _camp_exc:
-                    st.error(f"Could not connect to Gmail: {_camp_exc}")
-                    st.stop()
+            st.markdown("**HTML Template**")
+            st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
+            _camp_tpl_raw = st.text_area(
+                "Campaign HTML",
+                value=_DEFAULT_CAMPAIGN_TEMPLATE,
+                height=240,
+                key="camp_html",
+                label_visibility="collapsed",
+            )
 
-                for _ci, _contact in enumerate(_camp_contacts_parsed):
-                    _camp_prog.progress(
-                        _ci / len(_camp_contacts_parsed),
-                        text=f"Sending {_ci + 1} of {len(_camp_contacts_parsed)}  —  {_contact['email']}",
-                    )
-                    _camp_html_rendered = (
+            _camp_prev_col, _camp_send_col = st.columns(2)
+            with _camp_prev_col:
+                if st.button("Preview Email", width="stretch", key="btn_camp_preview"):
+                    st.session_state["_camp_preview_html"] = (
                         _camp_tpl_raw
-                        .replace("{{name}}", _contact["name"])
-                        .replace("{{from_name}}", _camp_from or "")
+                        .replace("{{name}}", "Jane Smith")
+                        .replace("{{from_name}}", _camp_from or "Your VEI Firm")
                     )
-                    _camp_text_rendered = (
-                        f"Hi {_contact['name']},\n\n"
-                        + "Please view this email in an HTML-capable email client.\n\n"
-                        + (_camp_from or "")
-                    )
-                    _camp_msg = MIMEMultipart("alternative")
-                    _camp_msg["From"]    = f"{_camp_from} <{_camp_smtp_email}>"
-                    _camp_msg["To"]      = _contact["email"]
-                    _camp_msg["Subject"] = _camp_subject.strip()
-                    _camp_msg.attach(MIMEText(_camp_text_rendered, "plain"))
-                    _camp_msg.attach(MIMEText(_camp_html_rendered, "html"))
+            if "_camp_preview_html" in st.session_state:
+                with st.expander("Email Preview", expanded=True):
+                    st.components.v1.html(st.session_state["_camp_preview_html"], height=500, scrolling=True)
+
+            _camp_contact_count = len(_camp_contacts_parsed)
+            if _camp_contact_count == 0:
+                st.info("No contacts loaded yet — go to **Upload CSV** or **Paste Contacts** first.")
+
+            with _camp_send_col:
+                _camp_send_disabled = not (
+                    _camp_contacts_parsed and _camp_subject.strip()
+                    and _camp_smtp_email and _camp_smtp_pass
+                )
+                if st.button(
+                    f"Send to {len(_camp_contacts_parsed)} Contact{'s' if len(_camp_contacts_parsed) != 1 else ''}",
+                    type="primary",
+                    width="stretch",
+                    key="btn_camp_send",
+                    disabled=_camp_send_disabled,
+                ):
+                    _camp_prog   = st.progress(0, text="Connecting to Gmail...")
+                    _camp_log_ph = st.empty()
+                    _camp_results = []
+                    _camp_sent = 0
+                    _camp_failed = 0
 
                     try:
-                        _camp_server.send_message(_camp_msg)
-                        _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": "Sent"})
-                        _camp_sent += 1
-                    except Exception as _camp_err:
-                        _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": f"Failed: {str(_camp_err)[:60]}"})
-                        _camp_failed += 1
+                        _camp_server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
+                        _camp_server.starttls()
+                        _camp_server.login(_camp_smtp_email, _camp_smtp_pass)
+                    except Exception as _camp_exc:
+                        st.error(f"Could not connect to Gmail: {_camp_exc}")
+                        st.stop()
 
-                    _camp_log_ph.dataframe(pd.DataFrame(_camp_results), use_container_width=True, hide_index=True)
-                    time.sleep(0.2)
+                    for _ci, _contact in enumerate(_camp_contacts_parsed):
+                        _camp_prog.progress(
+                            _ci / len(_camp_contacts_parsed),
+                            text=f"Sending {_ci + 1} of {len(_camp_contacts_parsed)}  —  {_contact['email']}",
+                        )
+                        _camp_html_rendered = (
+                            _camp_tpl_raw
+                            .replace("{{name}}", _contact["name"])
+                            .replace("{{from_name}}", _camp_from or "")
+                        )
+                        _camp_text_rendered = (
+                            f"Hi {_contact['name']},\n\n"
+                            + "Please view this email in an HTML-capable email client.\n\n"
+                            + (_camp_from or "")
+                        )
+                        _camp_msg = MIMEMultipart("alternative")
+                        _camp_msg["From"]    = f"{_camp_from} <{_camp_smtp_email}>"
+                        _camp_msg["To"]      = _contact["email"]
+                        _camp_msg["Subject"] = _camp_subject.strip()
+                        _camp_msg.attach(MIMEText(_camp_text_rendered, "plain"))
+                        _camp_msg.attach(MIMEText(_camp_html_rendered, "html"))
 
-                _camp_server.quit()
-                _camp_prog.progress(1.0, text="Done")
-                st.success(f"Campaign complete — {_camp_sent} sent, {_camp_failed} failed.")
+                        try:
+                            _camp_server.send_message(_camp_msg)
+                            _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": "Sent"})
+                            _camp_sent += 1
+                        except Exception as _camp_err:
+                            _camp_results.append({"#": _ci + 1, "Name": _contact["name"], "Email": _contact["email"], "Status": f"Failed: {str(_camp_err)[:60]}"})
+                            _camp_failed += 1
+
+                        _camp_log_ph.dataframe(pd.DataFrame(_camp_results), use_container_width=True, hide_index=True)
+                        time.sleep(0.2)
+
+                    _camp_server.quit()
+                    _camp_prog.progress(1.0, text="Done")
+                    st.success(f"Campaign complete — {_camp_sent} sent, {_camp_failed} failed.")
 
     with tab_email_docs:
         st.subheader("Mass Email — Documentation")
