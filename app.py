@@ -1175,7 +1175,7 @@ with st.sidebar:
     if products_count:
         st.caption(f"Catalog Products: {products_count}")
     
-    st.caption("Version: **v1.4.0**")
+    st.caption("Version: **v1.6.0**")
     
     # ── Queue Status Indicator in Sidebar ─────
     _queue_count = len(st.session_state.queue)
@@ -2004,79 +2004,137 @@ elif page == "Products":
 
         _add_bulk_exp = st.expander("Add Bulk Products", expanded=False)
         with _add_bulk_exp:
-            st.caption("Enter multiple products in the table below or upload a CSV.")
-            if "pb_ids" not in st.session_state:
-                st.session_state.pb_ids   = list(range(4))
-                st.session_state.pb_next  = 4
-            _PB_COLS = [1.5, 2.5, 1.5, 1.2, 2.8, 0.45]
-            _pbh = st.columns(_PB_COLS)
-            for _lbl, _col in zip(["SKU *", "Name *", "Category", "Price ($)", "Image", ""], _pbh):
-                _col.caption(_lbl)
-            for _rid in list(st.session_state.pb_ids):
-                _pc = st.columns(_PB_COLS)
-                with _pc[0]: st.text_input("sku", key=f"pb_sku_{_rid}", placeholder="SKU-001", label_visibility="collapsed")
-                with _pc[1]: st.text_input("name", key=f"pb_name_{_rid}", placeholder="Blue T-Shirt", label_visibility="collapsed")
-                with _pc[2]: st.text_input("cat", key=f"pb_cat_{_rid}", placeholder="General", label_visibility="collapsed")
-                with _pc[3]: st.number_input("price", key=f"pb_price_{_rid}", min_value=0.0, step=0.01, format="%.2f", label_visibility="collapsed")
-                with _pc[4]: st.file_uploader("img", key=f"pb_img_{_rid}", type=["jpg","jpeg","png","webp"], label_visibility="collapsed")
-                with _pc[5]:
-                    if st.button("×", key=f"pb_del_{_rid}", width="stretch"):
-                        st.session_state.pb_ids.remove(_rid)
+            st.caption("Add multiple products at once. Each card has full fields — SKU, Name, Category, Price, Description, Buy URL, and Image.")
+
+            # CSV import at the top
+            _bulk_csv_col, _bulk_csv_btn = st.columns([3, 1])
+            with _bulk_csv_col:
+                _bulk_csv = st.file_uploader(
+                    "Import from CSV (SKU, Name, Category, Price, Description, BuyURL)",
+                    type=["csv"], key="bulk_csv",
+                    help="Columns auto-detected. At minimum include SKU and Name.",
+                )
+            with _bulk_csv_btn:
+                st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+                if _bulk_csv and st.button("Load CSV Rows", key="pb_load_csv", width="stretch"):
+                    try:
+                        _csv_df = pd.read_csv(_bulk_csv)
+                        _csv_df.columns = [c.strip() for c in _csv_df.columns]
+                        _csv_cmap = {}
+                        for _c in _csv_df.columns:
+                            _cl = _c.lower()
+                            if "sku" in _cl: _csv_cmap[_c] = "SKU"
+                            elif "name" in _cl or "product" in _cl: _csv_cmap[_c] = "Name"
+                            elif "cat" in _cl: _csv_cmap[_c] = "Category"
+                            elif "price" in _cl: _csv_cmap[_c] = "Price"
+                            elif "desc" in _cl: _csv_cmap[_c] = "Description"
+                            elif "url" in _cl or "buy" in _cl: _csv_cmap[_c] = "BuyURL"
+                        _csv_df = _csv_df.rename(columns=_csv_cmap)
+                        if "pb_ids" not in st.session_state:
+                            st.session_state.pb_ids  = []
+                            st.session_state.pb_next = 0
+                        _nxt = st.session_state.pb_next
+                        for _, _r in _csv_df.iterrows():
+                            _sv = str(_r.get("SKU", "")).strip().upper()
+                            _nv = str(_r.get("Name", "")).strip()
+                            if not _sv or not _nv:
+                                continue
+                            st.session_state[f"pb_sku_{_nxt}"]    = _sv
+                            st.session_state[f"pb_name_{_nxt}"]   = _nv
+                            st.session_state[f"pb_cat_{_nxt}"]    = str(_r.get("Category", "General")).strip() or "General"
+                            st.session_state[f"pb_price_{_nxt}"]  = float(_r.get("Price", 0) or 0)
+                            st.session_state[f"pb_desc_{_nxt}"]   = str(_r.get("Description", "")).strip()
+                            st.session_state[f"pb_buyurl_{_nxt}"] = str(_r.get("BuyURL", "")).strip()
+                            st.session_state.pb_ids.append(_nxt)
+                            _nxt += 1
+                        st.session_state.pb_next = _nxt
+                        st.toast(f"Loaded {_nxt - (st.session_state.pb_next - _nxt + _nxt - st.session_state.pb_next)} rows", icon=None)
                         st.rerun()
-            _idx_c1, _idx_c2 = st.columns([1, 3])
-            with _idx_c1:
-                if st.button("+ Add Row", width="stretch", key="pb_add_row"):
+                    except Exception as _pce:
+                        st.error(f"CSV load error: {_pce}")
+
+            st.divider()
+
+            if "pb_ids" not in st.session_state:
+                st.session_state.pb_ids  = list(range(3))
+                st.session_state.pb_next = 3
+
+            for _rid in list(st.session_state.pb_ids):
+                with st.container(border=True):
+                    _pb_r1 = st.columns([1.2, 2, 1.2, 1.2, 0.35])
+                    with _pb_r1[0]:
+                        st.text_input("SKU *", key=f"pb_sku_{_rid}", placeholder="SKU-001")
+                    with _pb_r1[1]:
+                        st.text_input("Product Name *", key=f"pb_name_{_rid}", placeholder="Blue T-Shirt")
+                    with _pb_r1[2]:
+                        st.text_input("Category", key=f"pb_cat_{_rid}", placeholder="General")
+                    with _pb_r1[3]:
+                        st.number_input("Price ($)", key=f"pb_price_{_rid}", min_value=0.0, step=0.01, format="%.2f")
+                    with _pb_r1[4]:
+                        st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+                        if st.button("×", key=f"pb_del_{_rid}", help="Remove row"):
+                            st.session_state.pb_ids.remove(_rid)
+                            st.rerun()
+                    _pb_r2 = st.columns([2, 2, 2])
+                    with _pb_r2[0]:
+                        st.text_area("Description", key=f"pb_desc_{_rid}", placeholder="Short product description…", height=68)
+                    with _pb_r2[1]:
+                        st.text_input("Buy Button URL", key=f"pb_buyurl_{_rid}", placeholder="https://portal.veinternational.org/…")
+                    with _pb_r2[2]:
+                        st.file_uploader("Product Image", key=f"pb_img_{_rid}", type=["jpg","jpeg","png","webp"])
+
+            _pb_act1, _pb_act2 = st.columns(2)
+            with _pb_act1:
+                if st.button("+ Add Product Row", width="stretch", key="pb_add_row"):
                     st.session_state.pb_ids.append(st.session_state.pb_next)
                     st.session_state.pb_next += 1
                     st.rerun()
-            with _idx_c2:
-                _bulk_csv = st.file_uploader("Import CSV (SKU, Name, Category, Price)", type=["csv"], key="bulk_csv")
+            with _pb_act2:
+                if st.button("Add All to Products", type="primary", width="stretch", key="btn_bulk_add"):
+                    with st.spinner("Processing products..."):
+                        _pb_rows = []
+                        for _rid in st.session_state.pb_ids:
+                            _bsku  = str(st.session_state.get(f"pb_sku_{_rid}", "")).strip().upper()
+                            _bname = str(st.session_state.get(f"pb_name_{_rid}", "")).strip()
+                            if _bsku and _bname:
+                                _pb_rows.append({
+                                    "sku":    _bsku,
+                                    "name":   _bname,
+                                    "cat":    str(st.session_state.get(f"pb_cat_{_rid}", "")).strip() or "General",
+                                    "price":  round(float(st.session_state.get(f"pb_price_{_rid}", 0.0)), 2),
+                                    "desc":   str(st.session_state.get(f"pb_desc_{_rid}", "")).strip(),
+                                    "buyurl": str(st.session_state.get(f"pb_buyurl_{_rid}", "")).strip(),
+                                    "img":    st.session_state.get(f"pb_img_{_rid}"),
+                                })
 
-            if st.button("Add All to Products", type="primary", width="stretch", key="btn_bulk_add"):
-                with st.spinner("Processing products..."):
-                    _pb_rows = []
-                    for _rid in st.session_state.pb_ids:
-                        _bsku = str(st.session_state.get(f"pb_sku_{_rid}", "")).strip().upper()
-                        _bname = str(st.session_state.get(f"pb_name_{_rid}", "")).strip()
-                        if _bsku and _bname:
-                            _pb_rows.append({
-                                "sku": _bsku, "name": _bname,
-                                "cat": str(st.session_state.get(f"pb_cat_{_rid}", "")).strip() or "General",
-                                "price": round(float(st.session_state.get(f"pb_price_{_rid}", 0.0)), 2),
-                                "img": st.session_state.get(f"pb_img_{_rid}")
-                            })
-                    if _bulk_csv:
-                        _df = pd.read_csv(_bulk_csv)
-                        _df.columns = _df.columns.str.strip()
-                        _cmap = {c: "SKU" if "sku" in c.lower() else "Name" if "name" in c.lower() or "prod" in c.lower() else "Category" if "cat" in c.lower() else "Price" if "price" in c.lower() else c for c in _df.columns}
-                        _df = _df.rename(columns=_cmap)
-                        for _, _r in _df.iterrows():
-                            if str(_r.get("SKU","")).strip() and str(_r.get("Name","")).strip():
-                                _pb_rows.append({"sku": str(_r["SKU"]).strip().upper(), "name": str(_r["Name"]).strip(), "cat": str(_r.get("Category","General")).strip() or "General", "price": round(float(_r.get("Price",0)), 2), "img": None})
-                    
-                    added, uploaded = 0, 0
-                    for _r in _pb_rows:
-                        _url = "N/A"
-                        if _r["img"] and _has_image_host(cfg):
-                            try:
-                                _r["img"].seek(0)
-                                _url = upload_image(_r["img"].read(), cfg, name=_r["name"])
-                                uploaded += 1
-                            except: pass
-                        _p = {"sku": _r["sku"], "item_name": _r["name"], "category": _r["cat"], "price": _r["price"], "stock_left": 0, "status": "In stock", "image_url": _url}
-                        save_product_to_db(_p, cfg)
-                        _cp = cfg.get("products", [])
-                        cfg["products"] = [x for x in _cp if x.get("sku") != _r["sku"]]
-                        cfg["products"].append(_p)
-                        added += 1
-                    save_config(cfg)
-                    st.session_state.cfg = cfg
-                    st.session_state.pb_ids, st.session_state.pb_next = list(range(4)), 4
-                    st.toast(f"Added {added} products.", icon=None)
-                    st.success(f"Successfully added {added} products.")
-                    _clear_data_caches()
-                    time.sleep(0.5)
-                    st.rerun()
+                        added = 0
+                        for _r in _pb_rows:
+                            _url = "N/A"
+                            if _r["img"] and _has_image_host(cfg):
+                                try:
+                                    _r["img"].seek(0)
+                                    _url = upload_image(_r["img"].read(), cfg, name=_r["name"])
+                                except Exception: pass
+                            _p = {
+                                "sku": _r["sku"], "item_name": _r["name"], "category": _r["cat"],
+                                "price": _r["price"], "stock_left": 0, "status": "In stock",
+                                "image_url": _url, "description": _r["desc"],
+                                "buy_button_url": _r["buyurl"], "active": True,
+                            }
+                            save_product_to_db(_p, cfg)
+                            _cp = cfg.get("products", [])
+                            cfg["products"] = [x for x in _cp if x.get("sku") != _r["sku"]]
+                            cfg["products"].append(_p)
+                            added += 1
+                        save_config(cfg)
+                        st.session_state.cfg = cfg
+                        st.session_state.pb_ids  = list(range(3))
+                        st.session_state.pb_next = 3
+                        st.toast(f"Added {added} products.", icon=None)
+                        st.success(f"Successfully added {added} products.")
+                        _clear_data_caches()
+                        time.sleep(0.5)
+                        st.rerun()
 
     # ══ EDIT PRODUCTS ════════════════════════════
     with tab_edit:
@@ -2096,21 +2154,55 @@ elif page == "Products":
                 _cur_img_raw = str(_eprod.get("image_url", "N/A"))
                 _cur_urls = [u.strip() for u in _cur_img_raw.split(",") if u.strip() and u.strip() != "N/A"]
                 if _cur_urls:
-                    st.markdown("**Current images** (first is used in emails and storefront)")
+                    st.markdown("**Current images** — first image is used in emails and on storefront")
                     _img_disp_cols = st.columns(min(len(_cur_urls), 4))
                     for _ci, _curl in enumerate(_cur_urls):
                         with _img_disp_cols[_ci % 4]:
                             st.image(_curl, use_container_width=True)
-                            if st.button(f"Remove image {_ci + 1}", key=f"rm_img_{_edit_sku}_{_ci}", use_container_width=True):
-                                _new_urls = [u for i, u in enumerate(_cur_urls) if i != _ci]
-                                _eprod["image_url"] = ",".join(_new_urls) if _new_urls else "N/A"
-                                save_product_to_db(_eprod, cfg)
-                                _cp2 = cfg.get("products", [])
-                                cfg["products"] = [dict(p, image_url=_eprod["image_url"]) if p.get("sku") == _edit_sku else p for p in _cp2]
-                                save_config(cfg)
-                                st.session_state.cfg = cfg
-                                _clear_data_caches()
-                                st.rerun()
+                            st.caption(f"Image {_ci + 1}{' (primary)' if _ci == 0 else ''}")
+                            _eimg_c1, _eimg_c2 = st.columns(2)
+                            with _eimg_c1:
+                                if st.button(f"Remove", key=f"rm_img_{_edit_sku}_{_ci}", use_container_width=True):
+                                    _new_urls = [u for idx2, u in enumerate(_cur_urls) if idx2 != _ci]
+                                    _eprod["image_url"] = ",".join(_new_urls) if _new_urls else "N/A"
+                                    save_product_to_db(_eprod, cfg)
+                                    _cp2 = cfg.get("products", [])
+                                    cfg["products"] = [dict(p, image_url=_eprod["image_url"]) if p.get("sku") == _edit_sku else p for p in _cp2]
+                                    save_config(cfg)
+                                    st.session_state.cfg = cfg
+                                    _clear_data_caches()
+                                    st.rerun()
+                            with _eimg_c2:
+                                with st.popover("Replace", use_container_width=True):
+                                    st.markdown(f"**Replace image {_ci + 1}**")
+                                    _repl_file = st.file_uploader(
+                                        "New image", type=["jpg","jpeg","png","webp"],
+                                        key=f"repl_{_edit_sku}_{_ci}",
+                                        label_visibility="collapsed",
+                                    )
+                                    if _repl_file:
+                                        st.image(_repl_file, use_container_width=True)
+                                        if _has_image_host(cfg):
+                                            if st.button("Upload & Replace", key=f"repl_btn_{_edit_sku}_{_ci}", type="primary", use_container_width=True):
+                                                with st.spinner("Uploading replacement…"):
+                                                    try:
+                                                        _repl_file.seek(0)
+                                                        _new_repl_url = upload_image(_repl_file.read(), cfg, name=str(_eprod.get("item_name", _edit_sku)))
+                                                        _replaced = list(_cur_urls)
+                                                        _replaced[_ci] = _new_repl_url
+                                                        _eprod["image_url"] = ",".join(_replaced)
+                                                        save_product_to_db(_eprod, cfg)
+                                                        _cp3 = cfg.get("products", [])
+                                                        cfg["products"] = [dict(p, image_url=_eprod["image_url"]) if p.get("sku") == _edit_sku else p for p in _cp3]
+                                                        save_config(cfg)
+                                                        st.session_state.cfg = cfg
+                                                        _clear_data_caches()
+                                                        st.toast("Image replaced.", icon=None)
+                                                        st.rerun()
+                                                    except Exception as _re:
+                                                        st.error(f"Replace failed: {_re}")
+                                        else:
+                                            st.warning("Configure image hosting in Settings first.")
 
                 with st.form(key=f"edit_form_{_edit_sku}"):
                     _e_c1, _e_c2 = st.columns(2)
@@ -3574,39 +3666,107 @@ Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
     with _tab_api:
         st.markdown("### REST API Endpoints")
         st.caption(
-            "These are the URLs your website can call to read products. "
-            "You normally don't need to use these manually — the AI Prompts tab generates code that calls them for you. "
-            "But they are here if you want to test or inspect them."
+            "These are the URLs your website calls to read product data. "
+            "The AI Prompts tab generates the full code for you, but these endpoints are here to test, debug, or copy into tools like Postman."
         )
+
+        # ── How authentication works ───────────────────────────────────
+        with st.expander("How to authenticate — read this first", expanded=True):
+            st.markdown("""
+**Every request needs two headers:**
+
+| Header | Value |
+|---|---|
+| `apikey` | Your Supabase **anon / public** key |
+| `Authorization` | `Bearer YOUR_SUPABASE_ANON_KEY` |
+
+**Where to get your anon key:**
+1. Go to your Supabase Dashboard
+2. Click the **gear icon** (Project Settings) in the left sidebar
+3. Click **API** → copy the key under **Project API keys → anon / public**
+
+The anon key starts with `eyJ…` and is safe to put in your website. It is read-only when Row Level Security is enabled.
+""")
+            st.code(
+                "apikey: YOUR_SUPABASE_ANON_KEY\nAuthorization: Bearer YOUR_SUPABASE_ANON_KEY",
+                language="http",
+            )
+
         st.markdown(f"**Base URL:** `{_api_rest_base}`")
-        st.markdown("**Required headers on every request:**")
-        st.code(
-            f"apikey: YOUR_SUPABASE_ANON_KEY\nAuthorization: Bearer YOUR_SUPABASE_ANON_KEY",
-            language="http",
-        )
         st.divider()
 
         st.markdown("#### Products + live stock (`inventory` table)")
         _inv_rows = [
             ("GET", f"{_api_rest_base}/inventory?select=*",                                  "All products (all columns)"),
             ("GET", f"{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name", "In-stock only, A to Z"),
-            ("GET", f"{_api_rest_base}/inventory?select=*&category=eq.Apparel",              "Filter by category"),
+            ("GET", f"{_api_rest_base}/inventory?select=*&category=eq.Apparel",              "Filter by category (replace Apparel)"),
             ("GET", f"{_api_rest_base}/inventory?sku=eq.SKU001&select=*",                    "One product by SKU"),
+            ("GET", f"{_api_rest_base}/inventory?select=sku,item_name,price,stock_left",     "Specific columns only"),
+            ("GET", f"{_api_rest_base}/inventory?stock_left=gte.1&order=price.asc&select=*", "In-stock, sorted by price (low→high)"),
         ]
         st.dataframe(
             pd.DataFrame(_inv_rows, columns=["Method", "URL", "What it returns"]),
             use_container_width=True, hide_index=True,
         )
 
-        st.markdown("#### Clean catalog (no stock numbers) — `products` table")
+        st.markdown("#### Clean catalog (description + buy button) — `products` table")
         _prod_rows = [
-            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true",                   "All active products"),
-            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true&order=name",        "Active, A to Z"),
-            ("GET", f"{_api_rest_base}/products?category=eq.Apparel&active=eq.true&select=*", "Filter by category"),
+            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true",                     "All active (In Store) products"),
+            ("GET", f"{_api_rest_base}/products?select=*&active=eq.true&order=name",          "Active, A to Z"),
+            ("GET", f"{_api_rest_base}/products?category=eq.Apparel&active=eq.true&select=*", "Filter by category + active"),
+            ("GET", f"{_api_rest_base}/products?sku=eq.SKU001&select=*",                      "One product by SKU (description + buy URL)"),
         ]
         st.dataframe(
             pd.DataFrame(_prod_rows, columns=["Method", "URL", "What it returns"]),
             use_container_width=True, hide_index=True,
+        )
+
+        st.divider()
+        st.markdown("#### Curl examples — test in your terminal")
+        st.code(f"""\
+# Replace YOUR_SUPABASE_ANON_KEY with your actual key
+
+# Get all in-stock products
+curl "{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name" \\
+  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
+  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+
+# Get one product by SKU
+curl "{_api_rest_base}/inventory?sku=eq.SKU001&select=*" \\
+  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
+  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+
+# Get all active products with description and buy button
+curl "{_api_rest_base}/products?select=*&active=eq.true&order=name" \\
+  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
+  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+""", language="bash")
+
+        st.divider()
+        st.markdown("#### PostgREST filter operators (use in URL parameters)")
+        _ops = [
+            ("eq", "equal to", "category=eq.Apparel"),
+            ("neq", "not equal", "status=neq.Out of stock"),
+            ("gt / gte", "greater than / or equal", "stock_left=gte.1  ·  price=gt.10"),
+            ("lt / lte", "less than / or equal", "price=lte.50"),
+            ("like", "pattern match (case-sensitive)", "item_name=like.*Shirt*"),
+            ("ilike", "pattern match (case-insensitive)", "item_name=ilike.*shirt*"),
+            ("in", "matches any in list", "category=in.(Apparel,Accessories)"),
+            ("is", "is null / true / false", "active=is.true"),
+            ("order", "sort results", "order=price.asc  ·  order=item_name.desc"),
+            ("limit", "max rows returned", "limit=10"),
+            ("offset", "skip rows (pagination)", "offset=20&limit=10"),
+        ]
+        st.dataframe(
+            pd.DataFrame(_ops, columns=["Operator", "Meaning", "Example"]),
+            use_container_width=True, hide_index=True,
+        )
+
+        st.divider()
+        st.info(
+            "**Tip:** Combine multiple filters with `&`. "
+            "Example: in-stock Apparel sorted by price → "
+            f"`{_api_rest_base}/inventory?select=*&category=eq.Apparel&stock_left=gte.1&order=price.asc`"
         )
 
     # ── Code Snippets ─────────────────────────────────────────────────
@@ -3836,13 +3996,13 @@ elif page == "Mass Email":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_order, tab_template, tab_campaign = st.tabs(
-        ["Order Entry", "Order Template", "Email Campaigns"]
+    tab_order, tab_campaign = st.tabs(
+        ["Order Entry", "Email Campaigns"]
     )
 
     # ─ Order Entry (Single / Bulk / Excel) ──────────────────
     with tab_order:
-        _mode = st.radio("Entry Method", ["Single Order", "Bulk Table", "Excel Import"], horizontal=True, label_visibility="collapsed")
+        _mode = st.radio("Entry Method", ["Single Order", "Bulk Table", "Excel Import", "Order Template"], horizontal=True, label_visibility="collapsed")
         
         if _mode == "Single Order":
             st.markdown("#### Add one order")
@@ -3853,41 +4013,103 @@ elif page == "Mass Email":
             with c2:
                 s_order = st.text_input("Order # *", key="s_order", placeholder="ORD-1001")
             with c3:
-                s_cost  = st.number_input("Total Cost ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
-            
+                pass
+
             s_prods = st.text_area(
-                "Products *", key="s_prods", height=108,
+                "Products *", key="s_prods", height=80,
                 placeholder="Blue T-Shirt\nBlack Jeans",
                 help="One product per line, or separate with | or ;",
             )
-            
+
+            st.markdown("**Order Totals**")
+            _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+            with _sc1:
+                s_subtotal = st.number_input("Subtotal ($)", key="s_subtotal", min_value=0.0, step=0.01, format="%.2f")
+            with _sc2:
+                s_discount = st.number_input("Discount ($)", key="s_discount", min_value=0.0, step=0.01, format="%.2f")
+            with _sc3:
+                s_tax = st.number_input("Tax ($)", key="s_tax", min_value=0.0, step=0.01, format="%.2f")
+            with _sc4:
+                s_shipping = st.number_input("Shipping ($)", key="s_shipping", min_value=0.0, step=0.01, format="%.2f")
+            with _sc5:
+                s_cost = st.number_input("Total ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f",
+                                         help="Leave 0 to auto-calculate: Subtotal − Discount + Tax + Shipping")
+            _s_auto = round(s_subtotal - s_discount + s_tax + s_shipping, 2)
+            _s_final = s_cost if s_cost > 0 else _s_auto
+            if s_subtotal > 0 and s_cost == 0:
+                st.caption(f"Auto-calculated total: **${_s_auto:.2f}**")
+
             if st.button("Add to Queue", key="single_add", type="primary"):
-                if s_name and s_email and s_order and s_prods and s_cost > 0:
-                    if add_to_queue(s_name, s_email, s_order, s_prods, 0, 0, 0, s_cost, 0):
+                if s_name and s_email and s_order and s_prods and _s_final > 0:
+                    if add_to_queue(s_name, s_email, s_order, s_prods, s_subtotal, s_tax, s_shipping, _s_final, s_discount):
                         st.success(f"Added {s_name} to the queue.")
                         st.rerun()
                 else:
-                    st.error("All fields marked with * are required.")
+                    st.error("All fields marked with * are required and Total must be > $0.")
         elif _mode == "Bulk Table":
             st.markdown("#### Enter multiple orders")
-            _BULK_BASE = pd.DataFrame({
-                "Name":       pd.Series([], dtype=str),
-                "Email":      pd.Series([], dtype=str),
-                "Order #":    pd.Series([], dtype=str),
-                "Products":   pd.Series([], dtype=str),
-                "Total Cost": pd.Series([], dtype=float),
-            })
-            edited = st.data_editor(_BULK_BASE, num_rows="dynamic", width="stretch", key="bulk_editor")
+            st.caption("Fill in the table directly, or upload a CSV. Columns: Name, Email, Order #, Products, Subtotal, Discount, Tax, Shipping, Total.")
+
+            _bulk_ord_csv = st.file_uploader("Import Orders from CSV", type=["csv"], key="bulk_orders_csv",
+                                              help="CSV must have at least: Name, Email, Order #, Products, Total columns.")
+            _BULK_INIT = {
+                "Name":     pd.Series([], dtype=str),
+                "Email":    pd.Series([], dtype=str),
+                "Order #":  pd.Series([], dtype=str),
+                "Products": pd.Series([], dtype=str),
+                "Subtotal": pd.Series([], dtype=float),
+                "Discount": pd.Series([], dtype=float),
+                "Tax":      pd.Series([], dtype=float),
+                "Shipping": pd.Series([], dtype=float),
+                "Total":    pd.Series([], dtype=float),
+            }
+            _BULK_BASE = pd.DataFrame(_BULK_INIT)
+            if _bulk_ord_csv:
+                try:
+                    _bdf = pd.read_csv(_bulk_ord_csv)
+                    _bdf.columns = [c.strip() for c in _bdf.columns]
+                    _bc = {}
+                    for _col in _bdf.columns:
+                        _cl = _col.lower().replace(" ", "_").replace("#", "")
+                        if "name" in _cl and "item" not in _cl: _bc[_col] = "Name"
+                        elif "email" in _cl: _bc[_col] = "Email"
+                        elif "order" in _cl: _bc[_col] = "Order #"
+                        elif "product" in _cl or "item" in _cl: _bc[_col] = "Products"
+                        elif "subtotal" in _cl or "sub_total" in _cl: _bc[_col] = "Subtotal"
+                        elif "discount" in _cl: _bc[_col] = "Discount"
+                        elif "tax" in _cl: _bc[_col] = "Tax"
+                        elif "ship" in _cl or "freight" in _cl: _bc[_col] = "Shipping"
+                        elif "total" in _cl: _bc[_col] = "Total"
+                    _bdf = _bdf.rename(columns=_bc)
+                    for _fc in ["Subtotal", "Discount", "Tax", "Shipping", "Total"]:
+                        if _fc not in _bdf.columns: _bdf[_fc] = 0.0
+                        else: _bdf[_fc] = pd.to_numeric(_bdf[_fc], errors="coerce").fillna(0.0)
+                    _keep = [c for c in ["Name","Email","Order #","Products","Subtotal","Discount","Tax","Shipping","Total"] if c in _bdf.columns]
+                    _BULK_BASE = _bdf[_keep].copy()
+                    st.success(f"CSV loaded — {len(_BULK_BASE)} row(s) ready to review and add.")
+                except Exception as _be:
+                    st.error(f"CSV read error: {_be}")
+
+            edited = st.data_editor(_BULK_BASE, num_rows="dynamic", use_container_width=True, key="bulk_editor")
             if st.button("Add All to Queue", type="primary", key="bulk_add"):
                 added = 0
                 for _, row in edited.iterrows():
-                    nm, em, on, pr, co = row["Name"], row["Email"], row["Order #"], row["Products"], row["Total Cost"]
-                    if nm and em and on and pr and co > 0:
-                        if add_to_queue(nm, em, on, pr, 0, 0, 0, co, 0): added += 1
+                    nm   = str(row.get("Name", "") or "").strip()
+                    em   = str(row.get("Email", "") or "").strip()
+                    on   = str(row.get("Order #", "") or "").strip()
+                    pr   = str(row.get("Products", "") or "").strip()
+                    sub  = float(row.get("Subtotal", 0) or 0)
+                    disc = float(row.get("Discount", 0) or 0)
+                    tax  = float(row.get("Tax", 0) or 0)
+                    ship = float(row.get("Shipping", 0) or 0)
+                    tot  = float(row.get("Total", 0) or 0)
+                    if tot == 0: tot = round(sub - disc + tax + ship, 2)
+                    if nm and em and on and pr and tot > 0:
+                        if add_to_queue(nm, em, on, pr, sub, tax, ship, tot, disc): added += 1
                 if added:
                     st.success(f"Added {added} order(s) to the queue.")
                     st.rerun()
-        else:  # Excel Import
+        elif _mode == "Excel Import":
             st.markdown("#### Import from VEI Checkout Excel File")
             xl_file = st.file_uploader("Choose an Excel file", type=["xlsx"], key="excel_upload")
             if st.button("Import Excel", type="primary", key="btn_xl_import"):
@@ -3902,15 +4124,14 @@ elif page == "Mass Email":
                         else:
                             st.error("No valid orders found.")
 
-    # ─ Email Template ───────────────────────────
-    with tab_template:
-        st.markdown("#### Customize your email layout")
-        st.caption(
-            "Write or paste HTML below. Use the variables listed to inject order data. "
-            "Saved to config.json — persists across restarts."
-        )
+        else:  # Order Template
+            st.markdown("#### Customize your order email layout")
+            st.caption(
+                "Write or paste HTML below. Use the variables listed to inject order data. "
+                "Saved to config.json — persists across restarts."
+            )
 
-        _tpl_vars_md = """
+            _tpl_vars_md = """
 | Variable | What it inserts |
 |---|---|
 | `{{name}}` | Customer's name |
@@ -3923,10 +4144,10 @@ elif page == "Mass Email":
 | `{{shipping}}` | Shipping amount ($) |
 | `{{total_cost}}` | Total order cost ($) |
 """
-        with st.expander("Available template variables", expanded=True):
-            st.markdown(_tpl_vars_md)
+            with st.expander("Available template variables", expanded=True):
+                st.markdown(_tpl_vars_md)
 
-        _ai_prompt = """\
+            _ai_prompt = """\
 You are building an HTML email template for an order confirmation email.
 Use ONLY these variables (double curly braces, exactly as shown):
   {{name}}         — customer's name
@@ -3952,63 +4173,62 @@ Example default HTML template for inspiration:
 
 Design brief: [describe your style here — e.g. "clean and minimal, brand color #4F46E5, sans-serif font, white background, dark header bar, soft rounded corners"]
 """
-        with st.expander("AI prompt — copy this into any AI (ChatGPT, Claude, or any LLM) to generate a template"):
-            st.code(_ai_prompt, language=None)
-            st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
+            with st.expander("AI prompt — copy this into any AI (ChatGPT, Claude, or any LLM) to generate a template"):
+                st.code(_ai_prompt, language=None)
+                st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
 
-        _current_tpl = cfg.get("email_html_template", "").strip()
-        _editor_val  = _current_tpl if _current_tpl else _DEFAULT_EMAIL_TEMPLATE
+            _current_tpl = cfg.get("email_html_template", "").strip()
+            _editor_val  = _current_tpl if _current_tpl else _DEFAULT_EMAIL_TEMPLATE
 
-        _tpl_input = st.text_area(
-            "HTML template",
-            value=_editor_val,
-            height=380,
-            key="email_tpl_editor",
-            label_visibility="collapsed",
-            help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}}, {{subtotal}}, {{discount}}, {{tax}}, {{shipping}}, {{total_cost}} as placeholders.",
-        )
+            _tpl_input = st.text_area(
+                "HTML template",
+                value=_editor_val,
+                height=380,
+                key="email_tpl_editor",
+                label_visibility="collapsed",
+                help="Use {{name}}, {{order_number}}, {{from_name}}, {{items_html}}, {{subtotal}}, {{discount}}, {{tax}}, {{shipping}}, {{total_cost}} as placeholders.",
+            )
 
-        _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
-        with _tpl_c1:
-            if st.button("Save Template", type="primary", width="stretch", key="btn_save_tpl"):
-                with st.spinner("Saving template..."):
-                    cfg["email_html_template"] = _tpl_input.strip()
+            _tpl_c1, _tpl_c2, _tpl_c3 = st.columns(3)
+            with _tpl_c1:
+                if st.button("Save Template", type="primary", width="stretch", key="btn_save_tpl"):
+                    with st.spinner("Saving template..."):
+                        cfg["email_html_template"] = _tpl_input.strip()
+                        save_config(cfg)
+                        st.session_state.cfg = cfg
+                        st.toast("Template saved.", icon="💾")
+                        st.success("Template saved.")
+            with _tpl_c2:
+                if st.button("Reset to Default", width="stretch", key="btn_reset_tpl"):
+                    cfg["email_html_template"] = ""
                     save_config(cfg)
                     st.session_state.cfg = cfg
-                    st.toast("Template saved.", icon="💾")
-                    st.success("Template saved.")
-        with _tpl_c2:
-            if st.button("Reset to Default", width="stretch", key="btn_reset_tpl"):
-                cfg["email_html_template"] = ""
-                save_config(cfg)
-                st.session_state.cfg = cfg
-                st.session_state.pop("_tpl_preview_html", None)
-                st.success("Reset to built-in template.")
-                st.rerun()
-        with _tpl_c3:
-            if st.button("Preview", width="stretch", key="btn_preview_tpl"):
-                _preview_order = {
-                    "name": "Jane Smith",
-                    "order_number": "ORD-1001",
-                    "products": "Blue T-Shirt | Black Jeans",
-                }
-                st.session_state["_tpl_preview_html"] = build_html(
-                    _preview_order,
-                    cfg.get("from_name") or "Your VEI Firm",
-                    template=_tpl_input.strip() or None,
-                )
+                    st.session_state.pop("_tpl_preview_html", None)
+                    st.success("Reset to built-in template.")
+                    st.rerun()
+            with _tpl_c3:
+                if st.button("Preview", width="stretch", key="btn_preview_tpl"):
+                    _preview_order = {
+                        "name": "Jane Smith",
+                        "order_number": "ORD-1001",
+                        "products": "Blue T-Shirt | Black Jeans",
+                    }
+                    st.session_state["_tpl_preview_html"] = build_html(
+                        _preview_order,
+                        cfg.get("from_name") or "Your VEI Firm",
+                        template=_tpl_input.strip() or None,
+                    )
 
-        # Render preview full-width below the buttons (persists across reruns)
-        if "_tpl_preview_html" in st.session_state:
-            st.markdown("---")
-            st.markdown("**Email preview** — sample order: Jane Smith · ORD-1001 · Blue T-Shirt, Black Jeans")
-            st.components.v1.html(st.session_state["_tpl_preview_html"], height=800, scrolling=True)
+            if "_tpl_preview_html" in st.session_state:
+                st.markdown("---")
+                st.markdown("**Email preview** — sample order: Jane Smith · ORD-1001 · Blue T-Shirt, Black Jeans")
+                st.components.v1.html(st.session_state["_tpl_preview_html"], height=800, scrolling=True)
 
     # ── Email Campaigns ──────────────────────────
     with tab_campaign:
         st.markdown("#### Send a broadcast email to a list of contacts")
         st.caption(
-            "Add contacts below, write a subject and HTML body, then send to everyone at once. "
+            "Add contacts via CSV upload or by pasting text, write a subject and HTML body, then send to everyone at once. "
             "Uses the same Gmail credentials as the order sender. "
             "Available variables: `{{name}}` and `{{from_name}}`."
         )
@@ -4021,65 +4241,112 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if not _camp_smtp_email or not _camp_smtp_pass:
             st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
 
-        # ── Contacts Entry (CSV-style bulk) ────────────────────────────────
-        st.markdown("**Contacts List**")
-        st.caption(
-            "Paste contacts in CSV format — one per line. "
-            "Accepted formats: `Name, email` or just `email@example.com`. "
-            "You can also paste directly from a spreadsheet (tab or comma separated)."
-        )
+        # ── Contacts Entry ─────────────────────────────────────────────
+        st.markdown("**Contacts**")
+        _camp_ct1, _camp_ct2 = st.tabs(["Upload CSV", "Paste Text"])
 
-        with st.expander("Example formats — click to see"):
-            st.code("""\
+        _camp_contacts_parsed = []
+
+        with _camp_ct1:
+            st.caption(
+                "Upload a CSV file with at minimum an **Email** column. "
+                "Include a **Name** column for personalized greetings. "
+                "Any extra columns (e.g. company, city) are ignored."
+            )
+            with st.expander("CSV format example"):
+                st.code("Name,Email\nJane Smith,jane@example.com\nJohn Doe,john@veinternational.org", language="text")
+            _camp_csv_file = st.file_uploader("Contacts CSV", type=["csv"], key="camp_csv_upload",
+                                               label_visibility="collapsed")
+            if _camp_csv_file:
+                try:
+                    _cdf = pd.read_csv(_camp_csv_file)
+                    _cdf.columns = [c.strip() for c in _cdf.columns]
+                    _c_email_col = next((c for c in _cdf.columns if "email" in c.lower()), None)
+                    _c_name_col  = next((c for c in _cdf.columns if "name" in c.lower()), None)
+                    if not _c_email_col:
+                        st.error(f"No email column found. Columns in file: {list(_cdf.columns)}")
+                    else:
+                        _file_contacts: list[dict] = []
+                        for _, _ccr in _cdf.iterrows():
+                            _cem = str(_ccr[_c_email_col]).strip()
+                            _cnm = (str(_ccr[_c_name_col]).strip()
+                                    if _c_name_col else _cem.split("@")[0].replace(".", " ").title())
+                            if validate_email(_cem):
+                                _file_contacts.append({"name": _cnm, "email": _cem})
+                        if _file_contacts:
+                            st.success(f"CSV loaded — **{len(_file_contacts)}** valid contact(s)")
+                            st.dataframe(
+                                pd.DataFrame(_file_contacts[:15]),
+                                use_container_width=True, hide_index=True,
+                            )
+                            if len(_file_contacts) > 15:
+                                st.caption(f"… and {len(_file_contacts) - 15} more")
+                            st.session_state["_camp_csv_contacts"] = _file_contacts
+                        else:
+                            st.warning("No valid email addresses found in the CSV.")
+                            st.session_state.pop("_camp_csv_contacts", None)
+                except Exception as _cfe:
+                    st.error(f"CSV read error: {_cfe}")
+            elif st.session_state.get("_camp_csv_contacts"):
+                st.info(f"Using previously loaded CSV — {len(st.session_state['_camp_csv_contacts'])} contact(s). Upload a new file to change.")
+            # Use CSV contacts if available
+            if st.session_state.get("_camp_csv_contacts"):
+                _camp_contacts_parsed = st.session_state["_camp_csv_contacts"]
+
+        with _camp_ct2:
+            st.caption(
+                "Paste contacts — one per line. "
+                "Accepted: `Name, email`  ·  `email`  ·  tab-separated spreadsheet paste."
+            )
+            with st.expander("Example formats"):
+                st.code("""\
 # Format 1: Name, Email (recommended)
 Jane Smith, jane@example.com
 John Doe, john@veinternational.org
-Alex Johnson, alex.j@school.edu
 
-# Format 2: Email only (name auto-detected from address)
+# Format 2: Email only
 jane@example.com
-john@veinternational.org
 
-# Format 3: Spreadsheet paste (tab separated)
-Jane Smith\tjane@example.com
-John Doe\tjohn@veinternational.org
-""", language=None)
+# Format 3: Tab-separated (paste from spreadsheet)
+Jane Smith\tjane@example.com""", language=None)
 
-        _camp_contacts_raw = st.text_area(
-            "Contact List",
-            placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org\nalex@school.edu",
-            height=200,
-            key="camp_contacts_bulk",
-            label_visibility="collapsed",
-        )
+            _camp_contacts_raw = st.text_area(
+                "Contact List",
+                placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org",
+                height=180,
+                key="camp_contacts_bulk",
+                label_visibility="collapsed",
+            )
 
-        _camp_contacts_parsed = []
-        if _camp_contacts_raw.strip():
-            for _line in _camp_contacts_raw.strip().split("\n"):
-                _line = _line.strip()
-                if not _line or _line.startswith("#"):
-                    continue
-                # Try tab separator first (spreadsheet paste)
-                if "\t" in _line:
-                    _parts = [p.strip() for p in _line.split("\t")]
-                    for _p in _parts:
-                        if "@" in _p:
-                            _email = _p
-                            _name = next((pp for pp in _parts if pp != _p and "@" not in pp), _email.split("@")[0])
-                            _camp_contacts_parsed.append({"name": _name, "email": _email})
-                            break
-                elif "," in _line:
-                    _parts = [p.strip() for p in _line.split(",", 1)]
-                    if len(_parts) == 2 and "@" in _parts[1]:
-                        _camp_contacts_parsed.append({"name": _parts[0], "email": _parts[1]})
-                    elif len(_parts) == 2 and "@" in _parts[0]:
-                        _camp_contacts_parsed.append({"name": _parts[1], "email": _parts[0]})
-                elif "@" in _line:
-                    _em = _line.strip()
-                    _camp_contacts_parsed.append({"name": _em.split("@")[0].replace(".", " ").title(), "email": _em})
+            _text_contacts: list[dict] = []
+            if _camp_contacts_raw.strip():
+                for _line in _camp_contacts_raw.strip().split("\n"):
+                    _line = _line.strip()
+                    if not _line or _line.startswith("#"):
+                        continue
+                    if "\t" in _line:
+                        _parts = [p.strip() for p in _line.split("\t")]
+                        for _p in _parts:
+                            if "@" in _p:
+                                _em2 = _p
+                                _nm2 = next((pp for pp in _parts if pp != _p and "@" not in pp), _em2.split("@")[0])
+                                _text_contacts.append({"name": _nm2, "email": _em2})
+                                break
+                    elif "," in _line:
+                        _pts = [p.strip() for p in _line.split(",", 1)]
+                        if len(_pts) == 2 and "@" in _pts[1]:
+                            _text_contacts.append({"name": _pts[0], "email": _pts[1]})
+                        elif len(_pts) == 2 and "@" in _pts[0]:
+                            _text_contacts.append({"name": _pts[1], "email": _pts[0]})
+                    elif "@" in _line:
+                        _et = _line.strip()
+                        _text_contacts.append({"name": _et.split("@")[0].replace(".", " ").title(), "email": _et})
+                if _text_contacts:
+                    # text contacts override CSV when in this tab
+                    _camp_contacts_parsed = _text_contacts
 
         if _camp_contacts_parsed:
-            st.success(f"✅ Detected **{len(_camp_contacts_parsed)}** valid contact(s)")
+            st.success(f"✅ **{len(_camp_contacts_parsed)}** contact(s) ready to send")
 
         st.divider()
 
