@@ -12,6 +12,9 @@ import smtplib
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from datetime import datetime
+import urllib.request as _urllib_request
 from pathlib import Path
 import warnings
  
@@ -133,6 +136,11 @@ def _init_sqlite():
             total_cost     REAL NOT NULL DEFAULT 0.0,
             timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS email_templates (
+            template_key TEXT PRIMARY KEY,
+            html_content TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
 
@@ -172,6 +180,70 @@ def _clear_data_caches():
     st.cache_data.clear()
     st.session_state.pop("_products_cache", None)
     st.session_state.pop("_inv_cache", None)
+
+
+def _parse_product_qty(pname: str) -> tuple:
+    """Parse 'Product Name x 3' → ('Product Name', 3). Plain names return qty=1."""
+    m = re.match(r'^(.+?)\s+x\s+(\d+)$', pname.strip(), re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    return pname.strip(), 1
+
+
+def save_email_template(key: str, html: str, cfg: dict) -> bool:
+    """Save an email template to SQLite and Supabase by key ('order_template' or 'campaign_template')."""
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("""
+            INSERT INTO email_templates (template_key, html_content)
+            VALUES (?, ?)
+            ON CONFLICT(template_key) DO UPDATE SET
+                html_content=excluded.html_content,
+                updated_at=datetime('now')
+        """, (key, html))
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO email_templates (template_key, html_content)
+                        VALUES (%s, %s)
+                        ON CONFLICT(template_key) DO UPDATE SET
+                            html_content=EXCLUDED.html_content,
+                            updated_at=NOW()
+                    """, (key, html))
+            conn_sb.close()
+        except Exception: pass
+    return True
+
+
+def load_email_template(key: str, cfg: dict) -> str:
+    """Load an email template by key. Returns '' if not found."""
+    # Try Supabase first
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb.cursor() as cur:
+                cur.execute("SELECT html_content FROM email_templates WHERE template_key=%s", (key,))
+                row = cur.fetchone()
+            conn_sb.close()
+            if row and row[0]:
+                return row[0]
+        except Exception: pass
+    # Fall back to SQLite
+    try:
+        conn = _get_sqlite_conn()
+        row = conn.execute("SELECT html_content FROM email_templates WHERE template_key=?", (key,)).fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception: pass
+    return ""
 
 
 # ─────────────────────────────────────────────
@@ -252,6 +324,14 @@ BEGIN
     ALTER TABLE outbound_logs ADD COLUMN shipping NUMERIC(10,2) NOT NULL DEFAULT 0.00;
   END IF;
 END $$;
+
+-- ── Email templates (custom HTML templates) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS email_templates (
+    id           BIGSERIAL     PRIMARY KEY,
+    template_key TEXT          NOT NULL UNIQUE,  -- 'order_template' | 'campaign_template'
+    html_content TEXT          NOT NULL DEFAULT '',
+    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
 
 -- Add your own tables below this line ──────────────────────────────────────
 """
@@ -1175,7 +1255,7 @@ with st.sidebar:
     if products_count:
         st.caption(f"Catalog Products: {products_count}")
     
-    st.caption("Version: **v1.6.0**")
+    st.caption("Version: **v1.7.0**")
     
     # ── Queue Status Indicator in Sidebar ─────
     _queue_count = len(st.session_state.queue)
@@ -1498,7 +1578,7 @@ def parse_excel_file(file_bytes) -> tuple[list[dict], list[str]]:
                 "discount":      _parse_money(tx.get('discount', 0.0)),
                 "tax":           _parse_money(tx.get('tax', 0.0)),
                 "shipping":      _parse_money(tx.get('shipping', 0.0)),
-                "total_cost":    _parse_money(tx.get('total', 0.0)),
+                "total_cost":    _parse_money(tx.get('total', tx.get('total_cost', 0.0))),
             })
         return rows, warns
     except Exception as e:
@@ -1849,8 +1929,8 @@ elif page == "Products":
     _p_sync = ["SQLite"] + (["Supabase"] if _p_has_sb else [])
     _p_sync_str = " + ".join(_p_sync)
 
-    tab_catalog, tab_add, tab_edit, tab_delete = st.tabs(
-        ["Catalog", "Add Products", "Edit Products", "Delete Products"]
+    tab_catalog, tab_add, tab_edit, tab_delete, tab_prod_docs = st.tabs(
+        ["Catalog", "Add Products", "Edit Products", "Delete Products", "Documentation"]
     )
 
     # ══ CATALOG ═════════════════════════════════
@@ -1929,7 +2009,10 @@ elif page == "Products":
             col_left, col_right = st.columns([3, 2])
             with col_left:
                 p_sku           = st.text_input("SKU *",          placeholder="SKU-001",      key="p_sku")
-                p_name          = st.text_input("Product Name *", placeholder="Blue T-Shirt", key="p_name")
+                p_name          = st.text_input(
+                    "Product Name *", placeholder="Blue T-Shirt", key="p_name",
+                    help="IMPORTANT: This must match EXACTLY the Item Name you used in the VEI Store Manager — including capitalization and spacing. The Buy Button URL is generated from this name.",
+                )
                 p_category      = st.text_input("Category",       placeholder="Clothing",     key="p_category")
                 p_price         = st.number_input("Price ($)", min_value=0.0, step=0.01, format="%.2f", key="p_price")
                 p_description   = st.text_area("Description", placeholder="Short product description shown on storefront.", key="p_description", height=80)
@@ -1937,8 +2020,12 @@ elif page == "Products":
                     "Buy Button URL",
                     placeholder="https://portal.veinternational.org/buybuttons/us019814/btn/product-name/",
                     key="p_buy_btn_url",
-                    help="VEI buy button link. Consumers click this to purchase through the VEI interface.",
+                    help="VEI buy button link. The slug at the end must match exactly your Store Manager item name (lowercased, spaces replaced with hyphens). Example: 'Blue T-Shirt' → .../btn/blue-t-shirt/",
                 )
+                if p_name.strip() and not st.session_state.get("p_buy_btn_url"):
+                    _auto_slug = re.sub(r'[^a-z0-9\-]', '-', p_name.strip().lower()).strip('-')
+                    _auto_slug = re.sub(r'-+', '-', _auto_slug)
+                    st.caption(f"Suggested URL slug: `…/btn/{_auto_slug}/`")
                 p_store_status  = st.selectbox("Store Status", ["In Store", "Out of Store"], index=0, key="p_store_status",
                                                help="In Store = visible on your storefront. Out of Store = hidden from customers.")
             with col_right:
@@ -2289,6 +2376,83 @@ elif page == "Products":
                         time.sleep(0.5)
                         st.rerun()
 
+    with tab_prod_docs:
+        st.subheader("Products Page Documentation")
+        st.markdown("""
+### How the Products System Works
+
+MERIT maintains two synchronized tables for every product:
+
+| Table | Purpose |
+|---|---|
+| **products** | Clean catalog — name, price, description, buy button URL, store status (In Store / Out of Store) |
+| **inventory** | Stock tracking — same product info plus `stock_left`, `status`, `original_stock` |
+
+Both tables are updated simultaneously whenever you add, edit, or delete a product.
+
+---
+
+### Product Fields
+
+| Field | Required | Notes |
+|---|---|---|
+| **SKU** | Yes | Unique product code. Use something consistent like `SKU-001`. Cannot be changed after creation — delete and re-add if needed. |
+| **Product Name** | Yes | **MUST match exactly** the Item Name in VEI Store Manager (same capitalization, same spacing). This is used for inventory deduction matching when emails are sent. |
+| **Category** | No | Used for filtering on your storefront website. Keep consistent (e.g. always "Apparel" not sometimes "apparel"). |
+| **Price** | Yes | Retail price in USD. |
+| **Description** | No | Shown on your storefront product detail page. Can be empty. |
+| **Buy Button URL** | No | Direct VEI purchase link. The slug after `/btn/` must match your Store Manager item name (lowercased, spaces → hyphens). Example: `Blue T-Shirt` → `.../btn/blue-t-shirt/` |
+| **Store Status** | Yes | **In Store** = visible on storefront. **Out of Store** = hidden from customers. Corresponds to `active = true/false` in the database. |
+| **Product Image** | No | Uploaded to Freeimage.host or Imghippo. Multiple images supported — first image is used in order confirmation emails and as the primary storefront image. |
+
+---
+
+### Adding Products
+
+**Single Product** — fill in the form and click **Add Product**. Images are uploaded automatically.
+
+**Bulk Products** — use the card-based form to add multiple products at once, or import from a CSV file. CSV must have at minimum `SKU` and `Name` columns.
+
+---
+
+### Editing Products
+
+Select a product from the dropdown. You can:
+- **Remove** an existing image (removes that URL from the comma-separated list)
+- **Replace** an existing image (uploads a new one and swaps it in place)
+- **Add new images** (appends to the list, new images become secondary)
+- Edit all other fields
+
+Click **Save Changes** to update both the products and inventory tables simultaneously.
+
+---
+
+### Deleting Products
+
+Deleting a product removes it from **both** the products and inventory tables in SQLite and Supabase. This action is permanent — there is no undo.
+
+---
+
+### Store Status vs. Stock Status
+
+These are two separate flags:
+
+- **Store Status** (`active` field in products table): Is the product listed on your storefront? Set in Products → Edit Products.
+- **Stock Status** (`status` field in inventory table): Is the product physically in stock? Set automatically based on `stock_left` in Inventory → Adjust Stock.
+
+A product can be "In Store" but "Out of stock" (listed but sold out). Your storefront should respect both: show an "Out of stock" badge but still display the product.
+
+---
+
+### Buy Button URL — VEI Specific
+
+The buy button URL format is:
+```
+https://portal.veinternational.org/buybuttons/[FIRM-ID]/btn/[product-name]/
+```
+
+Where `[product-name]` is your Store Manager item name, lowercased with spaces replaced by hyphens. **This must match exactly** what VEI has configured in the Store Manager, or the button will return a 404 error.
+        """)
 
 
 # ═════════════════════════════════════════════
@@ -2492,11 +2656,19 @@ elif page == "Inventory":
                     _new_total = st.number_input("New Total", min_value=0, value=_ostock, key=f"orig_val_{_osku}", label_visibility="collapsed")
                 
                 with _oc5:
+                    _also_set_stock = st.checkbox(
+                        "Also update Current Stock",
+                        key=f"orig_sync_{_osku}",
+                        help="Check to also set 'Stock Left' (current available units) to this same value. Useful during initial setup.",
+                    )
                     if st.button("Set", key=f"btn_orig_{_osku}", width="stretch"):
                         with st.spinner("Setting..."):
                             ok, _msg = set_original_stock_all_dbs(_osku, int(_new_total), cfg)
+                            if _also_set_stock:
+                                set_stock_all_dbs(_osku, int(_new_total), cfg)
                             if ok:
-                                st.toast(f"Original stock updated: {_oname}", icon="📌")
+                                _sync_note = " + current stock" if _also_set_stock else ""
+                                st.toast(f"Original stock{_sync_note} updated: {_oname}", icon="📌")
                                 _clear_data_caches()
                                 time.sleep(0.5)
                                 st.rerun()
@@ -2623,6 +2795,32 @@ The **Outbound Information** tab shows a log of every order confirmation email s
 - Timestamp of when the email was sent
 
 This data is stored in both SQLite and Supabase (if configured) and is useful for accounting and order tracking.
+
+---
+
+#### Negative Stock and Email Sending
+
+MERIT enforces a **negative stock block** when sending order emails:
+
+- If any product in the queue has `stock_left <= 0` (already out of stock), the send is **blocked**
+- You must either: adjust stock upward in **Adjust Stock**, or remove those orders from the queue
+- After a send session, if stock goes negative for any product (unlikely but possible with concurrent orders), that product is marked as **Backordered** and **cannot be included in the next send session**
+- To clear a backordered product: go to **Adjust Stock** and add enough units to bring `stock_left` above 0
+
+This prevents overselling and ensures your physical inventory stays in sync with what MERIT tracks.
+
+---
+
+#### Original Stock vs. Current Stock
+
+| Field | Meaning | Where to set |
+|---|---|---|
+| `original_stock` | Lifetime total units ever purchased | **Original Stock** tab → Set button |
+| `stock_left` | Units currently available to sell | **Adjust Stock** tab (add/subtract) |
+
+**Important:** Setting **Original Stock** does NOT automatically change **Current Stock (stock_left)**. Use the "Also update Current Stock" checkbox in the Original Stock tab when doing initial setup to set both at once.
+
+When you add stock via **Adjust Stock** (positive delta), both `stock_left` AND `original_stock` are increased together. This is the recommended way to record new inventory purchases.
         """)
 
 # ═════════════════════════════════════════════
@@ -3996,8 +4194,8 @@ elif page == "Mass Email":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_order, tab_campaign = st.tabs(
-        ["Order Entry", "Email Campaigns"]
+    tab_order, tab_campaign, tab_email_docs = st.tabs(
+        ["Order Entry", "Email Campaigns", "Documentation"]
     )
 
     # ─ Order Entry (Single / Bulk / Excel) ──────────────────
@@ -4177,7 +4375,8 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 st.code(_ai_prompt, language=None)
                 st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
 
-            _current_tpl = cfg.get("email_html_template", "").strip()
+            _db_tpl = load_email_template("order_template", cfg)
+            _current_tpl = _db_tpl or cfg.get("email_html_template", "").strip()
             _editor_val  = _current_tpl if _current_tpl else _DEFAULT_EMAIL_TEMPLATE
 
             _tpl_input = st.text_area(
@@ -4196,7 +4395,8 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                         cfg["email_html_template"] = _tpl_input.strip()
                         save_config(cfg)
                         st.session_state.cfg = cfg
-                        st.toast("Template saved.", icon="💾")
+                        save_email_template("order_template", _tpl_input.strip(), cfg)
+                        st.toast("Template saved to config and database.", icon="💾")
                         st.success("Template saved.")
             with _tpl_c2:
                 if st.button("Reset to Default", width="stretch", key="btn_reset_tpl"):
@@ -4466,6 +4666,101 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
                 _camp_prog.progress(1.0, text="Done")
                 st.success(f"Campaign complete — {_camp_sent} sent, {_camp_failed} failed.")
 
+    with tab_email_docs:
+        st.subheader("Mass Email — Documentation")
+        st.markdown("""
+### How Order Emails Work
+
+MERIT builds personalized HTML order confirmation emails and sends them via your Gmail account (SMTP). Here is the complete flow:
+
+---
+
+### Entry Methods
+
+| Method | Use when |
+|---|---|
+| **Single Order** | You have one order to add manually |
+| **Bulk Table** | You have several orders — type them in the table or upload a CSV |
+| **Excel Import** | You exported a checkout report from VEI Store Manager (two-sheet Excel: Transactions + Transaction Items) |
+| **Order Template** | You want to customize the HTML email design |
+
+---
+
+### Queue System
+
+Orders are not sent immediately — they are added to a **Queue** first. This lets you:
+- Review all orders before sending
+- Spot unmatched products (shown in red)
+- Delete individual orders that look wrong
+- Send all at once with one click
+
+**Unmatched products** appear in red in the queue. This means the product name in the order doesn't match any product in your catalog. Fix this by either correcting the product name in the order or adding the product in the Products page.
+
+---
+
+### Inventory Deduction
+
+When an email is sent successfully, MERIT automatically deducts 1 unit of stock per product per order. For products ordered in quantities (e.g. "Blue T-Shirt x 3"), **3 units** are deducted.
+
+**Important:** Orders cannot be sent if any product in the queue has 0 or negative stock. You will see an error and must either:
+- Adjust stock in Inventory → Adjust Stock
+- Remove the order from the queue
+
+---
+
+### Excel Import Format
+
+MERIT expects the VEI Store Manager export format with two sheets:
+- **Sheet 1 (Transactions):** One row per order — Transaction No, Customer Email, Billing Name, Subtotal, Tax, Shipping, Total
+- **Sheet 2 (Transaction Items):** One row per item — Transaction No, Item Name, Quantity
+
+Items are automatically grouped by Transaction No. Quantities > 1 appear as "Item Name x N" in the products field.
+
+---
+
+### Product Image Attachments
+
+When sending order emails, MERIT automatically downloads each product's image (from your image host) and attaches it to the email as a file. Recipients see the product images both embedded in the email body AND as downloadable attachments.
+
+---
+
+### Email Template Variables
+
+Use these in your custom HTML template (Order Template mode):
+
+| Variable | What it inserts |
+|---|---|
+| `{{name}}` | Customer name |
+| `{{order_number}}` | Order number |
+| `{{from_name}}` | Your VEI firm name |
+| `{{items_html}}` | Ready-made HTML product rows (with images) |
+| `{{subtotal}}` | Subtotal ($) |
+| `{{discount}}` | Discount ($) |
+| `{{tax}}` | Tax ($) |
+| `{{shipping}}` | Shipping ($) |
+| `{{total_cost}}` | Order total ($) |
+
+---
+
+### Order Totals Auto-Calculation
+
+In Single Order and Bulk Table entry, if you leave **Total** at $0, it auto-calculates as:
+```
+Total = Subtotal − Discount + Tax + Shipping
+```
+
+---
+
+### Saving Templates
+
+Order templates are saved to:
+1. `config.json` (local)
+2. SQLite database (`email_templates` table)
+3. Supabase (`email_templates` table) — if connected
+
+Templates persist across app reboots when Supabase is connected.
+        """)
+
     # ── Queue ───────────────────────────────────
 
     st.divider()
@@ -4558,6 +4853,31 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
                 for _, _ps_row in _presend_inv_df.iterrows():
                     _presend_stock[str(_ps_row["sku"])] = int(_ps_row.get("stock_left", 0))
 
+            # ── Pre-send stock check ──────────────────────────────────
+            _blocked_items: list[str] = []
+            _stock_sim: dict[str, int] = dict(_presend_stock)
+            for _chk_order in queue:
+                for _chk_p in split_products(_chk_order.get("products", "")):
+                    _chk_name, _chk_qty = _parse_product_qty(_chk_p)
+                    _chk_spl = _chk_name.lower().strip()
+                    _chk_sku = _name_to_sku.get(_chk_spl)
+                    if not _chk_sku:
+                        for _cn2, _cs2 in _name_to_sku.items():
+                            if _chk_spl in _cn2 or _cn2 in _chk_spl:
+                                _chk_sku = _cs2
+                                break
+                    if _chk_sku:
+                        _cur = _stock_sim.get(_chk_sku, 0)
+                        if _cur <= 0:
+                            _blocked_items.append(f"'{_chk_name}' is already out of stock (stock: {_cur})")
+                        _stock_sim[_chk_sku] = _cur - _chk_qty
+
+            if _blocked_items:
+                _unique_blocked = list(dict.fromkeys(_blocked_items))
+                st.error("**Cannot send — out-of-stock products in queue:**\n" + "\n".join(f"• {b}" for b in _unique_blocked[:8]))
+                st.info("Remove these orders from the queue or adjust stock in Inventory → Adjust Stock before sending.")
+                st.stop()
+
             prog   = st.progress(0, text="Connecting to Gmail...")
             log_ph = st.empty()
             results, sent_n, failed_n = [], 0, 0
@@ -4578,15 +4898,40 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
 
                 subject = subject_tmpl.replace("{order_number}", order.get("order_number", ""))
 
-                msg = MIMEMultipart("alternative")
+                msg = MIMEMultipart("mixed")
                 msg["From"]    = f"{from_name} <{smtp_email}>"
                 msg["To"]      = order["email"]
                 msg["Subject"] = subject
-                msg.attach(MIMEText(build_text(order, from_name), "plain"))
-                msg.attach(MIMEText(
+                _alt_part = MIMEMultipart("alternative")
+                _alt_part.attach(MIMEText(build_text(order, from_name), "plain"))
+                _alt_part.attach(MIMEText(
                     build_html(order, from_name, _products_lookup, cfg.get("email_html_template")),
                     "html",
                 ))
+                msg.attach(_alt_part)
+                # Attach product images as files
+                _attached_img_names: set[str] = set()
+                for _att_p in split_products(order.get("products", "")):
+                    _att_name, _ = _parse_product_qty(_att_p)
+                    _att_url = _products_lookup.get(_att_name)
+                    if not _att_url:
+                        for _pk, _pv in _products_lookup.items():
+                            if _att_name.lower() in _pk.lower() or _pk.lower() in _att_name.lower():
+                                _att_url = _pv
+                                break
+                    if _att_url and _att_url not in ("N/A", ""):
+                        _safe_fn = re.sub(r"[^\w]", "_", _att_name)[:40]
+                        if _safe_fn not in _attached_img_names:
+                            try:
+                                with _urllib_request.urlopen(_att_url, timeout=6) as _ir:
+                                    _img_bytes = _ir.read()
+                                _img_part = MIMEImage(_img_bytes)
+                                _img_part.add_header("Content-Disposition", "attachment",
+                                                     filename=f"{_safe_fn}.jpg")
+                                msg.attach(_img_part)
+                                _attached_img_names.add(_safe_fn)
+                            except Exception:
+                                pass
 
                 try:
                     server.send_message(msg)
@@ -4600,6 +4945,7 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
 
                 results.append({
                     "#":idx + 1,
+                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "Name":order["name"],
                     "Email":order["email"],
                     "Order #":order["order_number"],
@@ -4623,10 +4969,16 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
             for _si, _sorder in enumerate(queue):
                 if results[_si]["Status"] == "Sent":
                     for _spname in split_products(_sorder.get("products", "")):
-                        _spl = _spname.lower().strip()
+                        _pclean, _pqty = _parse_product_qty(_spname)
+                        _spl = _pclean.lower().strip()
                         _matched_sku = _name_to_sku.get(_spl)
+                        if not _matched_sku:
+                            for _cn, _csku in _name_to_sku.items():
+                                if _spl in _cn or _cn in _spl:
+                                    _matched_sku = _csku
+                                    break
                         if _matched_sku:
-                            _deductions[_matched_sku] = _deductions.get(_matched_sku, 0) + 1
+                            _deductions[_matched_sku] = _deductions.get(_matched_sku, 0) + _pqty
             if _deductions:
                 for _dsku, _dqty in _deductions.items():
                     adjust_inventory_sqlite(_dsku, -_dqty)
