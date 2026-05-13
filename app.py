@@ -467,6 +467,30 @@ def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
     return any("failed" not in r for r in results), " · ".join(results)
 
 
+def update_user_role_all_dbs(email: str, new_role: str, cfg: dict) -> tuple[bool, str]:
+    """Update a user's role in both SQLite and Supabase."""
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("UPDATE users SET role=? WHERE email=?", (new_role, email.lower().strip()))
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("UPDATE users SET role=%s WHERE email=%s", (new_role, email.lower().strip()))
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
 def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
     """Return user dict {email, full_name, role, pages} if credentials valid, else None."""
     _em = email.lower().strip()
@@ -3833,116 +3857,174 @@ elif page == "Settings":
     if inp_app_pwd.strip():
         st.success("App Login Password set.")
 
-    # ── User Management ──────────────────────────────────────────────
+    # ── Team Access (Roles + Users combined) ─────────────────────────
     st.divider()
-    st.subheader("User Management")
-    st.caption("Add and remove users who can sign in to MERIT.")
+    st.subheader("Team Access")
+    st.caption("Manage roles and the users assigned to them. Admins can change any user's role.")
 
-    _um_users = get_users_from_db(cfg)
-    _um_roles_df = get_roles_from_db(cfg)
-    _um_role_names = list(_um_roles_df["role_name"].values) if not _um_roles_df.empty else ["admin", "staff", "viewer"]
+    _ta_roles_df  = get_roles_from_db(cfg)
+    _ta_users     = get_users_from_db(cfg)
+    _ta_role_names = list(_ta_roles_df["role_name"].values) if not _ta_roles_df.empty else ["admin", "staff", "viewer"]
+    _ta_cur_user  = st.session_state.get("auth_user", {}) or {}
+    _ta_is_admin  = (_ta_cur_user.get("role", "admin") == "admin") or (not _ta_cur_user)
+    _ta_builtin   = {"admin", "staff", "viewer"}
 
-    # ── Add new user ──────────────────────────────────────────────
-    with st.expander("Add New User", expanded=_um_users.empty):
-        _um_c1, _um_c2 = st.columns(2)
-        with _um_c1:
-            _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
-            _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
-        with _um_c2:
-            _um_role  = st.selectbox(
-                "Role", _um_role_names,
-                format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
-                key="um_role"
-            )
-            _um_pass  = st.text_input("Password", type="password", key="um_pass")
-            _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
-        if st.button("Create User", type="primary", key="btn_um_create"):
-            if not _um_name.strip():
-                st.error("Full name is required.")
-            elif not _um_email.strip() or "@" not in _um_email:
-                st.error("A valid email is required.")
-            elif len(_um_pass) < 6:
-                st.error("Password must be at least 6 characters.")
-            elif _um_pass != _um_pass2:
-                st.error("Passwords do not match.")
-            else:
-                _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
-                if _um_ok:
-                    st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
-                    st.rerun()
+    _ta_tab_roles, _ta_tab_users = st.tabs(["Roles", "Users"])
+
+    # ════════════════ ROLES TAB ═══════════════════════════════════
+    with _ta_tab_roles:
+        st.write("Each role defines which pages its members can access.")
+
+        # Create new role
+        with st.expander("Create New Role", expanded=False):
+            _rm_name = st.text_input("Role Name", placeholder="e.g. manager", key="rm_role_name")
+            st.write("Pages this role can access:")
+            _rm_page_cols = st.columns(len(_ALL_PAGES))
+            _rm_checked = []
+            for _rp_i, _rp_name in enumerate(_ALL_PAGES):
+                with _rm_page_cols[_rp_i]:
+                    if st.checkbox(_rp_name, key=f"rm_page_{_rp_i}"):
+                        _rm_checked.append(_rp_name)
+            if st.button("Save Role", type="primary", key="btn_rm_create", disabled=not _ta_is_admin):
+                if not _rm_name.strip():
+                    st.error("Role name is required.")
+                elif not _rm_checked:
+                    st.error("Select at least one page.")
                 else:
-                    st.error(f"Failed: {_um_msg}")
-
-    # ── Existing users ────────────────────────────────────────────
-    _cur_user_set = st.session_state.get("auth_user", {}) or {}
-    if not _um_users.empty:
-        st.subheader("Current Users")
-        for _, _ur in _um_users.iterrows():
-            _ur_role_val = str(_ur.get("role", "viewer"))
-            _ur_pages = get_pages_for_role(_ur_role_val, cfg)
-            _ur_c1, _ur_c2, _ur_c3, _ur_c4 = st.columns([3, 2, 3, 1])
-            _ur_c1.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur.get('email', '')}")
-            _ur_c2.caption(f"Role: **{_ur_role_val.capitalize()}**")
-            _ur_c3.caption(f"Access: {', '.join(_ur_pages) if _ur_pages else 'None'}")
-            with _ur_c4:
-                _ur_email_val = str(_ur.get("email", ""))
-                _protected = (_cur_user_set.get("email", "").lower() == _ur_email_val.lower())
-                if st.button("Remove", key=f"um_del_{_ur_email_val}", disabled=_protected,
-                             help="Cannot remove your own account" if _protected else None):
-                    _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
-                    if _del_ok:
-                        st.toast("User removed.", icon=None)
+                    _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
+                    if _rm_ok:
+                        st.success(f"Role **{_rm_name.strip()}** saved with: {', '.join(_rm_checked)}")
                         st.rerun()
                     else:
-                        st.error(f"Failed: {_del_msg}")
-    else:
-        st.info("No users yet. Use the form above to create your first user.")
+                        st.error(f"Failed: {_rm_msg}")
+            if not _ta_is_admin:
+                st.caption("Only admins can create roles.")
 
-    # ── Role Management ───────────────────────────────────────────
-    st.divider()
-    st.subheader("Role Management")
-    st.caption("Create custom roles with specific page access. Built-in roles (admin, staff, viewer) cannot be deleted.")
+        # All roles list
+        if not _ta_roles_df.empty:
+            for _, _rr in _ta_roles_df.iterrows():
+                _rr_name  = str(_rr.get("role_name", ""))
+                _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
+                _rr_is_builtin = _rr_name in _ta_builtin
+                with st.container(border=True):
+                    _rrc1, _rrc2 = st.columns([5, 1])
+                    with _rrc1:
+                        _rr_label = f"**{_rr_name.capitalize()}**"
+                        if _rr_is_builtin:
+                            _rr_label += " — *built-in*"
+                        st.markdown(_rr_label)
+                        # Page permission badges
+                        _badge_html = " ".join(
+                            f'<span style="background:#1f7aec;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px">{p}</span>'
+                            if p in _rr_pages else
+                            f'<span style="background:#333;color:#666;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;text-decoration:line-through">{p}</span>'
+                            for p in _ALL_PAGES
+                        )
+                        st.markdown(_badge_html, unsafe_allow_html=True)
+                    with _rrc2:
+                        if not _rr_is_builtin and _ta_is_admin:
+                            if st.button("Delete", key=f"rm_del_{_rr_name}", use_container_width=True):
+                                _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
+                                if _rrd_ok:
+                                    st.toast(f"Role '{_rr_name}' deleted.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed: {_rrd_msg}")
 
-    with st.expander("Create Custom Role", expanded=False):
-        _rm_name = st.text_input("Role Name", placeholder="e.g. manager", key="rm_role_name")
-        st.write("Pages this role can access:")
-        _rm_page_cols = st.columns(len(_ALL_PAGES))
-        _rm_checked = []
-        for _rp_i, _rp_name in enumerate(_ALL_PAGES):
-            with _rm_page_cols[_rp_i]:
-                if st.checkbox(_rp_name, key=f"rm_page_{_rp_i}"):
-                    _rm_checked.append(_rp_name)
-        if st.button("Create Role", type="primary", key="btn_rm_create"):
-            if not _rm_name.strip():
-                st.error("Role name is required.")
-            elif not _rm_checked:
-                st.error("Select at least one page.")
-            else:
-                _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
-                if _rm_ok:
-                    st.success(f"Role **{_rm_name.strip()}** saved with access to: {', '.join(_rm_checked)}")
-                    st.rerun()
+    # ════════════════ USERS TAB ═══════════════════════════════════
+    with _ta_tab_users:
+
+        # Add new user
+        with st.expander("Add New User", expanded=_ta_users.empty):
+            _um_c1, _um_c2 = st.columns(2)
+            with _um_c1:
+                _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
+                _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
+            with _um_c2:
+                _um_role  = st.selectbox(
+                    "Role", _ta_role_names,
+                    format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                    key="um_role"
+                )
+                _um_pass  = st.text_input("Password", type="password", key="um_pass")
+                _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
+            if st.button("Create User", type="primary", key="btn_um_create"):
+                if not _um_name.strip():
+                    st.error("Full name is required.")
+                elif not _um_email.strip() or "@" not in _um_email:
+                    st.error("A valid email is required.")
+                elif len(_um_pass) < 6:
+                    st.error("Password must be at least 6 characters.")
+                elif _um_pass != _um_pass2:
+                    st.error("Passwords do not match.")
                 else:
-                    st.error(f"Failed: {_rm_msg}")
+                    _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
+                    if _um_ok:
+                        st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {_um_msg}")
 
-    if not _um_roles_df.empty:
-        st.write("**All Roles**")
-        _builtin = {"admin", "staff", "viewer"}
-        for _, _rr in _um_roles_df.iterrows():
-            _rr_name = str(_rr.get("role_name", ""))
-            _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
-            _rr_c1, _rr_c2, _rr_c3 = st.columns([2, 4, 1])
-            _rr_c1.markdown(f"**{_rr_name.capitalize()}**" + (" *(built-in)*" if _rr_name in _builtin else ""))
-            _rr_c2.caption(", ".join(_rr_pages) if _rr_pages else "No pages")
-            with _rr_c3:
-                if _rr_name not in _builtin:
-                    if st.button("Delete", key=f"rm_del_{_rr_name}"):
-                        _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
-                        if _rrd_ok:
-                            st.toast(f"Role '{_rr_name}' deleted.", icon=None)
-                            st.rerun()
+        # All users — each card shows permissions + inline role change for admins
+        if not _ta_users.empty:
+            for _, _ur in _ta_users.iterrows():
+                _ur_email_val = str(_ur.get("email", ""))
+                _ur_role_val  = str(_ur.get("role", "viewer"))
+                _ur_pages     = get_pages_for_role(_ur_role_val, cfg)
+                _is_self      = (_ta_cur_user.get("email", "").lower() == _ur_email_val.lower())
+
+                with st.container(border=True):
+                    _uc1, _uc2, _uc3 = st.columns([4, 3, 1])
+                    with _uc1:
+                        st.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur_email_val}")
+                    with _uc2:
+                        if _ta_is_admin and not _is_self:
+                            # Inline role selector — admin can change anyone's role
+                            _new_role_sel = st.selectbox(
+                                "Role",
+                                _ta_role_names,
+                                index=_ta_role_names.index(_ur_role_val) if _ur_role_val in _ta_role_names else 0,
+                                format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                                key=f"ur_role_sel_{_ur_email_val}",
+                                label_visibility="collapsed",
+                            )
+                            if _new_role_sel != _ur_role_val:
+                                if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
+                                    _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
+                                    if _uro_ok:
+                                        st.toast(f"Role updated to {_new_role_sel}.")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed: {_uro_msg}")
+                            # Show pages for selected role (live preview as admin changes selectbox)
+                            _preview_pages = get_pages_for_role(_new_role_sel, cfg)
+                            _badge2 = " ".join(
+                                f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                for p in _preview_pages
+                            ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                            st.markdown(_badge2, unsafe_allow_html=True)
                         else:
-                            st.error(f"Failed: {_rrd_msg}")
+                            # Non-admin or self: show role label + pages read-only
+                            st.caption(_ROLE_LABELS.get(_ur_role_val, _ur_role_val.capitalize()))
+                            _badge3 = " ".join(
+                                f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                for p in _ur_pages
+                            ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                            st.markdown(_badge3, unsafe_allow_html=True)
+                    with _uc3:
+                        if st.button("Remove", key=f"um_del_{_ur_email_val}",
+                                     disabled=_is_self or not _ta_is_admin,
+                                     help="Cannot remove your own account" if _is_self else
+                                          "Only admins can remove users" if not _ta_is_admin else None,
+                                     use_container_width=True):
+                            _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
+                            if _del_ok:
+                                st.toast("User removed.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed: {_del_msg}")
+        else:
+            st.info("No users yet. Use the form above to create your first user.")
 
     # ── Step 6: Secrets TOML ─────────────────────────────────────────
     st.divider()
