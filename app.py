@@ -5,8 +5,10 @@ Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase database
 
 import base64
 import csv
+import hashlib
 import io
 import json
+import os as _os
 import re
 import smtplib
 import time
@@ -17,7 +19,7 @@ from datetime import datetime
 import urllib.request as _urllib_request
 from pathlib import Path
 import warnings
- 
+
 # Suppress Pandas UserWarning about SQLAlchemy
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
@@ -141,6 +143,14 @@ def _init_sqlite():
             html_content TEXT NOT NULL DEFAULT '',
             updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            email         TEXT NOT NULL UNIQUE,
+            full_name     TEXT NOT NULL DEFAULT '',
+            role          TEXT NOT NULL DEFAULT 'staff',
+            password_hash TEXT NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
 
@@ -188,6 +198,146 @@ def _parse_product_qty(pname: str) -> tuple:
     if m:
         return m.group(1).strip(), int(m.group(2))
     return pname.strip(), 1
+
+
+# ─────────────────────────────────────────────
+# Role-based access control
+# ─────────────────────────────────────────────
+
+_ROLE_PAGES = {
+    "admin":  ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"],
+    "staff":  ["Mass Email", "Products", "Inventory"],
+    "viewer": ["Inventory"],
+}
+
+_ROLE_LABELS = {
+    "admin":  "Admin — full access",
+    "staff":  "Staff — Email, Products, Inventory",
+    "viewer": "Viewer — Inventory only",
+}
+
+
+def _hash_password(password: str) -> str:
+    salt = _os.urandom(32)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+    return salt.hex() + ":" + key.hex()
+
+
+def _verify_password(stored_hash: str, password: str) -> bool:
+    try:
+        salt_hex, key_hex = stored_hash.split(":", 1)
+        salt = bytes.fromhex(salt_hex)
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+        return key.hex() == key_hex
+    except Exception:
+        return False
+
+
+def get_users_from_db(cfg: dict) -> pd.DataFrame:
+    """Load users table from Supabase (preferred) or SQLite fallback."""
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        try:
+            conn = _psycopg2_connect(_sb_cs)
+            df = pd.read_sql("SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at", conn)
+            conn.close()
+            return df
+        except Exception:
+            pass
+    try:
+        conn = _get_sqlite_conn()
+        df = pd.read_sql("SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def create_user_all_dbs(email: str, full_name: str, role: str, password: str, cfg: dict) -> tuple[bool, str]:
+    """Create a new user in both SQLite and Supabase."""
+    pw_hash = _hash_password(password)
+    results = []
+    # SQLite
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "INSERT INTO users (email, full_name, role, password_hash) VALUES (?, ?, ?, ?)",
+            (email.lower().strip(), full_name.strip(), role, pw_hash)
+        )
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    # Supabase
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO users (email, full_name, role, password_hash) VALUES (%s, %s, %s, %s)",
+                        (email.lower().strip(), full_name.strip(), role, pw_hash)
+                    )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
+    """Delete a user by email from both SQLite and Supabase."""
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("DELETE FROM users WHERE email=?", (email.lower().strip(),))
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("DELETE FROM users WHERE email=%s", (email.lower().strip(),))
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
+    """Return user dict {email, full_name, role} if credentials are valid, else None."""
+    _em = email.lower().strip()
+    # Try Supabase first
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        try:
+            conn = _psycopg2_connect(_sb_cs)
+            with conn.cursor() as cur:
+                cur.execute("SELECT email, full_name, role, password_hash FROM users WHERE email=%s", (_em,))
+                row = cur.fetchone()
+            conn.close()
+            if row and _verify_password(row[3], password):
+                return {"email": row[0], "full_name": row[1], "role": row[2]}
+        except Exception:
+            pass
+    # Fall back to SQLite
+    try:
+        conn = _get_sqlite_conn()
+        row = conn.execute(
+            "SELECT email, full_name, role, password_hash FROM users WHERE email=?", (_em,)
+        ).fetchone()
+        conn.close()
+        if row and _verify_password(row["password_hash"], password):
+            return {"email": row["email"], "full_name": row["full_name"], "role": row["role"]}
+    except Exception:
+        pass
+    return None
 
 
 def save_email_template(key: str, html: str, cfg: dict) -> bool:
@@ -331,6 +481,16 @@ CREATE TABLE IF NOT EXISTS email_templates (
     template_key TEXT          NOT NULL UNIQUE,  -- 'order_template' | 'campaign_template'
     html_content TEXT          NOT NULL DEFAULT '',
     updated_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- ── Users table (multi-user sign-in) ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS users (
+    id            BIGSERIAL      PRIMARY KEY,
+    email         TEXT           NOT NULL UNIQUE,
+    full_name     TEXT           NOT NULL DEFAULT '',
+    role          TEXT           NOT NULL DEFAULT 'staff',  -- admin | staff | viewer
+    password_hash TEXT           NOT NULL,
+    created_at    TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
 
 -- Add your own tables below this line ──────────────────────────────────────
@@ -1203,26 +1363,57 @@ By clicking **I Agree**, you confirm that you have read and understood the above
     st.stop()
 
 # ─────────────────────────────────────────────
-# Login Gate (Persists via Session State)
+# Login Gate — multi-user or legacy password
 # ─────────────────────────────────────────────
 
-_app_pwd = st.session_state.cfg.get("app_login_password")
-if _app_pwd and not st.session_state.get("authenticated"):
-    st.markdown("""
-        <style>
-        [data-testid="stSidebar"] { display: none; }
-        </style>
-    """, unsafe_allow_html=True)
-    st.title("Login to MERIT")
-    st.info("This app is password protected. Enter the password set during configuration.")
-    _in_pwd = st.text_input("Enter Password", type="password", key="login_pwd_input")
-    if st.button("Login", type="primary", key="login_btn"):
-        if _in_pwd == _app_pwd:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    st.stop()
+_auth_cfg = st.session_state.cfg
+_users_df  = get_users_from_db(_auth_cfg)
+_has_users = not _users_df.empty
+
+if _has_users:
+    # Multi-user email/password auth
+    if not st.session_state.get("auth_user"):
+        st.markdown("""
+            <style>[data-testid="stSidebar"] { display: none; }</style>
+        """, unsafe_allow_html=True)
+        st.title("Sign in to MERIT")
+        _li_c1, _li_c2, _li_c3 = st.columns([1, 2, 1])
+        with _li_c2:
+            with st.container(border=True):
+                _sb_co_li = _auth_cfg.get("from_name", "MERIT").strip()
+                st.subheader(f"{_sb_co_li}")
+                st.caption("Enter your email and password to continue.")
+                _li_email = st.text_input("Email", placeholder="you@example.com", key="li_email")
+                _li_pass  = st.text_input("Password", type="password", key="li_pass")
+                if st.button("Sign In", type="primary", key="li_btn", use_container_width=True):
+                    if _li_email.strip() and _li_pass.strip():
+                        _li_user = authenticate_user(_li_email.strip(), _li_pass.strip(), _auth_cfg)
+                        if _li_user:
+                            st.session_state["auth_user"] = _li_user
+                            st.session_state["authenticated"] = True
+                            st.rerun()
+                        else:
+                            st.error("Incorrect email or password.")
+                    else:
+                        st.warning("Please enter your email and password.")
+        st.stop()
+else:
+    # Legacy single-password fallback (backward compatibility)
+    _app_pwd = _auth_cfg.get("app_login_password")
+    if _app_pwd and not st.session_state.get("authenticated"):
+        st.markdown("""
+            <style>[data-testid="stSidebar"] { display: none; }</style>
+        """, unsafe_allow_html=True)
+        st.title("Login to MERIT")
+        st.info("This app is password protected. Enter the password set during configuration.")
+        _in_pwd = st.text_input("Enter Password", type="password", key="login_pwd_input")
+        if st.button("Login", type="primary", key="login_btn"):
+            if _in_pwd == _app_pwd:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
 
 # ─────────────────────────────────────────────
 # Shared helpers
@@ -1286,12 +1477,19 @@ with st.sidebar:
         _secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
     except Exception:
         pass
-    _nav_pages = (
-        ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
-        if _secrets_active
-        else ["Get Started", "Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
-    )
-    # Ensure current value is valid after hiding Get Started
+
+    # Determine which pages this user can see based on role
+    _cur_user  = st.session_state.get("auth_user", {}) or {}
+    _cur_role  = _cur_user.get("role", "admin") if _cur_user else "admin"
+    _base_pages = list(_ROLE_PAGES.get(_cur_role, _ROLE_PAGES["admin"]))
+
+    # Admins can see Get Started before secrets are saved
+    if not _secrets_active and _cur_role == "admin":
+        _nav_pages = ["Get Started"] + _base_pages
+    else:
+        _nav_pages = _base_pages
+
+    # Ensure current value is valid
     if "sidebar_page" not in st.session_state or st.session_state["sidebar_page"] not in _nav_pages:
         st.session_state["sidebar_page"] = _nav_pages[0]
     page = st.radio(
@@ -1309,7 +1507,17 @@ with st.sidebar:
     products_count = len(cfg.get("products", []))
     if products_count:
         st.caption(f"Catalog Products: {products_count}")
-    
+
+    # Show current user + logout
+    if _cur_user:
+        st.divider()
+        st.caption(f"Signed in as **{_cur_user.get('full_name') or _cur_user.get('email', '')}**")
+        st.caption(f"Role: {_cur_user.get('role', '').capitalize()}")
+        if st.button("Sign Out", key="btn_signout", use_container_width=True):
+            st.session_state.pop("auth_user", None)
+            st.session_state.pop("authenticated", None)
+            st.rerun()
+
     st.caption("Version: **v1.8.0**")
     
     # ── Queue Status Indicator in Sidebar ─────
@@ -1867,11 +2075,79 @@ Your **anon key** lets your storefront website safely read products from Supabas
 
 1. In your Supabase project, click the **gear icon (⚙)** in the left sidebar → **Project Settings**.
 2. Click **API** in the left menu.
-3. Under **Project API keys**, copy the **anon / public** key (it starts with `eyJ…`).
+3. Under **Legacy API keys**, find the **anon / public** key (it starts with `eyJ…`) and copy it.
 4. Paste it into **Settings → Supabase Anon Key** in MERIT.
 
 This key is safe to put in public website code as long as Row Level Security (RLS) is enabled (the Setup Tables button does this automatically).
         """)
+
+    # ── Step 1b: User Accounts ────────────────────────────────────────
+    with st.expander("Step 1b — Create User Accounts", expanded=_step1_ok):
+        st.markdown("""
+User accounts let your firm members sign in with their own **email and password**.
+Each user has a **role** that controls which pages they can access:
+
+| Role | Access |
+|---|---|
+| **Admin** | All pages (Email, Products, Inventory, Settings, API Endpoints) |
+| **Staff** | Mass Email, Products, Inventory |
+| **Viewer** | Inventory only |
+
+Create at least one **Admin** account for yourself before completing setup.
+
+> Users are stored in your Supabase `users` table and are available even after app reboots.
+        """)
+
+        st.subheader("Create a New User")
+        _gs_u_c1, _gs_u_c2 = st.columns(2)
+        with _gs_u_c1:
+            _gs_u_name  = st.text_input("Full Name", placeholder="Jane Smith", key="gs_u_name")
+            _gs_u_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="gs_u_email")
+        with _gs_u_c2:
+            _gs_u_role  = st.selectbox("Role", ["admin", "staff", "viewer"],
+                                       format_func=lambda r: _ROLE_LABELS.get(r, r), key="gs_u_role")
+            _gs_u_pass  = st.text_input("Password", type="password", key="gs_u_pass")
+            _gs_u_pass2 = st.text_input("Confirm Password", type="password", key="gs_u_pass2")
+
+        if st.button("Create User", type="primary", key="btn_gs_create_user"):
+            if not _gs_u_name.strip():
+                st.error("Full name is required.")
+            elif not _gs_u_email.strip() or "@" not in _gs_u_email:
+                st.error("A valid email is required.")
+            elif len(_gs_u_pass) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif _gs_u_pass != _gs_u_pass2:
+                st.error("Passwords do not match.")
+            else:
+                _gs_ok, _gs_msg = create_user_all_dbs(
+                    _gs_u_email.strip(), _gs_u_name.strip(), _gs_u_role, _gs_u_pass, cfg
+                )
+                if _gs_ok:
+                    st.success(f"User **{_gs_u_name.strip()}** created with role **{_gs_u_role}**.")
+                    st.rerun()
+                else:
+                    st.error(f"Failed to create user: {_gs_msg}")
+
+        # ── Show existing users ───────────────────────────────────────
+        _gs_users = get_users_from_db(cfg)
+        if not _gs_users.empty:
+            st.divider()
+            st.subheader("Current Users")
+            for _, _gu in _gs_users.iterrows():
+                _gu_c1, _gu_c2, _gu_c3, _gu_c4 = st.columns([3, 2, 2, 1])
+                _gu_c1.markdown(f"**{_gu.get('full_name', '')}**  \n{_gu.get('email', '')}")
+                _gu_c2.caption(f"Role: **{_gu.get('role', '')}**")
+                _gu_c3.caption(f"Created: {str(_gu.get('created_at', ''))[:10]}")
+                with _gu_c4:
+                    if st.button("Remove", key=f"gs_del_{_gu.get('email', '')}", type="secondary"):
+                        _del_ok, _del_msg = delete_user_all_dbs(str(_gu.get("email", "")), cfg)
+                        if _del_ok:
+                            st.toast(f"User removed.", icon=None)
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {_del_msg}")
+        else:
+            st.info("No users created yet. Create at least one Admin user above.")
 
     # ── Step 2: Image Hosting ─────────────────────────────────────────
     with st.expander("Step 2 — Set Up Image Hosting", expanded=not _step2_ok and _step1_ok):
@@ -3372,6 +3648,67 @@ elif page == "Settings":
  
     if inp_app_pwd.strip():
         st.success("App Login Password set.")
+
+    # ── User Management ──────────────────────────────────────────────
+    st.divider()
+    st.subheader("User Management")
+    st.caption("Add and remove users who can sign in to MERIT. Requires Supabase to be connected.")
+
+    if not _has_supabase(cfg):
+        st.warning("Connect Supabase (Step 1) to enable user management.")
+    else:
+        _um_users = get_users_from_db(cfg)
+
+        # ── Add new user ──────────────────────────────────────────────
+        with st.expander("Add New User", expanded=_um_users.empty):
+            _um_c1, _um_c2 = st.columns(2)
+            with _um_c1:
+                _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
+                _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
+            with _um_c2:
+                _um_role  = st.selectbox("Role", ["admin", "staff", "viewer"],
+                                         format_func=lambda r: _ROLE_LABELS.get(r, r), key="um_role")
+                _um_pass  = st.text_input("Password", type="password", key="um_pass")
+                _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
+            if st.button("Create User", type="primary", key="btn_um_create"):
+                if not _um_name.strip():
+                    st.error("Full name is required.")
+                elif not _um_email.strip() or "@" not in _um_email:
+                    st.error("A valid email is required.")
+                elif len(_um_pass) < 6:
+                    st.error("Password must be at least 6 characters.")
+                elif _um_pass != _um_pass2:
+                    st.error("Passwords do not match.")
+                else:
+                    _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
+                    if _um_ok:
+                        st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {_um_msg}")
+
+        # ── Existing users ────────────────────────────────────────────
+        _cur_user_set = st.session_state.get("auth_user", {}) or {}
+        if not _um_users.empty:
+            st.subheader("Current Users")
+            for _, _ur in _um_users.iterrows():
+                _ur_c1, _ur_c2, _ur_c3, _ur_c4 = st.columns([3, 2, 2, 1])
+                _ur_c1.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur.get('email', '')}")
+                _ur_c2.caption(f"Role: **{_ur.get('role', '').capitalize()}**")
+                _ur_c3.caption(f"Access: {', '.join(_ROLE_PAGES.get(_ur.get('role', 'viewer'), []))}")
+                with _ur_c4:
+                    _ur_email_val = str(_ur.get("email", ""))
+                    _protected = (_cur_user_set.get("email", "").lower() == _ur_email_val.lower())
+                    if st.button("Remove", key=f"um_del_{_ur_email_val}", disabled=_protected,
+                                 help="Cannot remove your own account" if _protected else None):
+                        _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
+                        if _del_ok:
+                            st.toast("User removed.", icon=None)
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {_del_msg}")
+        else:
+            st.info("No users yet. Use the form above to create your first user.")
 
     # ── Step 6: Secrets TOML ─────────────────────────────────────────
     st.divider()
