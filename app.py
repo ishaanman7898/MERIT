@@ -340,6 +340,7 @@ CREATE TABLE IF NOT EXISTS email_templates (
 _SECRETS_CREDENTIAL_KEYS = [
     "supabase_connection_string",
     "supabase_db_password",
+    "supabase_anon_key",
     "smtp_email",
     "smtp_password",
     "from_name",
@@ -791,7 +792,7 @@ def load_inventory_from_sqlite() -> pd.DataFrame:
         return pd.DataFrame()
 
 def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
-    """Set the original purchased stock level across all databases."""
+    """Set the original purchased stock level across all databases (absolute override)."""
     results = []
     # SQLite
     try:
@@ -812,6 +813,60 @@ def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, s
             conn_sb.close()
             results.append("Supabase")
         except Exception as exc: results.append(f"Supabase failed: {exc}")
+
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def adjust_original_stock_all_dbs(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
+    """Add delta to both original_stock AND stock_left across all databases.
+
+    Use for restocking: when you purchase new inventory, both the lifetime total
+    and the current available units increase by the same amount.
+    """
+    _status_from_stock = lambda s: (
+        "Backordered" if s < 0 else ("Out of stock" if s == 0 else ("Low stock" if s <= 10 else "In stock"))
+    )
+    results = []
+    # SQLite
+    try:
+        conn = _get_sqlite_conn()
+        row = conn.execute("SELECT stock_left, original_stock FROM inventory WHERE sku=?", (sku,)).fetchone()
+        if row is None:
+            conn.close()
+            return False, "SKU not found"
+        new_stock = row["stock_left"] + delta
+        new_orig  = row["original_stock"] + delta
+        status    = _status_from_stock(new_stock)
+        conn.execute(
+            "UPDATE inventory SET stock_left=?, original_stock=?, status=? WHERE sku=?",
+            (new_stock, new_orig, status, sku)
+        )
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+
+    # Supabase
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("SELECT stock_left, original_stock FROM inventory WHERE sku=%s", (sku,))
+                    row = cur.fetchone()
+                    if row:
+                        new_stock = row[0] + delta
+                        new_orig  = row[1] + delta
+                        status    = _status_from_stock(new_stock)
+                        cur.execute(
+                            "UPDATE inventory SET stock_left=%s, original_stock=%s, status=%s WHERE sku=%s",
+                            (new_stock, new_orig, status, sku)
+                        )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
 
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1255,7 +1310,7 @@ with st.sidebar:
     if products_count:
         st.caption(f"Catalog Products: {products_count}")
     
-    st.caption("Version: **v1.7.0**")
+    st.caption("Version: **v1.8.0**")
     
     # ── Queue Status Indicator in Sidebar ─────
     _queue_count = len(st.session_state.queue)
@@ -1803,6 +1858,19 @@ Once the project is ready:
 #### 4. Connect MERIT to Supabase
 
 Go to **Settings → Database Connections** (use the left sidebar) and paste your URL and password. Click **Test Connection**, then click **Setup Tables**.
+
+---
+
+#### 5. Get your Anon Key (for API Endpoints)
+
+Your **anon key** lets your storefront website safely read products from Supabase without exposing your database password.
+
+1. In your Supabase project, click the **gear icon (⚙)** in the left sidebar → **Project Settings**.
+2. Click **API** in the left menu.
+3. Under **Project API keys**, copy the **anon / public** key (it starts with `eyJ…`).
+4. Paste it into **Settings → Supabase Anon Key** in MERIT.
+
+This key is safe to put in public website code as long as Row Level Security (RLS) is enabled (the Setup Tables button does this automatically).
         """)
 
     # ── Step 2: Image Hosting ─────────────────────────────────────────
@@ -2461,7 +2529,7 @@ Where `[product-name]` is your Store Manager item name, lowercased with spaces r
 
 elif page == "Inventory":
     cfg = st.session_state.cfg
-    
+
     # ── Migration for Original Stock (SQLite local) ─────────────────
     try:
         _conn_mig = _get_sqlite_conn()
@@ -2475,10 +2543,10 @@ elif page == "Inventory":
     except: pass
 
     st.title("Inventory")
-    st.caption("Manage stock overview, adjustments, and outbound logs in one place.")
+    st.caption("Stock overview, financials, and adjustments — all in one place.")
 
-    tab_overview, tab_adjust, tab_original, tab_outbound, tab_inv_docs = st.tabs(
-        ["Overview", "Adjust Stock", "Original Stock", "Outbound Information", "Documentation"]
+    tab_overview, tab_financials, tab_adjust, tab_original, tab_inv_docs = st.tabs(
+        ["Overview", "Financials", "Adjust Stock", "Original Stock", "Documentation"]
     )
 
     # Load shared data
@@ -2486,51 +2554,252 @@ elif page == "Inventory":
         with st.spinner("Loading inventory…"):
             st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
     inv_df = st.session_state["_inv_cache"]
+    _has_sb_inv = _has_supabase(cfg)
 
     # ── OVERVIEW ────────────────────────────────
     with tab_overview:
         if inv_df.empty:
             st.info("No products found. Add products in the **Products** page first.")
         else:
-            # ── Metrics ─────────────────────────────
-            _ov_stock = inv_df["stock_left"].fillna(0).astype(int)
-            _ov_c1, _ov_c2, _ov_c3, _ov_c4 = st.columns(4)
-            _ov_c1.metric("Total Products",    len(inv_df))
-            _ov_c2.metric("Total Stock Units", int(_ov_stock.sum()))
-            _ov_c3.metric("Low Stock Items",   int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
-            _ov_c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
+            _ov_stock    = inv_df["stock_left"].fillna(0).astype(int)
+            _ov_orig     = inv_df.get("original_stock", pd.Series([0]*len(inv_df))).fillna(0).astype(int)
+            _ov_price    = inv_df.get("price", pd.Series([0.0]*len(inv_df))).fillna(0)
+
+            # Revenue from outbound logs
+            _ov_logs = load_outbound_logs(cfg)
+            _ov_total_rev = 0.0
+            _ov_total_ord = 0
+            if not _ov_logs.empty:
+                _cost_col_ov = "total_cost" if "total_cost" in _ov_logs.columns else None
+                if _cost_col_ov:
+                    _ov_total_rev = pd.to_numeric(_ov_logs[_cost_col_ov], errors="coerce").fillna(0).sum()
+                    _ov_total_ord = len(_ov_logs)
+
+            # ── KPI Metrics ─────────────────────────
+            _ov_r1c1, _ov_r1c2, _ov_r1c3, _ov_r1c4 = st.columns(4)
+            _ov_r1c1.metric("Total Products",    len(inv_df))
+            _ov_r1c2.metric("Total Stock Units", int(_ov_stock.sum()))
+            _ov_r1c3.metric("Low Stock Items",   int(((_ov_stock > 0) & (_ov_stock <= 10)).sum()))
+            _ov_r1c4.metric("Out of Stock",      int((_ov_stock == 0).sum()))
+
+            _ov_r2c1, _ov_r2c2, _ov_r2c3, _ov_r2c4 = st.columns(4)
+            _ov_r2c1.metric("Total Revenue",     f"${_ov_total_rev:,.2f}")
+            _ov_r2c2.metric("Total Orders Sent", f"{_ov_total_ord:,}")
+            _ov_catalog_val = float((_ov_stock * _ov_price.values).sum())
+            _ov_r2c3.metric("Inventory Value",   f"${_ov_catalog_val:,.2f}")
+            _ov_r2c4.metric("Backordered",       int((_ov_stock < 0).sum()))
 
             st.divider()
 
-            # ── Stock Chart ──────────────────────────
+            # ── Stock Level Chart ───────────────────
             if "item_name" in inv_df.columns:
                 _ov_chart = (
                     inv_df[["item_name", "stock_left"]]
                     .copy()
-                    .rename(columns={"item_name": "Product", "stock_left": "Stock Level"})
-                    .sort_values("Stock Level", ascending=False)
+                    .rename(columns={"item_name": "Product", "stock_left": "Stock Left"})
+                    .sort_values("Stock Left", ascending=False)
                     .set_index("Product")
                 )
-                st.bar_chart(_ov_chart["Stock Level"], color="#4F46E5")
+                st.subheader("Current Stock Levels")
+                st.bar_chart(_ov_chart["Stock Left"], color="#4F46E5")
 
             st.divider()
-            st.info("To modify stock levels, use the **Adjust Stock** tab above. To add or edit product details, go to the **Products** page.")
+
+            # ── Full Product Stock Table ────────────
+            st.subheader("All Products")
+            _tbl_cols = ["item_name", "sku", "category", "price", "stock_left", "original_stock", "status"]
+            _tbl_df = inv_df[[c for c in _tbl_cols if c in inv_df.columns]].copy()
+            _tbl_df = _tbl_df.rename(columns={
+                "item_name": "Product", "sku": "SKU", "category": "Category",
+                "price": "Price ($)", "stock_left": "Current Stock",
+                "original_stock": "Original Stock", "status": "Status"
+            })
+            st.dataframe(
+                _tbl_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Price ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "Current Stock": st.column_config.NumberColumn(),
+                    "Original Stock": st.column_config.NumberColumn(),
+                }
+            )
+            st.caption("To modify stock levels use **Adjust Stock** or **Original Stock** tabs. To edit product details go to the **Products** page.")
+
+    # ── FINANCIALS ──────────────────────────────
+    with tab_financials:
+        _fin_logs = load_outbound_logs(cfg)
+
+        if _fin_logs.empty:
+            st.info("No financial data yet. Revenue is tracked automatically when order confirmation emails are sent from the **Mass Email** page.")
+        else:
+            _fin_df  = _fin_logs.copy()
+            _ts_col  = "timestamp" if "timestamp" in _fin_df.columns else ("created_at" if "created_at" in _fin_df.columns else None)
+            _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
+
+            if _ts_col and _cost_col:
+                _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
+                _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
+                _fin_df = _fin_df.dropna(subset=["_date"])
+
+            if _fin_df.empty or not _ts_col or not _cost_col:
+                st.warning("Could not parse revenue data from outbound logs.")
+            else:
+                # ── Top-line Metrics ─────────────────────
+                _total_revenue = _fin_df["_cost"].sum()
+                _total_orders  = len(_fin_df)
+                _avg_order     = _total_revenue / _total_orders if _total_orders else 0
+                _months_active = _fin_df["_date"].dt.to_period("M").nunique()
+
+                _fin_has_sub  = "subtotal"  in _fin_df.columns
+                _fin_has_tax  = "tax"       in _fin_df.columns
+                _fin_has_ship = "shipping"  in _fin_df.columns
+                _total_sub    = pd.to_numeric(_fin_df.get("subtotal",  0), errors="coerce").fillna(0).sum() if _fin_has_sub  else 0
+                _total_tax    = pd.to_numeric(_fin_df.get("tax",       0), errors="coerce").fillna(0).sum() if _fin_has_tax  else 0
+                _total_ship   = pd.to_numeric(_fin_df.get("shipping",  0), errors="coerce").fillna(0).sum() if _fin_has_ship else 0
+
+                _fm1, _fm2, _fm3, _fm4 = st.columns(4)
+                _fm1.metric("Total Revenue",     f"${_total_revenue:,.2f}")
+                _fm2.metric("Total Orders",      f"{_total_orders:,}")
+                _fm3.metric("Avg. Order Value",  f"${_avg_order:,.2f}")
+                _fm4.metric("Months Active",     _months_active)
+
+                _fm5, _fm6, _fm7, _fm8 = st.columns(4)
+                _fm5.metric("Total Subtotal",    f"${_total_sub:,.2f}")
+                _fm6.metric("Total Tax",         f"${_total_tax:,.2f}")
+                _fm7.metric("Total Shipping",    f"${_total_ship:,.2f}")
+                _fm8.metric("Unique Customers",  _fin_df.get("recipient_email", _fin_df.get("recipient_name", pd.Series())).nunique() if "recipient_email" in _fin_df.columns else "—")
+
+                st.divider()
+
+                # ── Monthly Revenue Chart ────────────────
+                st.subheader("Monthly Revenue")
+                _monthly_chart = (
+                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"]
+                    .sum().reset_index()
+                )
+                _monthly_chart.columns = ["Month", "Revenue"]
+                _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
+                st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
+
+                st.divider()
+
+                # ── Revenue by Month Table ───────────────
+                st.subheader("Revenue by Month")
+                _monthly_tbl = (
+                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))
+                    .agg(Orders=("_cost", "count"), Revenue=("_cost", "sum"), Avg_Order=("_cost", "mean"))
+                    .reset_index()
+                )
+                _monthly_tbl.columns = ["Month", "Orders", "Revenue ($)", "Avg Order ($)"]
+                _monthly_tbl["Month"] = _monthly_tbl["Month"].astype(str)
+                _monthly_tbl["Revenue ($)"]   = _monthly_tbl["Revenue ($)"].round(2)
+                _monthly_tbl["Avg Order ($)"] = _monthly_tbl["Avg Order ($)"].round(2)
+                _monthly_tbl = _monthly_tbl.sort_values("Month", ascending=False)
+                st.dataframe(
+                    _monthly_tbl, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Revenue ($)":   st.column_config.NumberColumn(format="$%.2f"),
+                        "Avg Order ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    }
+                )
+
+                st.divider()
+
+                # ── Revenue per Product ──────────────────
+                st.subheader("Revenue per Product")
+                st.caption("Calculated from price × quantity for each product across all sent orders.")
+                # Build a price lookup from inventory
+                _price_lookup: dict = {}
+                if not inv_df.empty and "item_name" in inv_df.columns and "price" in inv_df.columns:
+                    for _, _plr in inv_df.iterrows():
+                        _price_lookup[str(_plr["item_name"]).lower().strip()] = float(_plr.get("price", 0) or 0)
+
+                _prod_revenue: dict = {}
+                _prod_units:   dict = {}
+                _prod_orders:  dict = {}
+
+                _pl_col = "products_list" if "products_list" in _fin_df.columns else None
+                if _pl_col:
+                    for _, _frow in _fin_df.iterrows():
+                        _plist = str(_frow.get(_pl_col, ""))
+                        for _pentry in [p.strip() for p in _plist.split(",") if p.strip()]:
+                            _pname, _pqty = _parse_product_qty(_pentry)
+                            _pkey = _pname.lower().strip()
+                            _pprice = _price_lookup.get(_pkey, 0.0)
+                            if not _pprice:
+                                # fuzzy lookup
+                                for _lk, _lv in _price_lookup.items():
+                                    if _pkey in _lk or _lk in _pkey:
+                                        _pprice = _lv
+                                        break
+                            _prod_revenue[_pname] = _prod_revenue.get(_pname, 0.0) + _pprice * _pqty
+                            _prod_units[_pname]   = _prod_units.get(_pname, 0) + _pqty
+                            _prod_orders[_pname]  = _prod_orders.get(_pname, 0) + 1
+
+                if _prod_revenue:
+                    _pp_df = pd.DataFrame([
+                        {
+                            "Product":        p,
+                            "Units Sold":     _prod_units.get(p, 0),
+                            "Orders":         _prod_orders.get(p, 0),
+                            "Revenue ($)":    round(_prod_revenue.get(p, 0.0), 2),
+                        }
+                        for p in sorted(_prod_revenue, key=_prod_revenue.get, reverse=True)
+                    ])
+                    st.bar_chart(_pp_df.set_index("Product")["Revenue ($)"], color="#f59e0b")
+                    st.dataframe(
+                        _pp_df, use_container_width=True, hide_index=True,
+                        column_config={"Revenue ($)": st.column_config.NumberColumn(format="$%.2f")}
+                    )
+                else:
+                    st.info("Product revenue breakdown will appear once orders are sent through the Mass Email page.")
+
+                st.divider()
+
+                # ── Outbound Log (full history) ──────────
+                st.subheader("Outbound Email Log")
+                st.caption("Every order confirmation email sent through MERIT.")
+                _log_disp = _fin_df.copy()
+                _log_rename = {
+                    "recipient_name": "Name", "recipient_email": "Email",
+                    "order_number": "Order #", "products_list": "Products",
+                    "subtotal": "Sub ($)", "tax": "Tax ($)", "shipping": "Ship ($)",
+                    "total_cost": "Total ($)", "timestamp": "Sent At", "created_at": "Sent At"
+                }
+                _log_disp = _log_disp.rename(columns={k: v for k, v in _log_rename.items() if k in _log_disp.columns})
+                _log_cols = ["Sent At", "Name", "Email", "Order #", "Products", "Sub ($)", "Tax ($)", "Ship ($)", "Total ($)"]
+                _log_disp = _log_disp[[c for c in _log_cols if c in _log_disp.columns]]
+                st.dataframe(
+                    _log_disp, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Total ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Sub ($)":   st.column_config.NumberColumn(format="$%.2f"),
+                        "Tax ($)":   st.column_config.NumberColumn(format="$%.2f"),
+                        "Ship ($)":  st.column_config.NumberColumn(format="$%.2f"),
+                        "Sent At":   st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
+                        "Products":  st.column_config.TextColumn(width="large"),
+                    }
+                )
+                if st.button("Refresh Financial Data", key="btn_fin_refresh"):
+                    _clear_data_caches()
+                    st.rerun()
 
     # ── ADJUST STOCK ────────────────────────────
     with tab_adjust:
         if inv_df.empty:
             st.info("No products found. Add products in the **Products** page first.")
         else:
-            _has_sb_inv = _has_supabase(cfg)
             _sync_targets = ["SQLite"]
-            if _has_sb_inv:  _sync_targets.append("Supabase")
+            if _has_sb_inv: _sync_targets.append("Supabase")
 
-            st.caption(
-                f"Set a ± amount for each product, then click **Apply** next to it or **Apply All** at the top. "
-                f"Synced to: **{' + '.join(_sync_targets)}**"
+            st.info(
+                "**Adjust Stock** makes manual corrections to **Current Stock only**. "
+                "Use it to fix errors or write-offs. "
+                "To record new inventory purchases, use the **Original Stock** tab instead."
             )
+            st.caption(f"Synced to: **{' + '.join(_sync_targets)}**")
 
-            # ── Apply All Changes ───────────────────
             if st.button("Apply All Changes", type="primary", width="stretch", key="btn_adj_all"):
                 with st.spinner("Applying adjustments..."):
                     _adj_applied = 0
@@ -2553,7 +2822,6 @@ elif page == "Inventory":
 
             st.divider()
 
-            # ── Per-product rows ────────────────────
             _img_col_exists = "image_url" in inv_df.columns
             for _, _pr in inv_df.iterrows():
                 _psku   = str(_pr.get("sku", ""))
@@ -2571,29 +2839,25 @@ elif page == "Inventory":
                 )
 
                 _rc1, _rc2, _rc3, _rc4, _rc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
-
                 with _rc1:
                     if _pimg and _pimg not in ("N/A", "", "nan"):
-                        st.image(_pimg, width=56)
+                        _first_img = _pimg.split(",")[0].strip()
+                        if _first_img: st.image(_first_img, width=56)
                     else:
                         st.markdown("<div style='width:56px;height:56px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:10px;'>No img</div>", unsafe_allow_html=True)
-
                 with _rc2:
                     st.markdown(f"**{_pname}**")
                     st.caption(f"{_psku}  ·  {_pcat}")
-
                 with _rc3:
                     st.markdown(
-                        f"<div style='display:flex; align-items:center;'>"
+                        f"<div style='display:flex;align-items:center;'>"
                         f"<span style='font-size:24px;font-weight:700;color:#ffffff;line-height:1;'>{_pstock}</span>"
                         f"<span style='font-size:10px;margin-left:8px;color:{_stat_color};white-space:nowrap;'>{_pstat}</span>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-
                 with _rc4:
                     _delta_val = st.number_input("±", step=1, value=0, key=f"adj_{_psku}", label_visibility="collapsed")
-
                 with _rc5:
                     if st.button("Apply", key=f"btn_adj_{_psku}", width="stretch"):
                         with st.spinner("Updating..."):
@@ -2615,108 +2879,70 @@ elif page == "Inventory":
         if inv_df.empty:
             st.info("No products found. Add products in the **Products** page first.")
         else:
-            st.markdown("#### Purchased Inventory (Lifetime Total)")
-            st.caption(
-                "This reflects the **total quantity** of items you have ever acquired for your firm. "
-                "The `Adjust Stock` tab automatically increases this number when you ADD stock. "
-                "You can manually correct these values here if needed."
+            st.markdown("#### Restock — Add or Subtract Inventory")
+            st.info(
+                "**This is the main way to record new inventory.**  \n"
+                "When you purchase stock from the VEI Wholesale Marketplace, enter the amount here. "
+                "The number you enter is **added to** (or subtracted from) both the Original Stock total "
+                "and the Current Stock available for sale. "
+                "Current Stock is then automatically reduced each time order emails are sent."
             )
 
-            st.warning(
-                "**Wholesale Marketplace Reminder:** When you purchase inventory via the VEI "
-                "Wholesale Marketplace, you **must** add those quantities here in the Original Stock tab "
-                "(or use the Adjust Stock tab with a positive amount, which will update both). "
-                "This ensures your lifetime totals stay accurate for accounting and reporting."
-            )
-            
+            _sync_targets_orig = ["SQLite"]
+            if _has_sb_inv: _sync_targets_orig.append("Supabase")
+            st.caption(f"Synced to: **{' + '.join(_sync_targets_orig)}**")
+
+            st.divider()
+
             for _, _pr in inv_df.iterrows():
-                _osku   = str(_pr.get("sku", ""))
-                _oname  = str(_pr.get("item_name", _osku))
-                _ostock = int(_pr.get("original_stock", 0))
-                _oimg   = str(_pr.get("image_url", ""))
-                
-                _oc1, _oc2, _oc3, _oc4, _oc5 = st.columns([1, 4, 2, 2, 1.5], vertical_alignment="center")
+                _osku    = str(_pr.get("sku", ""))
+                _oname   = str(_pr.get("item_name", _osku))
+                _ostock  = int(_pr.get("original_stock", 0))
+                _ocurr   = int(_pr.get("stock_left", 0))
+                _oimg    = str(_pr.get("image_url", ""))
+
+                _oc1, _oc2, _oc3, _oc4, _oc5 = st.columns([1, 3.5, 2.5, 2, 1.5], vertical_alignment="center")
                 with _oc1:
-                    if _oimg and _oimg not in ("N/A", "", "nan"): st.image(_oimg, width=56)
-                    else: st.markdown("<div style='width:56px;height:56px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:10px;'>No img</div>", unsafe_allow_html=True)
-                
+                    if _oimg and _oimg not in ("N/A", "", "nan"):
+                        _ofirst = _oimg.split(",")[0].strip()
+                        if _ofirst: st.image(_ofirst, width=56)
+                    else:
+                        st.markdown("<div style='width:56px;height:56px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:10px;'>No img</div>", unsafe_allow_html=True)
                 with _oc2:
                     st.markdown(f"**{_oname}**")
                     st.caption(f"{_osku}")
-                
                 with _oc3:
                     st.markdown(
-                        f"<div style='font-size:24px;font-weight:700;color:#818cf8;'>{_ostock}</div>"
-                        f"<div style='font-size:10px;color:#94a3b8;'>Lifetime Total</div>",
+                        f"<div style='display:flex;gap:24px;'>"
+                        f"<div><div style='font-size:20px;font-weight:700;color:#818cf8;'>{_ostock}</div>"
+                        f"<div style='font-size:10px;color:#94a3b8;'>Original</div></div>"
+                        f"<div><div style='font-size:20px;font-weight:700;color:#ffffff;'>{_ocurr}</div>"
+                        f"<div style='font-size:10px;color:#94a3b8;'>Current</div></div>"
+                        f"</div>",
                         unsafe_allow_html=True
                     )
-                
                 with _oc4:
-                    # Input for absolute override
-                    _new_total = st.number_input("New Total", min_value=0, value=_ostock, key=f"orig_val_{_osku}", label_visibility="collapsed")
-                
-                with _oc5:
-                    _also_set_stock = st.checkbox(
-                        "Also update Current Stock",
-                        key=f"orig_sync_{_osku}",
-                        help="Check to also set 'Stock Left' (current available units) to this same value. Useful during initial setup.",
+                    _restock_delta = st.number_input(
+                        "Add / Subtract", step=1, value=0,
+                        key=f"orig_delta_{_osku}", label_visibility="collapsed",
+                        help="Positive = bought more stock. Negative = reduce due to loss or return."
                     )
-                    if st.button("Set", key=f"btn_orig_{_osku}", width="stretch"):
-                        with st.spinner("Setting..."):
-                            ok, _msg = set_original_stock_all_dbs(_osku, int(_new_total), cfg)
-                            if _also_set_stock:
-                                set_stock_all_dbs(_osku, int(_new_total), cfg)
-                            if ok:
-                                _sync_note = " + current stock" if _also_set_stock else ""
-                                st.toast(f"Original stock{_sync_note} updated: {_oname}", icon="📌")
-                                _clear_data_caches()
-                                time.sleep(0.5)
-                                st.rerun()
+                with _oc5:
+                    if st.button("Apply", key=f"btn_orig_{_osku}", width="stretch", type="primary"):
+                        with st.spinner("Applying..."):
+                            if _restock_delta == 0:
+                                st.toast(f"{_oname}: amount is 0, nothing changed.")
                             else:
-                                st.error(f"Failed to update some databases: {_msg}")
+                                ok, _msg = adjust_original_stock_all_dbs(_osku, int(_restock_delta), cfg)
+                                if ok:
+                                    _dir = "added" if _restock_delta > 0 else "removed"
+                                    st.toast(f"{abs(_restock_delta)} units {_dir} — {_oname}", icon="📦")
+                                    _clear_data_caches()
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to update some databases: {_msg}")
                 st.divider()
-
-    # ── OUTBOUND INFORMATION ────────────────────
-    with tab_outbound:
-        st.subheader("Sent History")
-        st.caption("View a history of all emails sent and their impact on inventory.")
-        logs = load_outbound_logs(cfg)
-
-        if logs.empty:
-            st.info("No outbound emails found. Start sending emails from the **Email Sender** page.")
-        else:
-            # Format the table for display
-            display_df = logs.copy()
-            if "recipient_name" in display_df.columns:
-                display_df = display_df.rename(columns={
-                    "recipient_name": "Name",
-                    "recipient_email": "Email",
-                    "order_number": "Order #",
-                    "products_list": "Products",
-                    "subtotal": "Sub ($)",
-                    "tax": "Tax ($)",
-                    "shipping": "Ship ($)",
-                    "total_cost": "Total ($)",
-                    "timestamp": "Sent At"
-                })
-            
-            cols = ["Sent At", "Name", "Email", "Order #", "Products", "Sub ($)", "Tax ($)", "Ship ($)", "Total ($)"]
-            display_df = display_df[[c for c in cols if c in display_df.columns]]
-            
-            st.dataframe(
-                display_df,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
-                    "Sent At": st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
-                    "Products": st.column_config.TextColumn(width="large")
-                }
-            )
-
-            if st.button("Clear View Cache", width="stretch"):
-                _clear_data_caches()
-                st.rerun()
 
     # ── DOCUMENTATION ────────────────────────────
     with tab_inv_docs:
@@ -2724,212 +2950,84 @@ elif page == "Inventory":
         st.markdown("""
 ### How Inventory Works in MERIT
 
-MERIT's inventory system tracks two separate metrics for each product:
+MERIT tracks two numbers per product:
+
+| Field | Meaning |
+|---|---|
+| **Original Stock** | Running lifetime total of all units you have ever purchased |
+| **Current Stock** | Units available right now — decreases automatically as orders are sent |
 
 ---
 
-#### 1. Stock Left (Current Available Stock)
-- **What it is:** The number of units currently available for sale
-- **Where to manage:** **Adjust Stock** tab
-- **How it changes:**
-  - **Automatically decreased** when you send order confirmation emails (1 unit deducted per product per order)
-  - **Manually adjusted** via the Adjust Stock tab using the ± field
-  - Positive values add stock, negative values remove stock
+### Original Stock Tab — Restocking
 
-#### 2. Original Stock (Lifetime Total Purchased)
-- **What it is:** The cumulative total of all inventory you've ever acquired
-- **Where to manage:** **Original Stock** tab
-- **How it changes:**
-  - **Automatically increased** when you ADD stock via the Adjust Stock tab (positive adjustments)
-  - **Manually overridden** in the Original Stock tab by typing a new total and clicking Set
-  - **Not decreased** when you sell items — it's a running total of all purchases
+Use the **Original Stock** tab whenever you purchase new inventory from the VEI Wholesale Marketplace.
+
+- Enter a **positive number** to add units (e.g. received 50 new T-shirts → enter +50)
+- Enter a **negative number** to subtract units (e.g. damaged goods, returns → enter −5)
+- Clicking **Apply** updates **both** Original Stock and Current Stock by that same amount
+
+> This is the primary way to record inventory purchases. MERIT does not connect to the Wholesale Marketplace automatically.
 
 ---
 
-#### Status Labels
+### Adjust Stock Tab — Manual Corrections
+
+Use **Adjust Stock** for one-off corrections to Current Stock **only** (does not change Original Stock):
+
+- Fix a counting error
+- Write off damaged or lost units that you already received
+- Manual reconciliation after a physical stock count
+
+---
+
+### Current Stock Changes Automatically
+
+Every time you send order confirmation emails from the **Mass Email** page, MERIT deducts the ordered quantities from Current Stock. You do not need to manually update anything after sending emails.
+
+---
+
+### Status Labels
+
 | Status | Condition |
 |---|---|
 | **In stock** | More than 10 units available |
 | **Low stock** | 1–10 units available |
-| **Out of stock** | 0 units available |
-| **Backordered** | Negative stock (more sold than available) |
+| **Out of stock** | 0 units |
+| **Backordered** | Negative (oversold) |
 
 ---
 
-#### Stock Flow Example
+### Negative Stock and Email Sending
 
-1. You buy 50 T-Shirts from the Wholesale Marketplace
-2. Go to **Original Stock** tab → set the total to 50 (or use **Adjust Stock** → +50)
-3. Both `stock_left` and `original_stock` are now 50
-4. You send 10 order confirmation emails that include T-Shirts
-5. `stock_left` drops to 40, but `original_stock` stays at 50
-6. You buy 20 more T-Shirts → Adjust Stock +20
-7. `stock_left` = 60, `original_stock` = 70
+MERIT enforces a **pre-send stock check** when sending order emails:
 
----
+- If any product in the send queue already has `stock_left ≤ 0`, the entire send session is **blocked**
+- You must either adjust stock upward in **Original Stock** or **Adjust Stock**, or remove those orders from the queue
+- Products that fall below zero after a send session are marked **Backordered** and blocked from the next session
 
-#### Important: Wholesale Marketplace Purchases
-
-> **When you buy inventory through the VEI Wholesale Marketplace, you MUST add those quantities to MERIT manually.**
->
-> MERIT does not connect to the Wholesale Marketplace automatically. After each wholesale purchase:
-> 1. Go to **Adjust Stock** tab and add the quantity purchased (this updates both stock and original stock)
-> 2. OR go to **Original Stock** tab and update the lifetime total directly
+This prevents overselling and keeps physical inventory in sync with MERIT.
 
 ---
 
-#### Data Storage
+### Financials Tab
 
-- **SQLite (Local):** Always used as the primary local database. Data persists as long as the app container is running.
-- **Supabase (Cloud):** If configured, all stock changes are synced to your Supabase project in real-time. This is the recommended setup for persistence across deployments.
-- Both databases are updated simultaneously when you make changes.
+The **Financials** tab shows complete revenue tracking:
 
----
+- **Top-line metrics**: Total revenue, orders, average order value, unique customers
+- **Monthly revenue chart**: Visualize revenue trends over time
+- **Revenue per product**: See which products generate the most revenue (price × units sold)
+- **Outbound log**: Full history of every order email sent with timestamps and cost breakdowns
 
-#### Outbound Information
-
-The **Outbound Information** tab shows a log of every order confirmation email sent, including:
-- Recipient name and email
-- Order number and products list
-- Subtotal, tax, shipping, and total cost
-- Timestamp of when the email was sent
-
-This data is stored in both SQLite and Supabase (if configured) and is useful for accounting and order tracking.
+All revenue data comes from the `outbound_logs` table and is stored in both SQLite and Supabase.
 
 ---
 
-#### Negative Stock and Email Sending
+### Data Storage
 
-MERIT enforces a **negative stock block** when sending order emails:
-
-- If any product in the queue has `stock_left <= 0` (already out of stock), the send is **blocked**
-- You must either: adjust stock upward in **Adjust Stock**, or remove those orders from the queue
-- After a send session, if stock goes negative for any product (unlikely but possible with concurrent orders), that product is marked as **Backordered** and **cannot be included in the next send session**
-- To clear a backordered product: go to **Adjust Stock** and add enough units to bring `stock_left` above 0
-
-This prevents overselling and ensures your physical inventory stays in sync with what MERIT tracks.
-
----
-
-#### Original Stock vs. Current Stock
-
-| Field | Meaning | Where to set |
-|---|---|---|
-| `original_stock` | Lifetime total units ever purchased | **Original Stock** tab → Set button |
-| `stock_left` | Units currently available to sell | **Adjust Stock** tab (add/subtract) |
-
-**Important:** Setting **Original Stock** does NOT automatically change **Current Stock (stock_left)**. Use the "Also update Current Stock" checkbox in the Original Stock tab when doing initial setup to set both at once.
-
-When you add stock via **Adjust Stock** (positive delta), both `stock_left` AND `original_stock` are increased together. This is the recommended way to record new inventory purchases.
+- **SQLite (Local):** Primary local database, always active
+- **Supabase (Cloud):** All changes are synced in real-time when connected — recommended for persistence across deployments
         """)
-
-# ═════════════════════════════════════════════
-# FINANCIALS PAGE
-# ═════════════════════════════════════════════
-
-elif page == "Financials":
-    cfg = st.session_state.cfg
-    st.title("Financials")
-    st.caption("Revenue overview and financial reporting for the finance team.")
-
-    # Load outbound logs for revenue data
-    _fin_logs = load_outbound_logs(cfg)
-
-    if _fin_logs.empty:
-        st.info("No financial data yet. Revenue is tracked automatically when you send order confirmation emails from the **Mass Email** page.")
-    else:
-        # Parse timestamps and totals
-        _fin_df = _fin_logs.copy()
-
-        # Determine the timestamp column name
-        _ts_col = "timestamp" if "timestamp" in _fin_df.columns else "created_at" if "created_at" in _fin_df.columns else None
-        _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
-
-        if _ts_col and _cost_col:
-            _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
-            _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
-            _fin_df = _fin_df.dropna(subset=["_date"])
-
-            if _fin_df.empty:
-                st.warning("Could not parse dates from outbound logs.")
-            else:
-                # ── Key Metrics ─────────────────────────────
-                _total_revenue = _fin_df["_cost"].sum()
-                _total_orders  = len(_fin_df)
-                _avg_order     = _total_revenue / _total_orders if _total_orders else 0
-                _fin_df["_month"] = _fin_df["_date"].dt.to_period("M")
-                _months_active = _fin_df["_month"].nunique()
-
-                _fin_m1, _fin_m2, _fin_m3, _fin_m4 = st.columns(4)
-                _fin_m1.metric("Total Revenue", f"${_total_revenue:,.2f}")
-                _fin_m2.metric("Total Orders", f"{_total_orders:,}")
-                _fin_m3.metric("Avg. Order Value", f"${_avg_order:,.2f}")
-                _fin_m4.metric("Active Months", _months_active)
-
-                st.divider()
-
-                # ── Monthly Revenue Chart ──────────────────
-                st.subheader("Monthly Revenue")
-                _monthly = (
-                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"]
-                    .sum()
-                    .reset_index()
-                )
-                _monthly.columns = ["Month", "Revenue"]
-                _monthly["Month"] = _monthly["Month"].astype(str)
-                _monthly = _monthly.set_index("Month")
-                st.bar_chart(_monthly["Revenue"], color="#16a34a")
-
-                st.divider()
-
-                # ── Revenue Breakdown Table ─────────────────
-                st.subheader("Revenue by Month")
-                _monthly_table = (
-                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))
-                    .agg(
-                        Orders=("_cost", "count"),
-                        Revenue=("_cost", "sum"),
-                        Avg_Order=("_cost", "mean"),
-                    )
-                    .reset_index()
-                )
-                _monthly_table.columns = ["Month", "Orders", "Revenue ($)", "Avg Order ($)"]
-                _monthly_table["Month"] = _monthly_table["Month"].astype(str)
-                _monthly_table["Revenue ($)"] = _monthly_table["Revenue ($)"].round(2)
-                _monthly_table["Avg Order ($)"] = _monthly_table["Avg Order ($)"].round(2)
-                _monthly_table = _monthly_table.sort_values("Month", ascending=False)
-
-                st.dataframe(
-                    _monthly_table,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Revenue ($)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Avg Order ($)": st.column_config.NumberColumn(format="$%.2f"),
-                    }
-                )
-
-                st.divider()
-
-                # ── Subtotal / Tax / Shipping Breakdown ─────
-                _has_sub = "subtotal" in _fin_df.columns
-                _has_tax = "tax" in _fin_df.columns
-                _has_ship = "shipping" in _fin_df.columns
-
-                if _has_sub or _has_tax or _has_ship:
-                    st.subheader("Cost Breakdown")
-                    _brk_c1, _brk_c2, _brk_c3 = st.columns(3)
-                    if _has_sub:
-                        _sub_total = pd.to_numeric(_fin_df["subtotal"], errors="coerce").fillna(0).sum()
-                        _brk_c1.metric("Total Subtotal", f"${_sub_total:,.2f}")
-                    if _has_tax:
-                        _tax_total = pd.to_numeric(_fin_df["tax"], errors="coerce").fillna(0).sum()
-                        _brk_c2.metric("Total Tax Collected", f"${_tax_total:,.2f}")
-                    if _has_ship:
-                        _ship_total = pd.to_numeric(_fin_df["shipping"], errors="coerce").fillna(0).sum()
-                        _brk_c3.metric("Total Shipping", f"${_ship_total:,.2f}")
-        else:
-            st.warning("Could not find revenue data columns in outbound logs.")
 
 # ═════════════════════════════════════════════
 # SETTINGS PAGE
@@ -2949,6 +3047,7 @@ elif page == "Settings":
         "inp_imgbb_key":        "imghippo_api_key",
         "inp_sb_pass":          "supabase_db_password",
         "inp_sb_conn":          "supabase_connection_string",
+        "inp_sb_anon":          "supabase_anon_key",
     }
 
     # Initialise session state keys from cfg (ensures secrets auto-fill)
@@ -3019,6 +3118,16 @@ elif page == "Settings":
         key="inp_sb_pass",
         on_change=_on_sb_change,
     )
+    inp_sb_anon = st.text_input(
+        "Supabase Anon Key (for API Endpoints)",
+        type="password",
+        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+        help="Supabase Dashboard → Project Settings (gear icon) → API → copy the 'anon / public' key. Used by your website to read products safely.",
+        key="inp_sb_anon",
+        on_change=_auto_save_settings,
+    )
+    if inp_sb_anon.strip():
+        st.success("Anon key saved — it will appear pre-filled on the API Endpoints page.")
 
     # Build effective connection string
     _sb_conn_val = inp_sb_conn.strip()
@@ -3343,18 +3452,18 @@ elif page == "API Endpoints":
         st.stop()
 
     # ── Key values banner ────────────────────────────────────────────
+    _api_anon_key = cfg.get("supabase_anon_key", "").strip()
     _kv1, _kv2 = st.columns(2)
     with _kv1:
         st.markdown("**Your Supabase URL** — paste this into your website builder")
         st.code(_sb_url_ph, language="text")
     with _kv2:
-        st.markdown("**Your anon key** — where to get it")
-        st.info("Supabase Dashboard → Project Settings (gear icon) → API → copy the **anon / public** key (starts with `eyJ…`)")
-
-    st.caption(
-        "The anon key is safe to put in your website code when Row Level Security is on. "
-        "Never put your database password or connection string in a website."
-    )
+        st.markdown("**Your Supabase Anon Key**")
+        if _api_anon_key:
+            st.code(_api_anon_key, language="text")
+            st.caption("Safe to use in public website code — never use your DB password in a website.")
+        else:
+            st.info("Anon key not saved yet. Go to **Settings → Supabase Anon Key** and paste the `eyJ…` key from Supabase → Project Settings → API.")
 
     st.divider()
 
@@ -3367,21 +3476,26 @@ elif page == "API Endpoints":
     with _tab_ai:
         _sb_url_ai = _api_sb_url or "YOUR_SUPABASE_URL"
         st.markdown("### Copy-paste prompts for AI website builders")
-        st.caption(
-            "Pick the tab matching your platform, copy the prompt, paste it into the AI chat, "
-            "replace YOUR_SUPABASE_ANON_KEY with your real anon key, and the AI will build your storefront."
-        )
+        _api_anon_ai_saved = cfg.get("supabase_anon_key", "").strip()
+        if _api_anon_ai_saved:
+            st.caption("Your Supabase anon key is saved — it is pre-filled into every prompt below. Just copy and paste.")
+        else:
+            st.caption(
+                "Save your Supabase anon key in **Settings → Supabase Anon Key** and it will be pre-filled into all prompts below. "
+                "Otherwise replace `YOUR_SUPABASE_ANON_KEY` manually."
+            )
 
         _ai_master, _ai_bolt, _ai_lovable, _ai_cursor = st.tabs(
             ["Master Context Block", "Bolt.new", "Lovable", "Cursor / v0 / General"]
         )
 
         # ── shared schema text used across all prompts ──────────────────
+        _api_anon_ai = cfg.get("supabase_anon_key", "").strip() or "YOUR_SUPABASE_ANON_KEY"
         _schema_block = f"""\
 === MERIT DATABASE SCHEMA (Supabase / PostgreSQL) ===
 
 Supabase project URL : {_sb_url_ai}
-Supabase anon key    : YOUR_SUPABASE_ANON_KEY   ← replace this with your actual anon key
+Supabase anon key    : {_api_anon_ai}   ← paste this into your website code
 
 --- TABLE: inventory  (PRIMARY table for storefront — has live stock levels) ---
 Column          Type              Notes
@@ -3475,11 +3589,11 @@ The anon key used by the website is strictly read-only — visitors cannot modif
 === ENV VARIABLES ===
 For Bolt.new / Lovable / Vite projects:
   VITE_SUPABASE_URL      = {_sb_url_ai}
-  VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY
+  VITE_SUPABASE_ANON_KEY = {_api_anon_ai}
 
 For Next.js projects:
   NEXT_PUBLIC_SUPABASE_URL      = {_sb_url_ai}
-  NEXT_PUBLIC_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
+  NEXT_PUBLIC_SUPABASE_ANON_KEY = {_api_anon_ai}"""
 
         # ── Fetch real product data from Supabase for AI prompts ─────────
         _products_block = ""
@@ -3697,7 +3811,7 @@ This ensures stock levels update automatically when MERIT sends order emails.
 
 --- ENV VARS ---
 VITE_SUPABASE_URL      = {_sb_url_ai}
-VITE_SUPABASE_ANON_KEY = YOUR_SUPABASE_ANON_KEY"""
+VITE_SUPABASE_ANON_KEY = {_api_anon_ai}"""
             _lovable_prompt += _products_block
             st.code(_lovable_prompt, language="text")
 
@@ -3869,24 +3983,22 @@ Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
         )
 
         # ── How authentication works ───────────────────────────────────
+        _rest_anon = cfg.get("supabase_anon_key", "").strip() or "YOUR_SUPABASE_ANON_KEY"
         with st.expander("How to authenticate — read this first", expanded=True):
-            st.markdown("""
+            st.markdown(f"""
 **Every request needs two headers:**
 
 | Header | Value |
 |---|---|
 | `apikey` | Your Supabase **anon / public** key |
-| `Authorization` | `Bearer YOUR_SUPABASE_ANON_KEY` |
+| `Authorization` | `Bearer {_rest_anon}` |
 
-**Where to get your anon key:**
-1. Go to your Supabase Dashboard
-2. Click the **gear icon** (Project Settings) in the left sidebar
-3. Click **API** → copy the key under **Project API keys → anon / public**
+{"✅ **Your anon key is saved** and pre-filled in all examples below." if _rest_anon != "YOUR_SUPABASE_ANON_KEY" else "**Where to get your anon key:** Supabase Dashboard → gear icon → Project Settings → API → copy **anon / public** key (starts with `eyJ…`). Then save it in **Settings → Supabase Anon Key**."}
 
-The anon key starts with `eyJ…` and is safe to put in your website. It is read-only when Row Level Security is enabled.
+The anon key is safe to put in your website. It is read-only when Row Level Security is enabled (the Setup Tables button enables this).
 """)
             st.code(
-                "apikey: YOUR_SUPABASE_ANON_KEY\nAuthorization: Bearer YOUR_SUPABASE_ANON_KEY",
+                f"apikey: {_rest_anon}\nAuthorization: Bearer {_rest_anon}",
                 language="http",
             )
 
@@ -3922,22 +4034,20 @@ The anon key starts with `eyJ…` and is safe to put in your website. It is read
         st.divider()
         st.markdown("#### Curl examples — test in your terminal")
         st.code(f"""\
-# Replace YOUR_SUPABASE_ANON_KEY with your actual key
-
 # Get all in-stock products
 curl "{_api_rest_base}/inventory?select=*&stock_left=gte.1&order=item_name" \\
-  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
-  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+  -H "apikey: {_rest_anon}" \\
+  -H "Authorization: Bearer {_rest_anon}"
 
 # Get one product by SKU
 curl "{_api_rest_base}/inventory?sku=eq.SKU001&select=*" \\
-  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
-  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+  -H "apikey: {_rest_anon}" \\
+  -H "Authorization: Bearer {_rest_anon}"
 
 # Get all active products with description and buy button
 curl "{_api_rest_base}/products?select=*&active=eq.true&order=name" \\
-  -H "apikey: YOUR_SUPABASE_ANON_KEY" \\
-  -H "Authorization: Bearer YOUR_SUPABASE_ANON_KEY"
+  -H "apikey: {_rest_anon}" \\
+  -H "Authorization: Bearer {_rest_anon}"
 """, language="bash")
 
         st.divider()
@@ -3970,38 +4080,40 @@ curl "{_api_rest_base}/products?select=*&active=eq.true&order=name" \\
     # ── Code Snippets ─────────────────────────────────────────────────
     with _tab_code:
         st.markdown("### Ready-to-paste code snippets")
-        st.caption(
-            "Copy the snippet that matches your project. "
-            "Replace `YOUR_SUPABASE_ANON_KEY` with your actual anon key from Supabase Dashboard → Project Settings → API."
-        )
+        _code_caption_anon = cfg.get("supabase_anon_key", "").strip()
+        if _code_caption_anon:
+            st.caption("Your Supabase anon key is pre-filled in all snippets below — just copy and paste.")
+        else:
+            st.caption("Save your anon key in **Settings → Supabase Anon Key** to pre-fill it here. Otherwise replace `YOUR_SUPABASE_ANON_KEY` manually.")
 
         _ex_js, _ex_ts, _ex_react, _ex_rt = st.tabs(
             ["JavaScript", "TypeScript / Next.js", "React Hook", "Real-time (live updates)"]
         )
 
+        _code_anon = cfg.get("supabase_anon_key", "").strip() or "YOUR_SUPABASE_ANON_KEY"
         with _ex_js:
             st.markdown("Works in any plain HTML/JS project or Bolt.new:")
-            st.code("""\
+            st.code(f"""\
 // Step 1 — install:  npm install @supabase/supabase-js
-import { createClient } from '@supabase/supabase-js'
+import {{ createClient }} from '@supabase/supabase-js'
 
 const supabase = createClient(
-  '__SUPABASE_URL__',
-  'YOUR_SUPABASE_ANON_KEY'
+  '{_sb_url_ph}',
+  '{_code_anon}'
 )
 
 // Fetch all in-stock products
-async function getProducts() {
-  const { data, error } = await supabase
+async function getProducts() {{
+  const {{ data, error }} = await supabase
     .from('inventory')
     .select('*')
     .gt('stock_left', 0)       // only show products that have stock
-    .order('item_name', { ascending: true })
+    .order('item_name', {{ ascending: true }})
 
   if (error) throw error
   return data  // each item has: sku, item_name, price, image_url, stock_left, category
-}
-""".replace("__SUPABASE_URL__", _sb_url_ph), language="javascript")
+}}
+""", language="javascript")
 
         with _ex_ts:
             st.markdown("For Next.js or any TypeScript project:")
@@ -4063,23 +4175,23 @@ export function useProducts(category?: string) {
                 "first enable Replication in Supabase Dashboard → Database → Replication → toggle `inventory` ON, "
                 "then use this code:"
             )
-            st.code("""\
-import { createClient } from '@supabase/supabase-js'
+            st.code(f"""\
+import {{ createClient }} from '@supabase/supabase-js'
 
-const supabase = createClient('__SUPABASE_URL__', 'YOUR_SUPABASE_ANON_KEY')
+const supabase = createClient('{_sb_url_ph}', '{_code_anon}')
 
 // This runs every time MERIT adds, edits, or deletes a product
 supabase
   .channel('merit-sync')
   .on('postgres_changes',
-    { event: '*', schema: 'public', table: 'inventory' },
-    (payload) => {
+    {{ event: '*', schema: 'public', table: 'inventory' }},
+    (payload) => {{
       console.log('MERIT changed a product:', payload.eventType)
       loadProducts()  // call your own function to re-fetch and re-render
-    }
+    }}
   )
   .subscribe()
-""".replace("__SUPABASE_URL__", _sb_url_ph), language="javascript")
+""", language="javascript")
 
     # ── Schema & Security SQL ─────────────────────────────────────────
     with _tab_schema:
