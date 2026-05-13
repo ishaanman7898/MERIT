@@ -1538,8 +1538,10 @@ _title_co = _early_cfg.get("from_name", "").strip()
 _app_title = f"{_title_co} - MERIT" if _title_co else "MERIT"
 st.set_page_config(page_title=_app_title, layout="wide")
 
-# Always refresh cfg from disk/secrets at the start of every run to be adaptive
-st.session_state.cfg = load_config()
+# Load config once per session. st.secrets is static per session so re-reading every
+# rerun is wasted I/O. Settings mutations update st.session_state.cfg directly.
+if "cfg" not in st.session_state:
+    st.session_state.cfg = load_config()
 cfg = st.session_state.cfg
 
 if "queue" not in st.session_state:
@@ -3564,7 +3566,7 @@ All revenue data comes from the `outbound_logs` table and is stored in both SQLi
 
 elif page == "Settings":
     st.title("Settings")
-    st.caption("Credentials are auto-saved the moment you leave any field — no need to click a button.")
+    st.caption("Changes are saved automatically when you leave a field.")
 
     # ── Auto-save key map: session-state key → config.json key ──────
     _SETTINGS_KEY_MAP = {
@@ -3579,9 +3581,7 @@ elif page == "Settings":
         "inp_sb_anon":          "supabase_anon_key",
     }
 
-    # Initialise session state keys from cfg (ensures secrets auto-fill)
     for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
-        # Only overwrite if empty or if we have a new secret to show
         _val = cfg.get(_cfg_k, "")
         if not st.session_state.get(_ss_k) and _val:
             st.session_state[_ss_k] = _val
@@ -3590,23 +3590,12 @@ elif page == "Settings":
         _new = {**st.session_state.cfg}
         for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
             _new[_cfg_k] = st.session_state.get(_ss_k, "")
-        # Gmail app passwords are pasted with spaces — strip them before saving
         _new["smtp_password"] = re.sub(r"\s+", "", _new.get("smtp_password", ""))
         try:
             save_config(_new)
             st.session_state.cfg = _new
         except Exception as _e:
             st.error(f"Auto-save failed: {_e}")
-
-    # ── VEI account note ─────────────────────────
-    st.info(
-        "**VEI Firms:** Use your VEI account for all settings below. "
-        "Your firm coordinator may have already set up a shared Gmail account and firm name — ask them for the details. "
-        "All other keys (image hosting, database) are personal free accounts you create yourself."
-    )
-
-    # ── Auto-test helpers (pending-flag pattern) ─────────────────────
-    # on_change callbacks set a flag; the flag is consumed on the NEXT render to run the test.
 
     def _on_sb_change():
         _auto_save_settings()
@@ -3628,511 +3617,467 @@ elif page == "Settings":
         st.session_state.pop("_ih_test_result", None)
         st.session_state["_ih_test_pending"] = True
 
-    # ── Step 1: Database (Supabase) ──────────────────────────────────
-    st.subheader("Step 1 — Database Connection (Supabase)")
-    st.caption("New to Supabase? See the **Get Started** page for a full walkthrough.")
-
-    inp_sb_conn = st.text_input(
-        "Connection String",
-        placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
-        help="Supabase Dashboard → Connect → Session Pooler tab → Connection string. Leave [YOUR-PASSWORD] as-is — enter the password separately below.",
-        key="inp_sb_conn",
-        on_change=_on_sb_change,
+    _s_tab_db, _s_tab_email, _s_tab_img, _s_tab_team, _s_tab_secrets = st.tabs(
+        ["Database", "Email", "Image Hosting", "Team", "Secrets"]
     )
-    inp_sb_pass = st.text_input(
-        "Database Password",
-        type="password",
-        placeholder="Your Supabase database password",
-        help="The password you set when creating your Supabase project. Used to replace [YOUR-PASSWORD] in the connection string.",
-        key="inp_sb_pass",
-        on_change=_on_sb_change,
-    )
-    inp_sb_anon = st.text_input(
-        "Supabase Anon Key (for API Endpoints)",
-        type="password",
-        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-        help="Supabase Dashboard → Project Settings (gear icon) → API → copy the 'anon / public' key. Used by your website to read products safely.",
-        key="inp_sb_anon",
-        on_change=_auto_save_settings,
-    )
-    if inp_sb_anon.strip():
-        st.success("Anon key saved — it will appear pre-filled on the API Endpoints page.")
 
-    # Build effective connection string
-    _sb_conn_val = inp_sb_conn.strip()
-    _sb_pass_val = inp_sb_pass.strip()
-    _sb_effective = ""
-    if _sb_conn_val:
-        if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
-            from urllib.parse import quote as _url_quote_sb
-            _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _url_quote_sb(_sb_pass_val, safe=""))
-        elif "[YOUR-PASSWORD]" not in _sb_conn_val:
-            _sb_effective = _sb_conn_val
+    # ════════════════ DATABASE TAB ════════════════════════════════════
+    with _s_tab_db:
+        st.subheader("Supabase Connection")
+        inp_sb_conn = st.text_input(
+            "Connection String",
+            placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+            help="Supabase Dashboard → Connect → Session Pooler tab → Connection string",
+            key="inp_sb_conn",
+            on_change=_on_sb_change,
+        )
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            inp_sb_pass = st.text_input(
+                "Database Password",
+                type="password",
+                placeholder="Your Supabase database password",
+                help="The password you set when creating your Supabase project",
+                key="inp_sb_pass",
+                on_change=_on_sb_change,
+            )
+        with _sc2:
+            inp_sb_anon = st.text_input(
+                "Anon / Public Key",
+                type="password",
+                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                help="Supabase Dashboard → gear icon → API → Legacy API keys → anon / public",
+                key="inp_sb_anon",
+                on_change=_auto_save_settings,
+            )
 
-    if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
-        st.warning("Enter your **Database Password** above to complete the connection string.")
+        _sb_conn_val = inp_sb_conn.strip()
+        _sb_pass_val = inp_sb_pass.strip()
+        _sb_effective = ""
+        if _sb_conn_val:
+            if "[YOUR-PASSWORD]" in _sb_conn_val and _sb_pass_val:
+                from urllib.parse import quote as _url_quote_sb
+                _sb_effective = _sb_conn_val.replace("[YOUR-PASSWORD]", _url_quote_sb(_sb_pass_val, safe=""))
+            elif "[YOUR-PASSWORD]" not in _sb_conn_val:
+                _sb_effective = _sb_conn_val
 
-    # Auto-test on field change
-    if st.session_state.pop("_sb_test_pending", False) and _sb_effective:
-        with st.spinner("Testing Supabase connection..."):
-            try:
-                _tc = _psycopg2_connect(_sb_effective)
-                _tc.close()
-                st.session_state["_sb_test_result"] = ("ok", "Connected to Supabase successfully.")
-            except Exception as _tce:
-                st.session_state["_sb_test_result"] = ("err", str(_tce))
+        if _sb_conn_val and "[YOUR-PASSWORD]" in _sb_conn_val and not _sb_pass_val:
+            st.warning("Enter your Database Password to complete the connection string.")
 
-    if "_sb_test_result" in st.session_state:
-        _sbr = st.session_state["_sb_test_result"]
-        if _sbr[0] == "ok":
-            st.success(_sbr[1])
-        else:
-            st.error(f"Connection failed: {_sbr[1]}")
+        if st.session_state.pop("_sb_test_pending", False) and _sb_effective:
+            with st.spinner("Testing Supabase connection..."):
+                try:
+                    _tc = _psycopg2_connect(_sb_effective)
+                    _tc.close()
+                    st.session_state["_sb_test_result"] = ("ok", "Connected to Supabase successfully.")
+                except Exception as _tce:
+                    st.session_state["_sb_test_result"] = ("err", str(_tce))
 
-    if st.button("Setup Tables", type="primary", width="stretch", key="btn_setup_sb", disabled=not _sb_effective):
-        with st.spinner("Creating tables in Supabase..."):
-            try:
-                _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
-                _cur = _conn.cursor()
-                _statements = _split_sql_statements(SETUP_SQL)
-                _ok, _fail = 0, []
-                for _stmt in _statements:
+        if "_sb_test_result" in st.session_state:
+            _sbr = st.session_state["_sb_test_result"]
+            if _sbr[0] == "ok":
+                st.success(_sbr[1])
+            else:
+                st.error(f"Connection failed: {_sbr[1]}")
+
+        st.divider()
+        st.subheader("Setup Tables")
+        st.caption("Creates all MERIT tables in Supabase and syncs any locally-created users and roles.")
+        if st.button("Setup Tables", type="primary", width="stretch", key="btn_setup_sb", disabled=not _sb_effective):
+            with st.spinner("Creating tables in Supabase..."):
+                try:
+                    _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
+                    _cur = _conn.cursor()
+                    _statements = _split_sql_statements(SETUP_SQL)
+                    _ok, _fail = 0, []
+                    for _stmt in _statements:
+                        try:
+                            _cur.execute(_stmt)
+                            _ok += 1
+                        except Exception as _se:
+                            _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                    _conn.commit()
+                    _cur.close()
+                    _conn.close()
+                    if not _fail:
+                        st.toast("Supabase tables ready!")
+                        st.success("Tables created successfully.")
+                        with st.spinner("Syncing users and roles to Supabase..."):
+                            _u_cnt, _r_cnt, _sync_errs = sync_local_to_supabase(cfg)
+                        if _sync_errs:
+                            st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
+                        elif _u_cnt or _r_cnt:
+                            st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) to Supabase.")
+                    else:
+                        st.warning(f"{_ok} OK, {len(_fail)} failed:")
+                        for _f in _fail:
+                            st.caption(_f)
+                except Exception as exc:
+                    st.error(f"Setup failed: {exc}")
+
+    # ════════════════ EMAIL TAB ═══════════════════════════════════════
+    with _s_tab_email:
+        st.subheader("Gmail SMTP")
+        _e1, _e2 = st.columns(2)
+        with _e1:
+            inp_smtp_email = st.text_input(
+                "Gmail Address",
+                placeholder="yourfirm@gmail.com",
+                help="The Gmail account emails are sent from",
+                key="_cfg_smtp_email",
+                on_change=_on_smtp_change,
+            )
+        with _e2:
+            inp_smtp_pass = st.text_input(
+                "App Password",
+                type="password",
+                placeholder="xxxx xxxx xxxx xxxx",
+                help="Google Account → Security → App Passwords → create one named MERIT",
+                key="_cfg_smtp_pass",
+                on_change=_on_smtp_change,
+            )
+
+        if st.session_state.pop("_smtp_test_pending", False) and inp_smtp_email.strip() and inp_smtp_pass.strip():
+            with st.spinner("Testing Gmail connection..."):
+                try:
+                    _srv = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+                    _srv.starttls()
+                    _srv.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
+                    _srv.quit()
+                    st.session_state["_smtp_test_result"] = ("ok", "Gmail connected successfully.")
+                except Exception as _smtpe:
+                    _smtp_em = str(_smtpe)
+                    if len(_smtp_em) > 300 or "DeltaGenerator" in _smtp_em:
+                        _smtp_em = "Login failed — check your Gmail address and App Password."
+                    st.session_state["_smtp_test_result"] = ("err", _smtp_em[:300])
+
+        if "_smtp_test_result" in st.session_state:
+            _smr = st.session_state["_smtp_test_result"]
+            if _smr[0] == "ok":
+                st.success(_smr[1])
+            else:
+                st.error(f"Connection failed: {_smr[1]}")
+
+        st.divider()
+        st.subheader("Sender Identity")
+        _si1, _si2 = st.columns(2)
+        with _si1:
+            inp_from_name = st.text_input(
+                "From Name",
+                placeholder="Your VEI Firm Name",
+                help="Shown as the sender name in the recipient's inbox",
+                key="_cfg_from_name",
+                on_change=_auto_save_settings,
+            )
+        with _si2:
+            inp_subject = st.text_input(
+                "Default Subject Line",
+                placeholder="Your order is here",
+                help="Use {order_number} to insert the order number",
+                key="_cfg_subject",
+                on_change=_auto_save_settings,
+            )
+
+        st.divider()
+        st.subheader("App Login Password")
+        st.caption("When set, this password protects the app. Only active after Secrets TOML is saved.")
+        inp_app_pwd = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter a password",
+            key="_cfg_app_login_password",
+            on_change=_auto_save_settings,
+        )
+        if inp_app_pwd.strip():
+            st.success("Login password set.")
+
+    # ════════════════ IMAGE HOSTING TAB ══════════════════════════════
+    with _s_tab_img:
+        st.subheader("Image Hosting")
+        st.caption("Product images are uploaded automatically when you add a product. Set up one service.")
+
+        _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
+
+        with _img_tab_fi:
+            inp_freeimage_key = st.text_input(
+                "Freeimage.host API Key",
+                type="password",
+                placeholder="your_api_key_here",
+                help="freeimage.host → Menu → API → copy your key",
+                key="inp_freeimage_key",
+                on_change=_on_fi_change,
+            )
+            if st.session_state.pop("_fi_test_pending", False) and inp_freeimage_key.strip():
+                with st.spinner("Testing Freeimage.host..."):
                     try:
-                        _cur.execute(_stmt)
-                        _ok += 1
-                    except Exception as _se:
-                        _fail.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
-                _conn.commit()
-                _cur.close()
-                _conn.close()
-                if not _fail:
-                    st.toast("Supabase tables ready!", icon="📦")
-                    st.success(
-                        "Tables created successfully. You can now use the API Endpoints page. "
-                        "Go back to **Get Started** and finish the remaining steps."
-                    )
-                    # Sync any users and roles created locally (Step 1) into Supabase
-                    with st.spinner("Syncing users and roles to Supabase..."):
-                        _u_cnt, _r_cnt, _sync_errs = sync_local_to_supabase(cfg)
-                    if _sync_errs:
-                        st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
-                    elif _u_cnt or _r_cnt:
-                        st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) from local storage to Supabase.")
-                else:
-                    st.warning(f"{_ok} OK, {len(_fail)} failed:")
-                    for _f in _fail:
-                        st.caption(_f)
-            except Exception as exc:
-                st.error(f"Setup failed: {exc}")
-
-    # ── Step 2: Image Hosting ────────────────────────────────────────
-    st.divider()
-    st.subheader("Step 2 — Image Hosting")
-    st.caption("Choose one free service. Product images are uploaded automatically when you add a product.")
-
-    _img_tab_fi, _img_tab_ih = st.tabs(["Freeimage.host", "Imghippo"])
-
-    with _img_tab_fi:
-        inp_freeimage_key = st.text_input(
-            "Freeimage.host API Key",
-            type="password",
-            placeholder="your_api_key_here",
-            help="freeimage.host → Menu → API → copy your key",
-            key="inp_freeimage_key",
-            on_change=_on_fi_change,
-        )
-        # Auto-test on key change
-        if st.session_state.pop("_fi_test_pending", False) and inp_freeimage_key.strip():
-            with st.spinner("Testing Freeimage.host API key..."):
-                try:
-                    import requests as _rq
-                    import base64 as _b64
-                    _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                    _fi_resp = _rq.post(
-                        "https://freeimage.host/api/1/upload",
-                        data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
-                        files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
-                        timeout=20,
-                    )
-                    _fi_body = _fi_resp.json() if _fi_resp.content else {}
-                    if _fi_resp.status_code == 200 and str(_fi_body.get("status_code")) == "200":
-                        st.session_state["_fi_test_result"] = ("ok", "Freeimage.host key verified.")
-                    else:
-                        _fi_err = str(_fi_body.get("status_txt") or f"HTTP {_fi_resp.status_code}")[:120]
-                        st.session_state["_fi_test_result"] = ("err", _fi_err)
-                except Exception as _fie:
-                    _fi_em = str(_fie)
-                    if len(_fi_em) > 200 or "DeltaGenerator" in _fi_em:
-                        _fi_em = "Connection failed — check your internet connection and try again."
-                    st.session_state["_fi_test_result"] = ("err", _fi_em[:200])
-        if "_fi_test_result" in st.session_state:
-            _fir = st.session_state["_fi_test_result"]
-            if _fir[0] == "ok":
-                st.success("Key verified — Freeimage.host is working.")
-            else:
-                st.error(f"Key test failed: {_fir[1]}")
-
-    with _img_tab_ih:
-        inp_imgbb_key = st.text_input(
-            "Imghippo API Key",
-            type="password",
-            placeholder="your_imghippo_api_key",
-            help="imghippo.com → Settings → API Keys → Generate",
-            key="inp_imgbb_key",
-            on_change=_on_ih_change,
-        )
-        # Auto-test on key change
-        if st.session_state.pop("_ih_test_pending", False) and inp_imgbb_key.strip():
-            with st.spinner("Testing Imghippo API key..."):
-                try:
-                    import requests as _rq
-                    import base64 as _b64
-                    _ih_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
-                    _ih_resp = _rq.post(
-                        "https://api.imghippo.com/v1/upload",
-                        data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
-                        files={"file": ("test.jpg", io.BytesIO(_ih_raw), "image/jpeg")},
-                        timeout=20,
-                    )
-                    _ih_body = _ih_resp.json() if _ih_resp.content else {}
-                    if _ih_resp.status_code == 200 and _ih_body.get("success"):
-                        st.session_state["_ih_test_result"] = ("ok", "Imghippo key verified.")
-                    elif _ih_resp.status_code == 401:
-                        st.session_state["_ih_test_result"] = ("err", "Invalid API key — check for typos.")
-                    elif _ih_resp.status_code == 429:
-                        st.session_state["_ih_test_result"] = ("warn", "Rate limited — wait a minute and try again.")
-                    else:
-                        st.session_state["_ih_test_result"] = ("err", f"HTTP {_ih_resp.status_code} — check your key.")
-                except Exception as _ihe:
-                    _ih_em = str(_ihe)
-                    if len(_ih_em) > 200 or "DeltaGenerator" in _ih_em:
-                        _ih_em = "Connection failed — check your internet connection and try again."
-                    st.session_state["_ih_test_result"] = ("err", _ih_em[:200])
-        if "_ih_test_result" in st.session_state:
-            _ihr = st.session_state["_ih_test_result"]
-            if _ihr[0] == "ok":
-                st.success("Key verified — Imghippo is working.")
-            elif _ihr[0] == "warn":
-                st.warning(_ihr[1])
-            else:
-                st.error(f"Key test failed: {_ihr[1]}")
- 
-    if inp_freeimage_key.strip() or inp_imgbb_key.strip():
-        st.success("Image hosting configuration saved.")
-
-    # ── Step 3: Gmail SMTP ───────────────────────────────────────────
-    st.divider()
-    st.subheader("Step 3 — Gmail SMTP")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        inp_smtp_email = st.text_input(
-            "Gmail Address",
-            placeholder="yourname@gmail.com",
-            help="The Gmail account emails will be sent from",
-            key="_cfg_smtp_email",
-            on_change=_on_smtp_change,
-        )
-    with col4:
-        inp_smtp_pass = st.text_input(
-            "App Password",
-            type="password",
-            placeholder="xxxx xxxx xxxx xxxx",
-            help="The 16-character app password from your Google account",
-            key="_cfg_smtp_pass",
-            on_change=_on_smtp_change,
-        )
-
-    # Auto-test on field change (runs when both fields are filled)
-    if st.session_state.pop("_smtp_test_pending", False) and inp_smtp_email.strip() and inp_smtp_pass.strip():
-        with st.spinner("Testing Gmail SMTP connection..."):
-            try:
-                _srv = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-                _srv.starttls()
-                _srv.login(inp_smtp_email.strip(), re.sub(r"\s+", "", inp_smtp_pass.strip()))
-                _srv.quit()
-                st.session_state["_smtp_test_result"] = ("ok", "SMTP connection successful.")
-            except Exception as _smtpe:
-                _smtp_em = str(_smtpe)
-                if len(_smtp_em) > 300 or "DeltaGenerator" in _smtp_em:
-                    _smtp_em = "Login failed — check your Gmail address and App Password."
-                st.session_state["_smtp_test_result"] = ("err", _smtp_em[:300])
-
-    if "_smtp_test_result" in st.session_state:
-        _smr = st.session_state["_smtp_test_result"]
-        if _smr[0] == "ok":
-            st.success("Gmail connected successfully.")
-        else:
-            st.error(f"Connection failed: {_smr[1]}")
- 
-    if inp_smtp_email.strip() and inp_smtp_pass.strip():
-        st.success("Gmail SMTP configuration saved.")
-
-    # ── Step 4: Sender Identity ──────────────────────────────────────
-    st.divider()
-    st.subheader("Step 4 — Sender Identity")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        inp_from_name = st.text_input(
-            "From Name",
-            placeholder="Your VEI Firm Name",
-            help="Displayed as the sender name in the recipient's inbox",
-            key="_cfg_from_name",
-            on_change=_auto_save_settings,
-        )
-    with col2:
-        inp_subject = st.text_input(
-            "Default Subject Line",
-            placeholder="Your order is here",
-            help="Use {order_number} to insert the order number",
-            key="_cfg_subject",
-            on_change=_auto_save_settings,
-        )
- 
-    if inp_from_name.strip() and inp_subject.strip():
-        st.success("Sender Identity configured.")
-
-    # ── Step 5: App Login Password ───────────────────────────────────
-    st.divider()
-    st.subheader("Step 5 — App Login Password")
-    st.info("Set a password to protect your MERIT app from unauthorized access.")
-    inp_app_pwd = st.text_input(
-        "Set App Login Password",
-        type="password",
-        placeholder="Enter a password",
-        help="This password will be required to access MERIT after setup is complete.",
-        key="_cfg_app_login_password",
-        on_change=_auto_save_settings,
-    )
- 
-    if inp_app_pwd.strip():
-        st.success("App Login Password set.")
-
-    # ── Team Access (Roles + Users combined) ─────────────────────────
-    st.divider()
-    st.subheader("Team Access")
-    st.caption("Manage roles and the users assigned to them. Admins can change any user's role.")
-
-    _ta_roles_df  = get_roles_from_db(cfg)
-    _ta_users     = get_users_from_db(cfg)
-    _ta_role_names = list(_ta_roles_df["role_name"].values) if not _ta_roles_df.empty else ["admin", "staff", "viewer"]
-    _ta_cur_user  = st.session_state.get("auth_user", {}) or {}
-    _ta_is_admin  = (_ta_cur_user.get("role", "admin") == "admin") or (not _ta_cur_user)
-    _ta_builtin   = {"admin", "staff", "viewer"}
-
-    _ta_tab_roles, _ta_tab_users = st.tabs(["Roles", "Users"])
-
-    # ════════════════ ROLES TAB ═══════════════════════════════════
-    with _ta_tab_roles:
-        st.write("Each role defines which pages its members can access.")
-
-        # Create new role
-        with st.expander("Create New Role", expanded=False):
-            _rm_name = st.text_input("Role Name", placeholder="e.g. manager", key="rm_role_name")
-            st.write("Pages this role can access:")
-            _rm_page_cols = st.columns(len(_ALL_PAGES))
-            _rm_checked = []
-            for _rp_i, _rp_name in enumerate(_ALL_PAGES):
-                with _rm_page_cols[_rp_i]:
-                    if st.checkbox(_rp_name, key=f"rm_page_{_rp_i}"):
-                        _rm_checked.append(_rp_name)
-            if st.button("Save Role", type="primary", key="btn_rm_create", disabled=not _ta_is_admin):
-                if not _rm_name.strip():
-                    st.error("Role name is required.")
-                elif not _rm_checked:
-                    st.error("Select at least one page.")
-                else:
-                    _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
-                    if _rm_ok:
-                        st.success(f"Role **{_rm_name.strip()}** saved with: {', '.join(_rm_checked)}")
-                        _fetch_roles_cached.clear()
-                        st.rerun()
-                    else:
-                        st.error(f"Failed: {_rm_msg}")
-            if not _ta_is_admin:
-                st.caption("Only admins can create roles.")
-
-        # All roles list
-        if not _ta_roles_df.empty:
-            for _, _rr in _ta_roles_df.iterrows():
-                _rr_name  = str(_rr.get("role_name", ""))
-                _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
-                _rr_is_builtin = _rr_name in _ta_builtin
-                with st.container(border=True):
-                    _rrc1, _rrc2 = st.columns([5, 1])
-                    with _rrc1:
-                        _rr_label = f"**{_rr_name.capitalize()}**"
-                        if _rr_is_builtin:
-                            _rr_label += " — *built-in*"
-                        st.markdown(_rr_label)
-                        # Page permission badges
-                        _badge_html = " ".join(
-                            f'<span style="background:#1f7aec;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px">{p}</span>'
-                            if p in _rr_pages else
-                            f'<span style="background:#333;color:#666;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;text-decoration:line-through">{p}</span>'
-                            for p in _ALL_PAGES
+                        import requests as _rq
+                        import base64 as _b64
+                        _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                        _fi_resp = _rq.post(
+                            "https://freeimage.host/api/1/upload",
+                            data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
+                            files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
+                            timeout=20,
                         )
-                        st.markdown(_badge_html, unsafe_allow_html=True)
-                    with _rrc2:
-                        if not _rr_is_builtin and _ta_is_admin:
-                            if st.button("Delete", key=f"rm_del_{_rr_name}", use_container_width=True):
-                                _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
-                                if _rrd_ok:
-                                    st.toast(f"Role '{_rr_name}' deleted.")
-                                    _fetch_roles_cached.clear()
-                                    st.rerun()
-                                else:
-                                    st.error(f"Failed: {_rrd_msg}")
+                        _fi_body = _fi_resp.json() if _fi_resp.content else {}
+                        if _fi_resp.status_code == 200 and str(_fi_body.get("status_code")) == "200":
+                            st.session_state["_fi_test_result"] = ("ok", "Key verified.")
+                        else:
+                            st.session_state["_fi_test_result"] = ("err", str(_fi_body.get("status_txt") or f"HTTP {_fi_resp.status_code}")[:120])
+                    except Exception as _fie:
+                        _fi_em = str(_fie)
+                        st.session_state["_fi_test_result"] = ("err", "Connection failed — check your internet." if len(_fi_em) > 200 else _fi_em[:200])
+            if "_fi_test_result" in st.session_state:
+                _fir = st.session_state["_fi_test_result"]
+                st.success("Freeimage.host is working.") if _fir[0] == "ok" else st.error(f"Test failed: {_fir[1]}")
 
-    # ════════════════ USERS TAB ═══════════════════════════════════
-    with _ta_tab_users:
-
-        # Add new user
-        with st.expander("Add New User", expanded=_ta_users.empty):
-            _um_c1, _um_c2 = st.columns(2)
-            with _um_c1:
-                _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
-                _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
-            with _um_c2:
-                _um_role  = st.selectbox(
-                    "Role", _ta_role_names,
-                    format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
-                    key="um_role"
-                )
-                _um_pass  = st.text_input("Password", type="password", key="um_pass")
-                _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
-            if st.button("Create User", type="primary", key="btn_um_create"):
-                if not _um_name.strip():
-                    st.error("Full name is required.")
-                elif not _um_email.strip() or "@" not in _um_email:
-                    st.error("A valid email is required.")
-                elif len(_um_pass) < 6:
-                    st.error("Password must be at least 6 characters.")
-                elif _um_pass != _um_pass2:
-                    st.error("Passwords do not match.")
+        with _img_tab_ih:
+            inp_imgbb_key = st.text_input(
+                "Imghippo API Key",
+                type="password",
+                placeholder="your_imghippo_api_key",
+                help="imghippo.com → Settings → API Keys → Generate",
+                key="inp_imgbb_key",
+                on_change=_on_ih_change,
+            )
+            if st.session_state.pop("_ih_test_pending", False) and inp_imgbb_key.strip():
+                with st.spinner("Testing Imghippo..."):
+                    try:
+                        import requests as _rq
+                        import base64 as _b64
+                        _ih_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                        _ih_resp = _rq.post(
+                            "https://api.imghippo.com/v1/upload",
+                            data={"api_key": inp_imgbb_key.strip(), "title": "api_test"},
+                            files={"file": ("test.jpg", io.BytesIO(_ih_raw), "image/jpeg")},
+                            timeout=20,
+                        )
+                        _ih_body = _ih_resp.json() if _ih_resp.content else {}
+                        if _ih_resp.status_code == 200 and _ih_body.get("success"):
+                            st.session_state["_ih_test_result"] = ("ok", "Key verified.")
+                        elif _ih_resp.status_code == 401:
+                            st.session_state["_ih_test_result"] = ("err", "Invalid API key.")
+                        elif _ih_resp.status_code == 429:
+                            st.session_state["_ih_test_result"] = ("warn", "Rate limited — wait a minute and retry.")
+                        else:
+                            st.session_state["_ih_test_result"] = ("err", f"HTTP {_ih_resp.status_code}")
+                    except Exception as _ihe:
+                        _ih_em = str(_ihe)
+                        st.session_state["_ih_test_result"] = ("err", "Connection failed." if len(_ih_em) > 200 else _ih_em[:200])
+            if "_ih_test_result" in st.session_state:
+                _ihr = st.session_state["_ih_test_result"]
+                if _ihr[0] == "ok":
+                    st.success("Imghippo is working.")
+                elif _ihr[0] == "warn":
+                    st.warning(_ihr[1])
                 else:
-                    _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
-                    if _um_ok:
-                        st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
-                        _fetch_users_cached.clear()
-                        st.rerun()
+                    st.error(f"Test failed: {_ihr[1]}")
+
+    # ════════════════ TEAM TAB ════════════════════════════════════════
+    with _s_tab_team:
+        st.subheader("Team Access")
+        st.caption("Manage roles and the users assigned to them. Admins can change any user's role.")
+
+        _ta_roles_df  = get_roles_from_db(cfg)
+        _ta_users     = get_users_from_db(cfg)
+        _ta_role_names = list(_ta_roles_df["role_name"].values) if not _ta_roles_df.empty else ["admin", "staff", "viewer"]
+        _ta_cur_user  = st.session_state.get("auth_user", {}) or {}
+        _ta_is_admin  = (_ta_cur_user.get("role", "admin") == "admin") or (not _ta_cur_user)
+        _ta_builtin   = {"admin", "staff", "viewer"}
+
+        _ta_tab_roles, _ta_tab_users = st.tabs(["Roles", "Users"])
+
+        # ════════════════ ROLES TAB ═══════════════════════════════════
+        with _ta_tab_roles:
+            st.write("Each role defines which pages its members can access.")
+
+            # Create new role
+            with st.expander("Create New Role", expanded=False):
+                _rm_name = st.text_input("Role Name", placeholder="e.g. manager", key="rm_role_name")
+                st.write("Pages this role can access:")
+                _rm_page_cols = st.columns(len(_ALL_PAGES))
+                _rm_checked = []
+                for _rp_i, _rp_name in enumerate(_ALL_PAGES):
+                    with _rm_page_cols[_rp_i]:
+                        if st.checkbox(_rp_name, key=f"rm_page_{_rp_i}"):
+                            _rm_checked.append(_rp_name)
+                if st.button("Save Role", type="primary", key="btn_rm_create", disabled=not _ta_is_admin):
+                    if not _rm_name.strip():
+                        st.error("Role name is required.")
+                    elif not _rm_checked:
+                        st.error("Select at least one page.")
                     else:
-                        st.error(f"Failed: {_um_msg}")
+                        _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
+                        if _rm_ok:
+                            st.success(f"Role **{_rm_name.strip()}** saved with: {', '.join(_rm_checked)}")
+                            _fetch_roles_cached.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {_rm_msg}")
+                if not _ta_is_admin:
+                    st.caption("Only admins can create roles.")
 
-        # All users — each card shows permissions + inline role change for admins
-        if not _ta_users.empty:
-            for _, _ur in _ta_users.iterrows():
-                _ur_email_val = str(_ur.get("email", ""))
-                _ur_role_val  = str(_ur.get("role", "viewer"))
-                _ur_pages     = get_pages_for_role(_ur_role_val, cfg)
-                _is_self      = (_ta_cur_user.get("email", "").lower() == _ur_email_val.lower())
-
-                with st.container(border=True):
-                    _uc1, _uc2, _uc3 = st.columns([4, 3, 1])
-                    with _uc1:
-                        st.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur_email_val}")
-                    with _uc2:
-                        if _ta_is_admin and not _is_self:
-                            # Inline role selector — admin can change anyone's role
-                            _new_role_sel = st.selectbox(
-                                "Role",
-                                _ta_role_names,
-                                index=_ta_role_names.index(_ur_role_val) if _ur_role_val in _ta_role_names else 0,
-                                format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
-                                key=f"ur_role_sel_{_ur_email_val}",
-                                label_visibility="collapsed",
+            # All roles list
+            if not _ta_roles_df.empty:
+                for _, _rr in _ta_roles_df.iterrows():
+                    _rr_name  = str(_rr.get("role_name", ""))
+                    _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
+                    _rr_is_builtin = _rr_name in _ta_builtin
+                    with st.container(border=True):
+                        _rrc1, _rrc2 = st.columns([5, 1])
+                        with _rrc1:
+                            _rr_label = f"**{_rr_name.capitalize()}**"
+                            if _rr_is_builtin:
+                                _rr_label += " — *built-in*"
+                            st.markdown(_rr_label)
+                            # Page permission badges
+                            _badge_html = " ".join(
+                                f'<span style="background:#1f7aec;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px">{p}</span>'
+                                if p in _rr_pages else
+                                f'<span style="background:#333;color:#666;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;text-decoration:line-through">{p}</span>'
+                                for p in _ALL_PAGES
                             )
-                            if _new_role_sel != _ur_role_val:
-                                if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
-                                    _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
-                                    if _uro_ok:
-                                        st.toast(f"Role updated to {_new_role_sel}.")
-                                        _fetch_users_cached.clear()
+                            st.markdown(_badge_html, unsafe_allow_html=True)
+                        with _rrc2:
+                            if not _rr_is_builtin and _ta_is_admin:
+                                if st.button("Delete", key=f"rm_del_{_rr_name}", use_container_width=True):
+                                    _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
+                                    if _rrd_ok:
+                                        st.toast(f"Role '{_rr_name}' deleted.")
+                                        _fetch_roles_cached.clear()
                                         st.rerun()
                                     else:
-                                        st.error(f"Failed: {_uro_msg}")
-                            # Show pages for selected role (live preview as admin changes selectbox)
-                            _preview_pages = get_pages_for_role(_new_role_sel, cfg)
-                            _badge2 = " ".join(
-                                f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
-                                for p in _preview_pages
-                            ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
-                            st.markdown(_badge2, unsafe_allow_html=True)
+                                        st.error(f"Failed: {_rrd_msg}")
+
+        # ════════════════ USERS TAB ═══════════════════════════════════
+        with _ta_tab_users:
+
+            # Add new user
+            with st.expander("Add New User", expanded=_ta_users.empty):
+                _um_c1, _um_c2 = st.columns(2)
+                with _um_c1:
+                    _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
+                    _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
+                with _um_c2:
+                    _um_role  = st.selectbox(
+                        "Role", _ta_role_names,
+                        format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                        key="um_role"
+                    )
+                    _um_pass  = st.text_input("Password", type="password", key="um_pass")
+                    _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
+                if st.button("Create User", type="primary", key="btn_um_create"):
+                    if not _um_name.strip():
+                        st.error("Full name is required.")
+                    elif not _um_email.strip() or "@" not in _um_email:
+                        st.error("A valid email is required.")
+                    elif len(_um_pass) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    elif _um_pass != _um_pass2:
+                        st.error("Passwords do not match.")
+                    else:
+                        _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
+                        if _um_ok:
+                            st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                            _fetch_users_cached.clear()
+                            st.rerun()
                         else:
-                            # Non-admin or self: show role label + pages read-only
-                            st.caption(_ROLE_LABELS.get(_ur_role_val, _ur_role_val.capitalize()))
-                            _badge3 = " ".join(
-                                f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
-                                for p in _ur_pages
-                            ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
-                            st.markdown(_badge3, unsafe_allow_html=True)
-                    with _uc3:
-                        if st.button("Remove", key=f"um_del_{_ur_email_val}",
-                                     disabled=_is_self or not _ta_is_admin,
-                                     help="Cannot remove your own account" if _is_self else
-                                          "Only admins can remove users" if not _ta_is_admin else None,
-                                     use_container_width=True):
-                            _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
-                            if _del_ok:
-                                st.toast("User removed.")
-                                _fetch_users_cached.clear()
-                                st.rerun()
+                            st.error(f"Failed: {_um_msg}")
+
+            # All users — each card shows permissions + inline role change for admins
+            if not _ta_users.empty:
+                for _, _ur in _ta_users.iterrows():
+                    _ur_email_val = str(_ur.get("email", ""))
+                    _ur_role_val  = str(_ur.get("role", "viewer"))
+                    _ur_pages     = get_pages_for_role(_ur_role_val, cfg)
+                    _is_self      = (_ta_cur_user.get("email", "").lower() == _ur_email_val.lower())
+
+                    with st.container(border=True):
+                        _uc1, _uc2, _uc3 = st.columns([4, 3, 1])
+                        with _uc1:
+                            st.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur_email_val}")
+                        with _uc2:
+                            if _ta_is_admin and not _is_self:
+                                # Inline role selector — admin can change anyone's role
+                                _new_role_sel = st.selectbox(
+                                    "Role",
+                                    _ta_role_names,
+                                    index=_ta_role_names.index(_ur_role_val) if _ur_role_val in _ta_role_names else 0,
+                                    format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                                    key=f"ur_role_sel_{_ur_email_val}",
+                                    label_visibility="collapsed",
+                                )
+                                if _new_role_sel != _ur_role_val:
+                                    if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
+                                        _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
+                                        if _uro_ok:
+                                            st.toast(f"Role updated to {_new_role_sel}.")
+                                            _fetch_users_cached.clear()
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed: {_uro_msg}")
+                                # Show pages for selected role (live preview as admin changes selectbox)
+                                _preview_pages = get_pages_for_role(_new_role_sel, cfg)
+                                _badge2 = " ".join(
+                                    f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                    for p in _preview_pages
+                                ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                                st.markdown(_badge2, unsafe_allow_html=True)
                             else:
-                                st.error(f"Failed: {_del_msg}")
-        else:
-            st.info("No users yet. Use the form above to create your first user.")
+                                # Non-admin or self: show role label + pages read-only
+                                st.caption(_ROLE_LABELS.get(_ur_role_val, _ur_role_val.capitalize()))
+                                _badge3 = " ".join(
+                                    f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                    for p in _ur_pages
+                                ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                                st.markdown(_badge3, unsafe_allow_html=True)
+                        with _uc3:
+                            if st.button("Remove", key=f"um_del_{_ur_email_val}",
+                                         disabled=_is_self or not _ta_is_admin,
+                                         help="Cannot remove your own account" if _is_self else
+                                              "Only admins can remove users" if not _ta_is_admin else None,
+                                         use_container_width=True):
+                                _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
+                                if _del_ok:
+                                    st.toast("User removed.")
+                                    _fetch_users_cached.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed: {_del_msg}")
+            else:
+                st.info("No users yet. Use the form above to create your first user.")
 
-    # ── Step 6: Secrets TOML ─────────────────────────────────────────
-    st.divider()
-    st.subheader("Step 6 — Secrets TOML (Permanently Save Settings)")
-    st.warning(
-        "**Complete Steps 1–5 first.** "
-        "This final step 'locks in' your credentials so they aren't lost when the app reboots."
-    )
-    st.markdown("""
-### **What is TOML & Why use it?**
-Streamlit Cloud restarts your app periodically and wipes any local files. **TOML** is a simple text format used by Streamlit to store **Secrets** safely. By pasting your settings here, they will survive reboots forever.
-
-### **How to save your settings:**
-1.  **Copy the TOML code block below.** It contains all the keys you entered in the previous steps.
-2.  Click **Manage app** in the bottom-right corner of your browser.
-3.  Click the **⋮ (three dots)** menu → **Settings** → **Secrets**.
-4.  **Paste the code** into the text area and click **Save**.
-5.  Streamlit will reboot your app, and your settings will be permanent!
-
-*If running locally:* Create a folder named `.streamlit` and save this text as a file named `secrets.toml` inside it.
-    """)
-
-    _toml_cfg = st.session_state.cfg
-    def _toml_escape(v: str) -> str:
-        return v.replace("\\", "\\\\").replace('"', '\\"')
-
-    _toml_lines = ["[merit]"]
-    for _tk in _SECRETS_CREDENTIAL_KEYS:
-        _tv = _toml_cfg.get(_tk, "")
-        _toml_lines.append(f'{_tk} = "{_toml_escape(str(_tv))}"')
-    _toml_content = "\n".join(_toml_lines)
-
-    st.code(_toml_content, language="toml")
-
-    _has_toml_data = any(_toml_cfg.get(k) for k in _SECRETS_CREDENTIAL_KEYS)
-    if not _has_toml_data:
-        st.info("Fill in Steps 1–5 above first, then come back here to generate your TOML.")
-
-    _gs_secrets_active = False
-    try:
-        _gs_secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
-    except Exception:
-        pass
-
-    if _gs_secrets_active:
-        st.success("Secrets are active — MERIT is reading credentials from `st.secrets`. Settings will persist across reboots.")
-    else:
-        st.warning(
-            "Secrets not detected yet. After pasting the TOML into Streamlit secrets and saving, "
-            "Streamlit will reboot and this message will change to a green confirmation."
+    # ════════════════ SECRETS TAB ════════════════════════════════════
+    with _s_tab_secrets:
+        st.subheader("Secrets TOML")
+        st.caption(
+            "Streamlit Cloud wipes local files on every restart. Pasting this block into "
+            "Streamlit Secrets makes your credentials permanent."
         )
+
+        _gs_secrets_active = False
+        try:
+            _gs_secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
+        except Exception:
+            pass
+
+        if _gs_secrets_active:
+            st.success("Secrets are active — credentials survive app restarts.")
+        else:
+            st.info(
+                "After filling in your credentials on the other tabs, copy the block below, "
+                "then go to **Manage app → ⋮ → Settings → Secrets**, paste it, and click Save."
+            )
+
+        _toml_cfg = st.session_state.cfg
+        def _toml_escape(v: str) -> str:
+            return v.replace("\\", "\\\\").replace('"', '\\"')
+
+        _toml_lines = ["[merit]"]
+        for _tk in _SECRETS_CREDENTIAL_KEYS:
+            _tv = _toml_cfg.get(_tk, "")
+            _toml_lines.append(f'{_tk} = "{_toml_escape(str(_tv))}"')
+        st.code("\n".join(_toml_lines), language="toml")
 
 
 # ═════════════════════════════════════════════
