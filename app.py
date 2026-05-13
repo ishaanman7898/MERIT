@@ -151,8 +151,28 @@ def _init_sqlite():
             password_hash TEXT NOT NULL,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS roles (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            role_name  TEXT NOT NULL UNIQUE,
+            pages      TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
+    # Seed default roles if the table is empty
+    try:
+        _rc = conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0]
+        if _rc == 0:
+            conn.executemany(
+                "INSERT OR IGNORE INTO roles (role_name, pages) VALUES (?, ?)",
+                [
+                    ("admin",  "Mass Email,Products,Inventory,Settings,API Endpoints"),
+                    ("staff",  "Mass Email,Products,Inventory"),
+                    ("viewer", "Inventory"),
+                ]
+            )
+            conn.commit()
+    except Exception: pass
 
     # Migration for existing outbound_logs (add subtotal, tax, shipping)
     try:
@@ -204,8 +224,11 @@ def _parse_product_qty(pname: str) -> tuple:
 # Role-based access control
 # ─────────────────────────────────────────────
 
+_ALL_PAGES = ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
+
+# Fallback role→pages map used before DB is available
 _ROLE_PAGES = {
-    "admin":  ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"],
+    "admin":  list(_ALL_PAGES),
     "staff":  ["Mass Email", "Products", "Inventory"],
     "viewer": ["Inventory"],
 }
@@ -251,6 +274,140 @@ def get_users_from_db(cfg: dict) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+def get_roles_from_db(cfg: dict) -> pd.DataFrame:
+    """Load roles table from Supabase (preferred) or SQLite fallback."""
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        try:
+            conn = _psycopg2_connect(_sb_cs)
+            df = pd.read_sql("SELECT role_name, pages FROM roles ORDER BY role_name", conn)
+            conn.close()
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    try:
+        conn = _get_sqlite_conn()
+        df = pd.read_sql("SELECT role_name, pages FROM roles ORDER BY role_name", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_pages_for_role(role_name: str, cfg: dict) -> list:
+    """Return list of page names for a given role. Falls back to _ROLE_PAGES dict."""
+    roles_df = get_roles_from_db(cfg)
+    if not roles_df.empty and role_name in roles_df["role_name"].values:
+        row = roles_df[roles_df["role_name"] == role_name].iloc[0]
+        return [p.strip() for p in str(row.get("pages", "")).split(",") if p.strip()]
+    return list(_ROLE_PAGES.get(role_name, _ROLE_PAGES["admin"]))
+
+
+def create_role_all_dbs(role_name: str, pages: list, cfg: dict) -> tuple[bool, str]:
+    """Create or update a role in both SQLite and Supabase."""
+    pages_str = ",".join(pages)
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "INSERT INTO roles (role_name, pages) VALUES (?, ?) "
+            "ON CONFLICT(role_name) DO UPDATE SET pages=excluded.pages",
+            (role_name.lower().strip(), pages_str)
+        )
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO roles (role_name, pages) VALUES (%s, %s) "
+                        "ON CONFLICT (role_name) DO UPDATE SET pages=EXCLUDED.pages",
+                        (role_name.lower().strip(), pages_str)
+                    )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def delete_role_all_dbs(role_name: str, cfg: dict) -> tuple[bool, str]:
+    """Delete a role from both SQLite and Supabase. Refuses to delete built-in roles."""
+    if role_name in ("admin", "staff", "viewer"):
+        return False, "Cannot delete built-in roles."
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("DELETE FROM roles WHERE role_name=?", (role_name,))
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("DELETE FROM roles WHERE role_name=%s", (role_name,))
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def sync_local_to_supabase(cfg: dict) -> tuple[int, int, list]:
+    """Sync all local SQLite users and roles to Supabase. Returns (users_synced, roles_synced, errors)."""
+    errors = []
+    users_synced = 0
+    roles_synced = 0
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is None:
+        return 0, 0, ["Supabase not connected"]
+    try:
+        # Sync roles
+        local_conn = _get_sqlite_conn()
+        local_roles = local_conn.execute("SELECT role_name, pages FROM roles").fetchall()
+        with conn_sb:
+            with conn_sb.cursor() as cur:
+                for row in local_roles:
+                    try:
+                        cur.execute(
+                            "INSERT INTO roles (role_name, pages) VALUES (%s, %s) "
+                            "ON CONFLICT (role_name) DO UPDATE SET pages=EXCLUDED.pages",
+                            (row["role_name"], row["pages"])
+                        )
+                        roles_synced += 1
+                    except Exception as e:
+                        errors.append(f"Role {row['role_name']}: {e}")
+        # Sync users
+        local_users = local_conn.execute("SELECT email, full_name, role, password_hash FROM users").fetchall()
+        with conn_sb:
+            with conn_sb.cursor() as cur:
+                for row in local_users:
+                    try:
+                        cur.execute(
+                            "INSERT INTO users (email, full_name, role, password_hash) VALUES (%s, %s, %s, %s) "
+                            "ON CONFLICT (email) DO UPDATE SET full_name=EXCLUDED.full_name, role=EXCLUDED.role",
+                            (row["email"], row["full_name"], row["role"], row["password_hash"])
+                        )
+                        users_synced += 1
+                    except Exception as e:
+                        errors.append(f"User {row['email']}: {e}")
+        local_conn.close()
+        conn_sb.close()
+    except Exception as e:
+        errors.append(str(e))
+    return users_synced, roles_synced, errors
 
 
 def create_user_all_dbs(email: str, full_name: str, role: str, password: str, cfg: dict) -> tuple[bool, str]:
@@ -311,8 +468,9 @@ def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
 
 
 def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
-    """Return user dict {email, full_name, role} if credentials are valid, else None."""
+    """Return user dict {email, full_name, role, pages} if credentials valid, else None."""
     _em = email.lower().strip()
+    user = None
     # Try Supabase first
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
@@ -323,21 +481,26 @@ def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
                 row = cur.fetchone()
             conn.close()
             if row and _verify_password(row[3], password):
-                return {"email": row[0], "full_name": row[1], "role": row[2]}
+                user = {"email": row[0], "full_name": row[1], "role": row[2]}
         except Exception:
             pass
     # Fall back to SQLite
-    try:
-        conn = _get_sqlite_conn()
-        row = conn.execute(
-            "SELECT email, full_name, role, password_hash FROM users WHERE email=?", (_em,)
-        ).fetchone()
-        conn.close()
-        if row and _verify_password(row["password_hash"], password):
-            return {"email": row["email"], "full_name": row["full_name"], "role": row["role"]}
-    except Exception:
-        pass
-    return None
+    if user is None:
+        try:
+            conn = _get_sqlite_conn()
+            row = conn.execute(
+                "SELECT email, full_name, role, password_hash FROM users WHERE email=?", (_em,)
+            ).fetchone()
+            conn.close()
+            if row and _verify_password(row["password_hash"], password):
+                user = {"email": row["email"], "full_name": row["full_name"], "role": row["role"]}
+        except Exception:
+            pass
+    if user is None:
+        return None
+    # Load this role's page permissions from DB
+    user["pages"] = get_pages_for_role(user["role"], cfg)
+    return user
 
 
 def save_email_template(key: str, html: str, cfg: dict) -> bool:
@@ -488,10 +651,25 @@ CREATE TABLE IF NOT EXISTS users (
     id            BIGSERIAL      PRIMARY KEY,
     email         TEXT           NOT NULL UNIQUE,
     full_name     TEXT           NOT NULL DEFAULT '',
-    role          TEXT           NOT NULL DEFAULT 'staff',  -- admin | staff | viewer
+    role          TEXT           NOT NULL DEFAULT 'staff',
     password_hash TEXT           NOT NULL,
     created_at    TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
+
+-- ── Roles table (custom role definitions) ────────────────────────────────
+CREATE TABLE IF NOT EXISTS roles (
+    id         BIGSERIAL     PRIMARY KEY,
+    role_name  TEXT          NOT NULL UNIQUE,
+    pages      TEXT          NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- Seed default roles (safe to run multiple times)
+INSERT INTO roles (role_name, pages) VALUES
+    ('admin',  'Mass Email,Products,Inventory,Settings,API Endpoints'),
+    ('staff',  'Mass Email,Products,Inventory'),
+    ('viewer', 'Inventory')
+ON CONFLICT (role_name) DO NOTHING;
 
 -- Add your own tables below this line ──────────────────────────────────────
 """
@@ -1478,10 +1656,11 @@ with st.sidebar:
     except Exception:
         pass
 
-    # Determine which pages this user can see based on role
+    # Determine which pages this user can see based on role + DB-loaded permissions
     _cur_user  = st.session_state.get("auth_user", {}) or {}
     _cur_role  = _cur_user.get("role", "admin") if _cur_user else "admin"
-    _base_pages = list(_ROLE_PAGES.get(_cur_role, _ROLE_PAGES["admin"]))
+    # Use pages stored in auth_user at login (from roles table); fall back to static dict
+    _base_pages = list(_cur_user.get("pages") or _ROLE_PAGES.get(_cur_role, _ROLE_PAGES["admin"]))
 
     # Admins can see Get Started before secrets are saved
     if not _secrets_active and _cur_role == "admin":
@@ -1972,140 +2151,82 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
 
 if page == "Get Started":
     cfg = st.session_state.cfg
-    _gs_has_sb = _has_supabase(cfg)
-    _gs_has_img = _has_image_host(cfg)
-    _gs_has_smtp = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
+    _gs_has_sb       = _has_supabase(cfg)
+    _gs_has_img      = _has_image_host(cfg)
+    _gs_has_smtp     = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
     _gs_has_identity = bool(cfg.get("from_name") and cfg.get("subject"))
-    _gs_has_pwd = bool(cfg.get("app_login_password"))
-    _gs_has_secrets = False
+    _gs_has_secrets  = False
     try:
         _gs_has_secrets = hasattr(st, "secrets") and "merit" in st.secrets
     except Exception:
         pass
 
-    st.title("Get Started with MERIT")
-    st.caption("MERIT is a product catalog + email order system. Follow the steps below to get fully set up.")
-    
-    st.info("**Device Recommendation:** MERIT runs on **Streamlit**, which often has issues on school-issued Chromebooks. For the best experience, please use your **personal laptop** or your **school-provided VE laptop**.")
-    
-    st.warning("**IMPORTANT:** Once you complete Step 1, **DO NOT REFRESH** your browser. Refreshing early can wipe your temporary settings before they are permanently locked in. Complete all steps to ensure your keys are saved safely.")
-    
-    st.error("**VE Email Requirement:** You **MUST** use your **official VE email address** (e.g. yourcompanyname@veinternational.org) for everything — including Supabase, Gmail SMTP, and Image Hosting signups.")
+    # Step 1 = users exist locally
+    _gs_local_users = get_users_from_db(cfg)
+    _gs_has_users   = not _gs_local_users.empty
 
-    # ── Step status indicators ────────────────────────────────────────
-    _step1_ok = _gs_has_sb
-    _step2_ok = _gs_has_img
-    _step3_ok = _gs_has_smtp
-    _step4_ok = _gs_has_identity
-    _step5_ok = _gs_has_pwd
+    st.title("Get Started with MERIT")
+    st.caption("Complete the steps below in order to fully configure MERIT for your firm.")
+
+    st.info("**Device Recommendation:** MERIT runs on **Streamlit**, which often has issues on school-issued Chromebooks. For the best experience, use your **personal laptop** or your **school-provided VE laptop**.")
+    st.error("**VE Email Requirement:** Use your **official VE email address** (e.g. yourcompanyname@veinternational.org) for all account registrations — Supabase, Gmail SMTP, and Image Hosting.")
+
+    # ── Checklist ───────────────────────────────────────────────────
+    _step1_ok = _gs_has_users
+    _step2_ok = _gs_has_sb
+    _step3_ok = _gs_has_img
+    _step4_ok = _gs_has_smtp
+    _step5_ok = _gs_has_identity
     _step6_ok = _gs_has_secrets
 
     st.markdown("### Setup Checklist")
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    with col1:
-        if _step1_ok: st.success("Step 1 — Supabase")
-        else: st.error("Step 1 — Connect")
-    with col2:
-        if _step2_ok: st.success("Step 2 — Images")
-        else: st.warning("Step 2 — Add Key")
-    with col3:
-        if _step3_ok: st.success("Step 3 — Email")
-        else: st.warning("Step 3 — Configure")
-    with col4:
-        if _step4_ok: st.success("Step 4 — Sender")
-        else: st.warning("Step 4 — Identity")
-    with col5:
-        if _step5_ok: st.success("Step 5 — Password")
-        else: st.warning("Step 5 — Set Pwd")
-    with col6:
+    _cl1, _cl2, _cl3, _cl4, _cl5, _cl6 = st.columns(6)
+    with _cl1:
+        if _step1_ok: st.success("Step 1 — Users")
+        else: st.error("Step 1 — Create Users")
+    with _cl2:
+        if _step2_ok: st.success("Step 2 — Supabase")
+        else: st.warning("Step 2 — Connect DB")
+    with _cl3:
+        if _step3_ok: st.success("Step 3 — Images")
+        else: st.warning("Step 3 — Add Key")
+    with _cl4:
+        if _step4_ok: st.success("Step 4 — Email")
+        else: st.warning("Step 4 — Configure")
+    with _cl5:
+        if _step5_ok: st.success("Step 5 — Sender")
+        else: st.warning("Step 5 — Identity")
+    with _cl6:
         if _step6_ok: st.success("Step 6 — Secrets")
         else: st.warning("Step 6 — Save TOML")
 
     st.divider()
 
-    # ── Step 1: Supabase ──────────────────────────────────────────────
-    with st.expander("Step 1 — Connect Supabase (REQUIRED)", expanded=not _step1_ok):
+    # ── STEP 1: Users & Custom Roles ─────────────────────────────────
+    with st.expander("Step 1 — Create Users & Roles (Do This First)", expanded=not _step1_ok):
         st.markdown("""
-Supabase is **required** for MERIT to work properly. It stores your products and inventory in the cloud
-so your data survives app reboots.
+Create at least one **Admin** user so your firm members can sign in with their own email and password.
+Users are stored locally on this device first — they get synced to Supabase automatically when you complete Step 2.
 
-**IMPORTANT:** When signing up, you **MUST** use your **official VE email address**.
-
-#### 1. Sign up for Supabase
-Go to [supabase.com](https://supabase.com) and click **Sign Up**. Use your VE email (e.g. yourcompanyname@veinternational.org).
-
----
-
-#### 2. Create a new project
-
-Once logged in, click the green **New Project** button. Fill in the form **exactly** like this:
-
-| Field | What to enter |
-|---|---|
-| **Organization** | Your VE email address (already pre-selected) |
-| **Project name** | Your **VEI firm name** (e.g. `BluePeak Ventures`) |
-| **Database password** | Make up your own password — **do NOT use "Generate"**. Write it down. |
-| **Region** | Pick the region **closest to where you are** |
-
-Click **Create new project** and wait about 60 seconds while it provisions.
-
----
-
-#### 3. Get your connection string
-
-Once the project is ready:
-
-1. Click the green **Connect** button at the **top right** of your project dashboard.
-2. A dialog opens — find where it says **Direct connection string** and make sure you are on that tab.
-3. Once in that tab, scroll down to **Connection method** and ensure **Session pooler** is selected.
-4. Scroll down and copy your **Connection string**. It looks like:
-   `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres`
-
----
-
-#### 4. Connect MERIT to Supabase
-
-Go to **Settings → Database Connections** (use the left sidebar) and paste your URL and password. Click **Test Connection**, then click **Setup Tables**.
-
----
-
-#### 5. Get your Anon Key (for API Endpoints)
-
-Your **anon key** lets your storefront website safely read products from Supabase without exposing your database password.
-
-1. In your Supabase project, click the **gear icon (⚙)** in the left sidebar → **Project Settings**.
-2. Click **API** in the left menu.
-3. Under **Legacy API keys**, find the **anon / public** key (it starts with `eyJ…`) and copy it.
-4. Paste it into **Settings → Supabase Anon Key** in MERIT.
-
-This key is safe to put in public website code as long as Row Level Security (RLS) is enabled (the Setup Tables button does this automatically).
+**Roles** control which pages each person can see. The three built-in roles cover most firms.
+You can also create custom roles below with exactly the page permissions you want.
         """)
 
-    # ── Step 1b: User Accounts ────────────────────────────────────────
-    with st.expander("Step 1b — Create User Accounts", expanded=_step1_ok):
-        st.markdown("""
-User accounts let your firm members sign in with their own **email and password**.
-Each user has a **role** that controls which pages they can access:
+        _gs_roles_df = get_roles_from_db(cfg)
+        _gs_role_options = list(_gs_roles_df["role_name"].values) if not _gs_roles_df.empty else ["admin", "staff", "viewer"]
 
-| Role | Access |
-|---|---|
-| **Admin** | All pages (Email, Products, Inventory, Settings, API Endpoints) |
-| **Staff** | Mass Email, Products, Inventory |
-| **Viewer** | Inventory only |
-
-Create at least one **Admin** account for yourself before completing setup.
-
-> Users are stored in your Supabase `users` table and are available even after app reboots.
-        """)
-
-        st.subheader("Create a New User")
+        # ── Create User form ──────────────────────────────────────
+        st.subheader("Add a User")
         _gs_u_c1, _gs_u_c2 = st.columns(2)
         with _gs_u_c1:
             _gs_u_name  = st.text_input("Full Name", placeholder="Jane Smith", key="gs_u_name")
             _gs_u_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="gs_u_email")
         with _gs_u_c2:
-            _gs_u_role  = st.selectbox("Role", ["admin", "staff", "viewer"],
-                                       format_func=lambda r: _ROLE_LABELS.get(r, r), key="gs_u_role")
+            _gs_u_role  = st.selectbox(
+                "Role", _gs_role_options,
+                format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                key="gs_u_role"
+            )
             _gs_u_pass  = st.text_input("Password", type="password", key="gs_u_pass")
             _gs_u_pass2 = st.text_input("Confirm Password", type="password", key="gs_u_pass2")
 
@@ -2126,118 +2247,174 @@ Create at least one **Admin** account for yourself before completing setup.
                     st.success(f"User **{_gs_u_name.strip()}** created with role **{_gs_u_role}**.")
                     st.rerun()
                 else:
-                    st.error(f"Failed to create user: {_gs_msg}")
+                    st.error(f"Failed: {_gs_msg}")
 
-        # ── Show existing users ───────────────────────────────────────
-        _gs_users = get_users_from_db(cfg)
-        if not _gs_users.empty:
+        # ── Existing users list ───────────────────────────────────
+        if not _gs_local_users.empty:
             st.divider()
             st.subheader("Current Users")
-            for _, _gu in _gs_users.iterrows():
+            for _, _gu in _gs_local_users.iterrows():
                 _gu_c1, _gu_c2, _gu_c3, _gu_c4 = st.columns([3, 2, 2, 1])
                 _gu_c1.markdown(f"**{_gu.get('full_name', '')}**  \n{_gu.get('email', '')}")
                 _gu_c2.caption(f"Role: **{_gu.get('role', '')}**")
-                _gu_c3.caption(f"Created: {str(_gu.get('created_at', ''))[:10]}")
+                _pages_preview = ", ".join(get_pages_for_role(str(_gu.get("role", "")), cfg))
+                _gu_c3.caption(_pages_preview)
                 with _gu_c4:
                     if st.button("Remove", key=f"gs_del_{_gu.get('email', '')}", type="secondary"):
                         _del_ok, _del_msg = delete_user_all_dbs(str(_gu.get("email", "")), cfg)
                         if _del_ok:
-                            st.toast(f"User removed.", icon=None)
+                            st.toast("User removed.", icon=None)
                             st.rerun()
                         else:
                             st.error(f"Failed: {_del_msg}")
         else:
-            st.info("No users created yet. Create at least one Admin user above.")
+            st.info("No users yet. Create at least one Admin user above.")
 
-    # ── Step 2: Image Hosting ─────────────────────────────────────────
-    with st.expander("Step 2 — Set Up Image Hosting", expanded=not _step2_ok and _step1_ok):
+        # ── Custom Roles ──────────────────────────────────────────
+        st.divider()
+        st.subheader("Custom Roles")
+        st.caption("Create roles with exactly the page permissions your firm needs. Built-in roles (admin, staff, viewer) cannot be deleted.")
+
+        with st.container(border=True):
+            _gs_new_role_name = st.text_input("New Role Name", placeholder="e.g. finance", key="gs_new_role_name",
+                                               help="Lowercase, no spaces. e.g. 'finance' or 'ceo'")
+            st.caption("Select which pages this role can access:")
+            _gs_page_cols = st.columns(len(_ALL_PAGES))
+            _gs_checked_pages = []
+            for _gpi, _gpname in enumerate(_ALL_PAGES):
+                with _gs_page_cols[_gpi]:
+                    if st.checkbox(_gpname, key=f"gs_pg_{_gpi}", value=True):
+                        _gs_checked_pages.append(_gpname)
+            if st.button("Create Role", key="btn_gs_create_role", type="primary"):
+                _rn = _gs_new_role_name.strip().lower().replace(" ", "_")
+                if not _rn:
+                    st.error("Role name is required.")
+                elif not _gs_checked_pages:
+                    st.error("Select at least one page.")
+                else:
+                    _rok, _rmsg = create_role_all_dbs(_rn, _gs_checked_pages, cfg)
+                    if _rok:
+                        st.success(f"Role **{_rn}** created.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {_rmsg}")
+
+        # Show all roles
+        if not _gs_roles_df.empty:
+            st.subheader("All Roles")
+            for _, _rrow in _gs_roles_df.iterrows():
+                _rr1, _rr2, _rr3 = st.columns([2, 5, 1])
+                _rr1.markdown(f"**{_rrow.get('role_name', '')}**")
+                _rr2.caption(str(_rrow.get("pages", "")))
+                with _rr3:
+                    _is_builtin = _rrow.get("role_name", "") in ("admin", "staff", "viewer")
+                    if not _is_builtin:
+                        if st.button("Del", key=f"gs_del_role_{_rrow.get('role_name', '')}", type="secondary"):
+                            _drok, _drmsg = delete_role_all_dbs(str(_rrow.get("role_name", "")), cfg)
+                            if _drok:
+                                st.toast("Role deleted.", icon=None)
+                                st.rerun()
+                    else:
+                        st.caption("built-in")
+
+    # ── STEP 2: Supabase ──────────────────────────────────────────────
+    with st.expander("Step 2 — Connect Supabase & Setup Tables", expanded=not _step2_ok and _step1_ok):
         st.markdown("""
-Product images need to be hosted online. MERIT supports two **free** services — pick one:
+Supabase is the cloud database that stores your products, inventory, users, and roles so everything
+persists even when the app restarts.
 
-**Note:** Use your **official VE email** when signing up.
+**IMPORTANT:** Use your **official VE email address** when signing up.
 
-#### Option A ── Freeimage.host (recommended)
+#### 1. Sign up at Supabase
+Go to [supabase.com](https://supabase.com) → **Sign Up** with your VE email.
+
+#### 2. Create a new project
+
+| Field | What to enter |
+|---|---|
+| **Organization** | Your VE email (pre-selected) |
+| **Project name** | Your VEI firm name (e.g. `BluePeak Ventures`) |
+| **Database password** | Create your own — **do NOT use Generate**. Write it down. |
+| **Region** | Closest region to your location |
+
+Click **Create new project** and wait about 60 seconds.
+
+#### 3. Get your connection string
+
+1. Click the green **Connect** button at the top right.
+2. Select the **Session Pooler** tab.
+3. Copy the connection string — it looks like:
+   `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres`
+4. Go to **Settings → Database** and paste your connection string and password.
+5. Click **Setup Tables** — this creates all MERIT tables AND syncs your users and roles from Step 1.
+
+#### 4. Get your Anon Key (for API Endpoints)
+
+1. Supabase Dashboard → gear icon (⚙) → **Project Settings** → **API**.
+2. Under **Legacy API keys** → copy the **anon / public** key (starts with `eyJ…`).
+3. Paste it into **Settings → Supabase Anon Key**.
+        """)
+
+    # ── STEP 3: Image Hosting ─────────────────────────────────────────
+    with st.expander("Step 3 — Set Up Image Hosting", expanded=not _step3_ok and _step2_ok):
+        st.markdown("""
+Product images must be hosted online. Pick one free service:
+
+**Use your official VE email when signing up.**
+
+#### Option A — Freeimage.host (recommended)
 1. Go to [freeimage.host](https://freeimage.host) and sign in.
-2. Click the **top-left menu** (three lines) → select **API**.
-3. Copy your **API key** from the API page.
-4. In MERIT → **Settings → Image Hosting**, paste the key.
+2. Click the top-left menu → **API** → copy your API key.
+3. Paste it into **Settings → Image Hosting**.
 
 #### Option B — Imghippo
-1. Go to [imghippo.com](https://imghippo.com) → sign up for a free account.
-2. Go to your API keys page: [imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys).
-3. Copy the generated **API Version 1** key and paste it into **Settings → Image Hosting**.
+1. Go to [imghippo.com](https://imghippo.com) → create a free account.
+2. Go to Settings → API Keys → copy the API Version 1 key.
+3. Paste it into **Settings → Image Hosting**.
         """)
 
-    # ── Step 3: Email ────────────────────────────────────────────────
-    with st.expander("Step 3 — Configure Gmail SMTP", expanded=not _step3_ok and _step2_ok):
+    # ── STEP 4: Gmail SMTP ───────────────────────────────────────────
+    with st.expander("Step 4 — Configure Gmail SMTP", expanded=not _step4_ok and _step3_ok):
         st.markdown("""
-MERIT sends order emails via your **official VE Gmail account**. 
+MERIT sends order emails via your official VE Gmail account.
 
-#### How to set up:
-1. Go to [myaccount.google.com](https://myaccount.google.com) and sign in with your **VE email** (e.g. yourcompanyname@veinternational.org).
-2. Click **Security** and ensure **2-Step Verification** is **On**.
-3. Search for **App passwords** at the top of the page.
-4. Create a new app password named `MERIT Email`.
-5. Copy the **16-character password** Google shows you.
-6. In MERIT → **Settings → Email**, paste your VE Gmail address and the App Password.
+1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security** → enable **2-Step Verification**.
+2. Search for **App passwords** → create one named `MERIT Email`.
+3. Copy the 16-character password Google shows you.
+4. In **Settings → Email**, paste your VE Gmail address and the App Password.
         """)
 
-    # ── Step 4: Sender Identity ───────────────────────────────────────
-    with st.expander("Step 4 — Set Sender Identity", expanded=not _step4_ok and _step3_ok):
+    # ── STEP 5: Sender Identity ──────────────────────────────────────
+    with st.expander("Step 5 — Set Sender Identity", expanded=not _step5_ok and _step4_ok):
         st.markdown("""
-Sender Identity controls **who the email appears to come from**.
+Controls who the email appears to come from.
 
-#### How to set up:
-1. In MERIT → **Settings → Email**, scroll to **Sender Identity**:
+1. In **Settings → Email**, fill in **Sender Identity**:
    - **From Name**: Your VEI firm name (e.g. `Acme VEI`).
-   - **Default Subject Line**: `Your order from {from_name}`.
+   - **Default Subject Line**: e.g. `Your order from Acme VEI`.
         """)
 
-    # ── Step 5: App Login Password ────────────────────────────────────
-    with st.expander("Step 5 — Set App Login Password", expanded=not _step5_ok and _step4_ok):
+    # ── STEP 6: Secrets TOML ─────────────────────────────────────────
+    with st.expander("Step 6 — Save Secrets TOML (Final Step)", expanded=not _step6_ok and _step5_ok):
         st.markdown("""
-### **Step 5: Protect your App**
-Set a password to prevent unauthorized users from accessing your MERIT dashboard.
+Streamlit Cloud forgets everything on reboot. Saving a **Secrets TOML** makes all your credentials permanent.
 
-#### How to set up:
-1. In MERIT → **Settings**, scroll to **Step 5 — App Login Password**.
-2. Type in a secure password.
-3. This password will be required every time you open the app (after you complete Step 6).
-        """)
-
-    # ── Step 6: Streamlit Secrets ────────────────────────────────────
-    with st.expander("Step 6 — Save Secrets TOML (The Final Step: Permanently Save Settings)", expanded=not _step6_ok and _step5_ok):
-        st.markdown("""
-### **Step 6: Lock in your Settings**
-
-#### **What is TOML?**
-TOML is a simple configuration format. Think of it like a **"Save File"** for your app.
-
-#### **Why do I need this?**
-Streamlit Cloud "forgets" everything when it reboots. By saving your credentials as **Secrets**, you're making sure MERIT remembers your database, email, and hosting keys forever.
-
-#### **How to Save your Secrets:**
-1.  **Go to Settings → Step 6: Secrets TOML** (at the very bottom).
-2.  **Copy the code block** you find there.
-3.  Click **Manage app** (bottom-right) → **⋮ (three dots)** → **Settings** → **Secrets**.
-4.  **Paste your code** into the text box and click **Save**.
-5.  The app will reboot, and you're done! Your settings are now permanent.
-
-Once saved, the setup checklist above turns green and **Get Started disappears from the sidebar**.
+1. Go to **Settings → Secrets TOML** and copy the generated code block.
+2. Click **Manage app** (bottom-right) → **⋮** → **Settings** → **Secrets**.
+3. Paste the code and click **Save**.
+4. The app reboots and **Get Started disappears from the sidebar** — setup is complete.
         """)
 
     st.divider()
-
-    # ── Quick reference ───────────────────────────────────────────────
     st.subheader("What each page does")
     st.markdown("""
 | Page | What it does |
 |---|---|
-| **Email Sender** | Upload a CSV of orders, match them to products, send bulk emails |
-| **Products** | Add, edit, and delete products (syncs to Supabase automatically) |
-| **Inventory** | View live stock levels, adjust stock manually |
-| **Settings** | Configure email, Supabase, image hosting, and get your secrets TOML |
-| **API Endpoints** | REST API docs + ready-to-paste code for your website (Bolt, Lovable, etc.) |
+| **Mass Email** | Upload CSV orders, send bulk emails, manage templates and campaigns |
+| **Products** | Add, edit, and delete products with images and descriptions |
+| **Inventory** | Overview, Financials, Adjust Stock, Original Stock |
+| **Settings** | All credentials — database, email, image hosting, user management |
+| **API Endpoints** | Pre-built code to connect your website to the live product database |
     """)
 
 # ═════════════════════════════════════════════
@@ -3458,6 +3635,13 @@ elif page == "Settings":
                         "Tables created successfully. You can now use the API Endpoints page. "
                         "Go back to **Get Started** and finish the remaining steps."
                     )
+                    # Sync any users and roles created locally (Step 1) into Supabase
+                    with st.spinner("Syncing users and roles to Supabase..."):
+                        _u_cnt, _r_cnt, _sync_errs = sync_local_to_supabase(cfg)
+                    if _sync_errs:
+                        st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
+                    elif _u_cnt or _r_cnt:
+                        st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) from local storage to Supabase.")
                 else:
                     st.warning(f"{_ok} OK, {len(_fail)} failed:")
                     for _f in _fail:
@@ -3652,63 +3836,113 @@ elif page == "Settings":
     # ── User Management ──────────────────────────────────────────────
     st.divider()
     st.subheader("User Management")
-    st.caption("Add and remove users who can sign in to MERIT. Requires Supabase to be connected.")
+    st.caption("Add and remove users who can sign in to MERIT.")
 
-    if not _has_supabase(cfg):
-        st.warning("Connect Supabase (Step 1) to enable user management.")
-    else:
-        _um_users = get_users_from_db(cfg)
+    _um_users = get_users_from_db(cfg)
+    _um_roles_df = get_roles_from_db(cfg)
+    _um_role_names = list(_um_roles_df["role_name"].values) if not _um_roles_df.empty else ["admin", "staff", "viewer"]
 
-        # ── Add new user ──────────────────────────────────────────────
-        with st.expander("Add New User", expanded=_um_users.empty):
-            _um_c1, _um_c2 = st.columns(2)
-            with _um_c1:
-                _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
-                _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
-            with _um_c2:
-                _um_role  = st.selectbox("Role", ["admin", "staff", "viewer"],
-                                         format_func=lambda r: _ROLE_LABELS.get(r, r), key="um_role")
-                _um_pass  = st.text_input("Password", type="password", key="um_pass")
-                _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
-            if st.button("Create User", type="primary", key="btn_um_create"):
-                if not _um_name.strip():
-                    st.error("Full name is required.")
-                elif not _um_email.strip() or "@" not in _um_email:
-                    st.error("A valid email is required.")
-                elif len(_um_pass) < 6:
-                    st.error("Password must be at least 6 characters.")
-                elif _um_pass != _um_pass2:
-                    st.error("Passwords do not match.")
+    # ── Add new user ──────────────────────────────────────────────
+    with st.expander("Add New User", expanded=_um_users.empty):
+        _um_c1, _um_c2 = st.columns(2)
+        with _um_c1:
+            _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
+            _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
+        with _um_c2:
+            _um_role  = st.selectbox(
+                "Role", _um_role_names,
+                format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                key="um_role"
+            )
+            _um_pass  = st.text_input("Password", type="password", key="um_pass")
+            _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
+        if st.button("Create User", type="primary", key="btn_um_create"):
+            if not _um_name.strip():
+                st.error("Full name is required.")
+            elif not _um_email.strip() or "@" not in _um_email:
+                st.error("A valid email is required.")
+            elif len(_um_pass) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif _um_pass != _um_pass2:
+                st.error("Passwords do not match.")
+            else:
+                _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
+                if _um_ok:
+                    st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                    st.rerun()
                 else:
-                    _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
-                    if _um_ok:
-                        st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                    st.error(f"Failed: {_um_msg}")
+
+    # ── Existing users ────────────────────────────────────────────
+    _cur_user_set = st.session_state.get("auth_user", {}) or {}
+    if not _um_users.empty:
+        st.subheader("Current Users")
+        for _, _ur in _um_users.iterrows():
+            _ur_role_val = str(_ur.get("role", "viewer"))
+            _ur_pages = get_pages_for_role(_ur_role_val, cfg)
+            _ur_c1, _ur_c2, _ur_c3, _ur_c4 = st.columns([3, 2, 3, 1])
+            _ur_c1.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur.get('email', '')}")
+            _ur_c2.caption(f"Role: **{_ur_role_val.capitalize()}**")
+            _ur_c3.caption(f"Access: {', '.join(_ur_pages) if _ur_pages else 'None'}")
+            with _ur_c4:
+                _ur_email_val = str(_ur.get("email", ""))
+                _protected = (_cur_user_set.get("email", "").lower() == _ur_email_val.lower())
+                if st.button("Remove", key=f"um_del_{_ur_email_val}", disabled=_protected,
+                             help="Cannot remove your own account" if _protected else None):
+                    _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
+                    if _del_ok:
+                        st.toast("User removed.", icon=None)
                         st.rerun()
                     else:
-                        st.error(f"Failed: {_um_msg}")
+                        st.error(f"Failed: {_del_msg}")
+    else:
+        st.info("No users yet. Use the form above to create your first user.")
 
-        # ── Existing users ────────────────────────────────────────────
-        _cur_user_set = st.session_state.get("auth_user", {}) or {}
-        if not _um_users.empty:
-            st.subheader("Current Users")
-            for _, _ur in _um_users.iterrows():
-                _ur_c1, _ur_c2, _ur_c3, _ur_c4 = st.columns([3, 2, 2, 1])
-                _ur_c1.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur.get('email', '')}")
-                _ur_c2.caption(f"Role: **{_ur.get('role', '').capitalize()}**")
-                _ur_c3.caption(f"Access: {', '.join(_ROLE_PAGES.get(_ur.get('role', 'viewer'), []))}")
-                with _ur_c4:
-                    _ur_email_val = str(_ur.get("email", ""))
-                    _protected = (_cur_user_set.get("email", "").lower() == _ur_email_val.lower())
-                    if st.button("Remove", key=f"um_del_{_ur_email_val}", disabled=_protected,
-                                 help="Cannot remove your own account" if _protected else None):
-                        _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
-                        if _del_ok:
-                            st.toast("User removed.", icon=None)
+    # ── Role Management ───────────────────────────────────────────
+    st.divider()
+    st.subheader("Role Management")
+    st.caption("Create custom roles with specific page access. Built-in roles (admin, staff, viewer) cannot be deleted.")
+
+    with st.expander("Create Custom Role", expanded=False):
+        _rm_name = st.text_input("Role Name", placeholder="e.g. manager", key="rm_role_name")
+        st.write("Pages this role can access:")
+        _rm_page_cols = st.columns(len(_ALL_PAGES))
+        _rm_checked = []
+        for _rp_i, _rp_name in enumerate(_ALL_PAGES):
+            with _rm_page_cols[_rp_i]:
+                if st.checkbox(_rp_name, key=f"rm_page_{_rp_i}"):
+                    _rm_checked.append(_rp_name)
+        if st.button("Create Role", type="primary", key="btn_rm_create"):
+            if not _rm_name.strip():
+                st.error("Role name is required.")
+            elif not _rm_checked:
+                st.error("Select at least one page.")
+            else:
+                _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
+                if _rm_ok:
+                    st.success(f"Role **{_rm_name.strip()}** saved with access to: {', '.join(_rm_checked)}")
+                    st.rerun()
+                else:
+                    st.error(f"Failed: {_rm_msg}")
+
+    if not _um_roles_df.empty:
+        st.write("**All Roles**")
+        _builtin = {"admin", "staff", "viewer"}
+        for _, _rr in _um_roles_df.iterrows():
+            _rr_name = str(_rr.get("role_name", ""))
+            _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
+            _rr_c1, _rr_c2, _rr_c3 = st.columns([2, 4, 1])
+            _rr_c1.markdown(f"**{_rr_name.capitalize()}**" + (" *(built-in)*" if _rr_name in _builtin else ""))
+            _rr_c2.caption(", ".join(_rr_pages) if _rr_pages else "No pages")
+            with _rr_c3:
+                if _rr_name not in _builtin:
+                    if st.button("Delete", key=f"rm_del_{_rr_name}"):
+                        _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
+                        if _rrd_ok:
+                            st.toast(f"Role '{_rr_name}' deleted.", icon=None)
                             st.rerun()
                         else:
-                            st.error(f"Failed: {_del_msg}")
-        else:
-            st.info("No users yet. Use the form above to create your first user.")
+                            st.error(f"Failed: {_rrd_msg}")
 
     # ── Step 6: Secrets TOML ─────────────────────────────────────────
     st.divider()
