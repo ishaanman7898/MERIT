@@ -2221,8 +2221,8 @@ elif page == "Inventory":
     st.title("Inventory")
     st.caption("Manage stock overview, adjustments, and outbound logs in one place.")
 
-    tab_overview, tab_adjust, tab_original, tab_outbound = st.tabs(
-        ["Overview", "Adjust Stock", "Original Stock", "Outbound Information"]
+    tab_overview, tab_adjust, tab_original, tab_outbound, tab_inv_docs = st.tabs(
+        ["Overview", "Adjust Stock", "Original Stock", "Outbound Information", "Documentation"]
     )
 
     # Load shared data
@@ -2365,6 +2365,13 @@ elif page == "Inventory":
                 "The `Adjust Stock` tab automatically increases this number when you ADD stock. "
                 "You can manually correct these values here if needed."
             )
+
+            st.warning(
+                "**Wholesale Marketplace Reminder:** When you purchase inventory via the VEI "
+                "Wholesale Marketplace, you **must** add those quantities here in the Original Stock tab "
+                "(or use the Adjust Stock tab with a positive amount, which will update both). "
+                "This ensures your lifetime totals stay accurate for accounting and reporting."
+            )
             
             for _, _pr in inv_df.iterrows():
                 _osku   = str(_pr.get("sku", ""))
@@ -2447,6 +2454,192 @@ elif page == "Inventory":
                 _clear_data_caches()
                 st.rerun()
 
+    # ── DOCUMENTATION ────────────────────────────
+    with tab_inv_docs:
+        st.subheader("Inventory System Documentation")
+        st.markdown("""
+### How Inventory Works in MERIT
+
+MERIT's inventory system tracks two separate metrics for each product:
+
+---
+
+#### 1. Stock Left (Current Available Stock)
+- **What it is:** The number of units currently available for sale
+- **Where to manage:** **Adjust Stock** tab
+- **How it changes:**
+  - **Automatically decreased** when you send order confirmation emails (1 unit deducted per product per order)
+  - **Manually adjusted** via the Adjust Stock tab using the ± field
+  - Positive values add stock, negative values remove stock
+
+#### 2. Original Stock (Lifetime Total Purchased)
+- **What it is:** The cumulative total of all inventory you've ever acquired
+- **Where to manage:** **Original Stock** tab
+- **How it changes:**
+  - **Automatically increased** when you ADD stock via the Adjust Stock tab (positive adjustments)
+  - **Manually overridden** in the Original Stock tab by typing a new total and clicking Set
+  - **Not decreased** when you sell items — it's a running total of all purchases
+
+---
+
+#### Status Labels
+| Status | Condition |
+|---|---|
+| **In stock** | More than 10 units available |
+| **Low stock** | 1–10 units available |
+| **Out of stock** | 0 units available |
+| **Backordered** | Negative stock (more sold than available) |
+
+---
+
+#### Stock Flow Example
+
+1. You buy 50 T-Shirts from the Wholesale Marketplace
+2. Go to **Original Stock** tab → set the total to 50 (or use **Adjust Stock** → +50)
+3. Both `stock_left` and `original_stock` are now 50
+4. You send 10 order confirmation emails that include T-Shirts
+5. `stock_left` drops to 40, but `original_stock` stays at 50
+6. You buy 20 more T-Shirts → Adjust Stock +20
+7. `stock_left` = 60, `original_stock` = 70
+
+---
+
+#### Important: Wholesale Marketplace Purchases
+
+> **When you buy inventory through the VEI Wholesale Marketplace, you MUST add those quantities to MERIT manually.**
+>
+> MERIT does not connect to the Wholesale Marketplace automatically. After each wholesale purchase:
+> 1. Go to **Adjust Stock** tab and add the quantity purchased (this updates both stock and original stock)
+> 2. OR go to **Original Stock** tab and update the lifetime total directly
+
+---
+
+#### Data Storage
+
+- **SQLite (Local):** Always used as the primary local database. Data persists as long as the app container is running.
+- **Supabase (Cloud):** If configured, all stock changes are synced to your Supabase project in real-time. This is the recommended setup for persistence across deployments.
+- Both databases are updated simultaneously when you make changes.
+
+---
+
+#### Outbound Information
+
+The **Outbound Information** tab shows a log of every order confirmation email sent, including:
+- Recipient name and email
+- Order number and products list
+- Subtotal, tax, shipping, and total cost
+- Timestamp of when the email was sent
+
+This data is stored in both SQLite and Supabase (if configured) and is useful for accounting and order tracking.
+        """)
+
+# ═════════════════════════════════════════════
+# FINANCIALS PAGE
+# ═════════════════════════════════════════════
+
+elif page == "Financials":
+    cfg = st.session_state.cfg
+    st.title("Financials")
+    st.caption("Revenue overview and financial reporting for the finance team.")
+
+    # Load outbound logs for revenue data
+    _fin_logs = load_outbound_logs(cfg)
+
+    if _fin_logs.empty:
+        st.info("No financial data yet. Revenue is tracked automatically when you send order confirmation emails from the **Mass Email** page.")
+    else:
+        # Parse timestamps and totals
+        _fin_df = _fin_logs.copy()
+
+        # Determine the timestamp column name
+        _ts_col = "timestamp" if "timestamp" in _fin_df.columns else "created_at" if "created_at" in _fin_df.columns else None
+        _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
+
+        if _ts_col and _cost_col:
+            _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
+            _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
+            _fin_df = _fin_df.dropna(subset=["_date"])
+
+            if _fin_df.empty:
+                st.warning("Could not parse dates from outbound logs.")
+            else:
+                # ── Key Metrics ─────────────────────────────
+                _total_revenue = _fin_df["_cost"].sum()
+                _total_orders  = len(_fin_df)
+                _avg_order     = _total_revenue / _total_orders if _total_orders else 0
+                _fin_df["_month"] = _fin_df["_date"].dt.to_period("M")
+                _months_active = _fin_df["_month"].nunique()
+
+                _fin_m1, _fin_m2, _fin_m3, _fin_m4 = st.columns(4)
+                _fin_m1.metric("Total Revenue", f"${_total_revenue:,.2f}")
+                _fin_m2.metric("Total Orders", f"{_total_orders:,}")
+                _fin_m3.metric("Avg. Order Value", f"${_avg_order:,.2f}")
+                _fin_m4.metric("Active Months", _months_active)
+
+                st.divider()
+
+                # ── Monthly Revenue Chart ──────────────────
+                st.subheader("Monthly Revenue")
+                _monthly = (
+                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"]
+                    .sum()
+                    .reset_index()
+                )
+                _monthly.columns = ["Month", "Revenue"]
+                _monthly["Month"] = _monthly["Month"].astype(str)
+                _monthly = _monthly.set_index("Month")
+                st.bar_chart(_monthly["Revenue"], color="#16a34a")
+
+                st.divider()
+
+                # ── Revenue Breakdown Table ─────────────────
+                st.subheader("Revenue by Month")
+                _monthly_table = (
+                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))
+                    .agg(
+                        Orders=("_cost", "count"),
+                        Revenue=("_cost", "sum"),
+                        Avg_Order=("_cost", "mean"),
+                    )
+                    .reset_index()
+                )
+                _monthly_table.columns = ["Month", "Orders", "Revenue ($)", "Avg Order ($)"]
+                _monthly_table["Month"] = _monthly_table["Month"].astype(str)
+                _monthly_table["Revenue ($)"] = _monthly_table["Revenue ($)"].round(2)
+                _monthly_table["Avg Order ($)"] = _monthly_table["Avg Order ($)"].round(2)
+                _monthly_table = _monthly_table.sort_values("Month", ascending=False)
+
+                st.dataframe(
+                    _monthly_table,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Revenue ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Avg Order ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    }
+                )
+
+                st.divider()
+
+                # ── Subtotal / Tax / Shipping Breakdown ─────
+                _has_sub = "subtotal" in _fin_df.columns
+                _has_tax = "tax" in _fin_df.columns
+                _has_ship = "shipping" in _fin_df.columns
+
+                if _has_sub or _has_tax or _has_ship:
+                    st.subheader("Cost Breakdown")
+                    _brk_c1, _brk_c2, _brk_c3 = st.columns(3)
+                    if _has_sub:
+                        _sub_total = pd.to_numeric(_fin_df["subtotal"], errors="coerce").fillna(0).sum()
+                        _brk_c1.metric("Total Subtotal", f"${_sub_total:,.2f}")
+                    if _has_tax:
+                        _tax_total = pd.to_numeric(_fin_df["tax"], errors="coerce").fillna(0).sum()
+                        _brk_c2.metric("Total Tax Collected", f"${_tax_total:,.2f}")
+                    if _has_ship:
+                        _ship_total = pd.to_numeric(_fin_df["shipping"], errors="coerce").fillna(0).sum()
+                        _brk_c3.metric("Total Shipping", f"${_ship_total:,.2f}")
+        else:
+            st.warning("Could not find revenue data columns in outbound logs.")
 
 # ═════════════════════════════════════════════
 # SETTINGS PAGE
@@ -3430,31 +3623,31 @@ Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
 
         with _ex_js:
             st.markdown("Works in any plain HTML/JS project or Bolt.new:")
-            st.code(f"""\
+            st.code("""\
 // Step 1 — install:  npm install @supabase/supabase-js
-import {{ createClient }} from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
-  '{_sb_url_ph}',
+  '__SUPABASE_URL__',
   'YOUR_SUPABASE_ANON_KEY'
 )
 
 // Fetch all in-stock products
-async function getProducts() {{{
-  const {{ data, error }} = await supabase
+async function getProducts() {
+  const { data, error } = await supabase
     .from('inventory')
     .select('*')
     .gt('stock_left', 0)       // only show products that have stock
-    .order('item_name', {{ ascending: true }})
+    .order('item_name', { ascending: true })
 
   if (error) throw error
   return data  // each item has: sku, item_name, price, image_url, stock_left, category
-}}}
-""", language="javascript")
+}
+""".replace("__SUPABASE_URL__", _sb_url_ph), language="javascript")
 
         with _ex_ts:
             st.markdown("For Next.js or any TypeScript project:")
-            st.code(f"""\
+            st.code("""\
 // lib/supabase.ts
 import { createClient } from '@supabase/supabase-js'
 export const supabase = createClient(
@@ -3465,16 +3658,16 @@ export const supabase = createClient(
 
         with _ex_react:
             st.markdown("A React hook that auto-refreshes when MERIT updates a product:")
-            st.code(f"""\
+            st.code("""\
 // hooks/useProducts.ts
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
-export function useProducts(category?: string) {{
+export function useProducts(category?: string) {
   const [products, setProducts] = useState([])
   const [loading, setLoading]   = useState(true)
 
-  async function fetchProducts() {{
+  async function fetchProducts() {
     let q = supabase
       .from('inventory')
       .select('*')
@@ -3483,27 +3676,27 @@ export function useProducts(category?: string) {{
 
     if (category) q = q.eq('category', category)
 
-    const {{ data }} = await q
+    const { data } = await q
     setProducts(data ?? [])
     setLoading(false)
   }
 
-  useEffect(() => {{
+  useEffect(() => {
     fetchProducts()
 
     // Subscribe so the page updates automatically when you change products in MERIT
     const channel = supabase
       .channel('merit-live')
-      .on('postgres_changes', {{ event: '*', schema: 'public', table: 'inventory' }},
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory' },
         () => fetchProducts()
       )
       .subscribe()
 
-    return () => {{ supabase.removeChannel(channel) }}
+    return () => { supabase.removeChannel(channel) }
   }, [category])
 
-  return {{ products, loading }}
-}}
+  return { products, loading }
+}
 """, language="typescript")
 
         with _ex_rt:
@@ -3512,23 +3705,23 @@ export function useProducts(category?: string) {{
                 "first enable Replication in Supabase Dashboard → Database → Replication → toggle `inventory` ON, "
                 "then use this code:"
             )
-            st.code(f"""\
+            st.code("""\
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient('{_sb_url_ph}', 'YOUR_SUPABASE_ANON_KEY')
+const supabase = createClient('__SUPABASE_URL__', 'YOUR_SUPABASE_ANON_KEY')
 
 // This runs every time MERIT adds, edits, or deletes a product
 supabase
   .channel('merit-sync')
   .on('postgres_changes',
-    {{ event: '*', schema: 'public', table: 'inventory' }},
-    (payload) => {{
+    { event: '*', schema: 'public', table: 'inventory' },
+    (payload) => {
       console.log('MERIT changed a product:', payload.eventType)
       loadProducts()  // call your own function to re-fetch and re-render
-    }}
+    }
   )
   .subscribe()
-""", language="javascript")
+""".replace("__SUPABASE_URL__", _sb_url_ph), language="javascript")
 
     # ── Schema & Security SQL ─────────────────────────────────────────
     with _tab_schema:
@@ -3643,13 +3836,13 @@ elif page == "Mass Email":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_order, tab_excel, tab_template, tab_campaign = st.tabs(
-        ["Mass Email", "Excel Import", "Order Template", "Email Campaigns"]
+    tab_order, tab_template, tab_campaign = st.tabs(
+        ["Order Entry", "Order Template", "Email Campaigns"]
     )
 
-    # ─ Single / Bulk Order Entry ──────────────────
+    # ─ Order Entry (Single / Bulk / Excel) ──────────────────
     with tab_order:
-        _mode = st.radio("Entry Method", ["Single Order", "Bulk Table"], horizontal=True, label_visibility="collapsed")
+        _mode = st.radio("Entry Method", ["Single Order", "Bulk Table", "Excel Import"], horizontal=True, label_visibility="collapsed")
         
         if _mode == "Single Order":
             st.markdown("#### Add one order")
@@ -3675,7 +3868,7 @@ elif page == "Mass Email":
                         st.rerun()
                 else:
                     st.error("All fields marked with * are required.")
-        else:
+        elif _mode == "Bulk Table":
             st.markdown("#### Enter multiple orders")
             _BULK_BASE = pd.DataFrame({
                 "Name":       pd.Series([], dtype=str),
@@ -3694,22 +3887,20 @@ elif page == "Mass Email":
                 if added:
                     st.success(f"Added {added} order(s) to the queue.")
                     st.rerun()
-
-    # ─ Excel ────────────────────────────────────
-    with tab_excel:
-        st.markdown("#### Import from VEI Checkout Excel File")
-        xl_file = st.file_uploader("Choose an Excel file", type=["xlsx"], key="excel_upload")
-        if st.button("Import Excel", type="primary", key="btn_xl_import"):
-            if xl_file:
-                with st.spinner("Importing..."):
-                    rows, warns = parse_excel_file(xl_file.read())
-                    for w in warns: st.warning(w)
-                    if rows:
-                        st.session_state.queue.extend(rows)
-                        st.success(f"Imported {len(rows)} order(s) from Excel.")
-                        st.rerun()
-                    else:
-                        st.error("No valid orders found.")
+        else:  # Excel Import
+            st.markdown("#### Import from VEI Checkout Excel File")
+            xl_file = st.file_uploader("Choose an Excel file", type=["xlsx"], key="excel_upload")
+            if st.button("Import Excel", type="primary", key="btn_xl_import"):
+                if xl_file:
+                    with st.spinner("Importing..."):
+                        rows, warns = parse_excel_file(xl_file.read())
+                        for w in warns: st.warning(w)
+                        if rows:
+                            st.session_state.queue.extend(rows)
+                            st.success(f"Imported {len(rows)} order(s) from Excel.")
+                            st.rerun()
+                        else:
+                            st.error("No valid orders found.")
 
     # ─ Email Template ───────────────────────────
     with tab_template:
@@ -3830,14 +4021,34 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if not _camp_smtp_email or not _camp_smtp_pass:
             st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
 
-        # ── Contacts Entry (Bulk/CSV style) ───────────────────────────────
+        # ── Contacts Entry (CSV-style bulk) ────────────────────────────────
         st.markdown("**Contacts List**")
-        st.caption("Format: `Name, email@example.com` (one per line).")
-        
+        st.caption(
+            "Paste contacts in CSV format — one per line. "
+            "Accepted formats: `Name, email` or just `email@example.com`. "
+            "You can also paste directly from a spreadsheet (tab or comma separated)."
+        )
+
+        with st.expander("Example formats — click to see"):
+            st.code("""\
+# Format 1: Name, Email (recommended)
+Jane Smith, jane@example.com
+John Doe, john@veinternational.org
+Alex Johnson, alex.j@school.edu
+
+# Format 2: Email only (name auto-detected from address)
+jane@example.com
+john@veinternational.org
+
+# Format 3: Spreadsheet paste (tab separated)
+Jane Smith\tjane@example.com
+John Doe\tjohn@veinternational.org
+""", language=None)
+
         _camp_contacts_raw = st.text_area(
             "Contact List",
-            placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org",
-            height=180,
+            placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org\nalex@school.edu",
+            height=200,
             key="camp_contacts_bulk",
             label_visibility="collapsed",
         )
@@ -3845,16 +4056,30 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         _camp_contacts_parsed = []
         if _camp_contacts_raw.strip():
             for _line in _camp_contacts_raw.strip().split("\n"):
-                if "," in _line:
+                _line = _line.strip()
+                if not _line or _line.startswith("#"):
+                    continue
+                # Try tab separator first (spreadsheet paste)
+                if "\t" in _line:
+                    _parts = [p.strip() for p in _line.split("\t")]
+                    for _p in _parts:
+                        if "@" in _p:
+                            _email = _p
+                            _name = next((pp for pp in _parts if pp != _p and "@" not in pp), _email.split("@")[0])
+                            _camp_contacts_parsed.append({"name": _name, "email": _email})
+                            break
+                elif "," in _line:
                     _parts = [p.strip() for p in _line.split(",", 1)]
                     if len(_parts) == 2 and "@" in _parts[1]:
                         _camp_contacts_parsed.append({"name": _parts[0], "email": _parts[1]})
+                    elif len(_parts) == 2 and "@" in _parts[0]:
+                        _camp_contacts_parsed.append({"name": _parts[1], "email": _parts[0]})
                 elif "@" in _line:
                     _em = _line.strip()
-                    _camp_contacts_parsed.append({"name": _em.split("@")[0], "email": _em})
+                    _camp_contacts_parsed.append({"name": _em.split("@")[0].replace(".", " ").title(), "email": _em})
 
         if _camp_contacts_parsed:
-            st.success(f"Detected {len(_camp_contacts_parsed)} valid contact(s).")
+            st.success(f"✅ Detected **{len(_camp_contacts_parsed)}** valid contact(s)")
 
         st.divider()
 
