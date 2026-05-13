@@ -165,6 +165,15 @@ def _init_sqlite():
             pages      TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS financials (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_date  TEXT    NOT NULL DEFAULT (date('now')),
+            category    TEXT    NOT NULL DEFAULT 'Expense',
+            description TEXT    NOT NULL DEFAULT '',
+            amount      REAL    NOT NULL DEFAULT 0.0,
+            notes       TEXT    NOT NULL DEFAULT '',
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     # Seed default roles if the table is empty
@@ -723,6 +732,17 @@ INSERT INTO roles (role_name, pages) VALUES
     ('staff',  'Mass Email,Products,Inventory'),
     ('viewer', 'Inventory')
 ON CONFLICT (role_name) DO NOTHING;
+
+-- ── Financials table (manual ledger entries) ────────────────────────────
+CREATE TABLE IF NOT EXISTS financials (
+    id          BIGSERIAL      PRIMARY KEY,
+    entry_date  DATE           NOT NULL DEFAULT CURRENT_DATE,
+    category    TEXT           NOT NULL DEFAULT 'Expense',
+    description TEXT           NOT NULL DEFAULT '',
+    amount      NUMERIC(12,2)  NOT NULL DEFAULT 0.00,
+    notes       TEXT           NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+);
 
 -- Add your own tables below this line ──────────────────────────────────────
 """
@@ -1506,6 +1526,114 @@ def save_outbound_log(log: dict, cfg: dict):
                           row["sub"],row["tax"],row["ship"],row["cost"]))
             conn_sb.close()
         except Exception: pass
+
+
+_FIN_CATEGORIES = ["Revenue", "Expense", "Cost of Goods (COGS)", "Marketing", "Payroll", "Operations", "Other"]
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_financials_cached(sb_conn_str: str) -> list:
+    if sb_conn_str:
+        try:
+            conn = _psycopg2_connect(sb_conn_str, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, entry_date, category, description, amount, notes, created_at FROM financials ORDER BY entry_date DESC, id DESC")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            pass
+    try:
+        conn = _get_sqlite_conn()
+        df = _sqlite_read_sql(conn, "SELECT id, entry_date, category, description, amount, notes, created_at FROM financials ORDER BY entry_date DESC, id DESC")
+        conn.close()
+        return df.to_dict("records")
+    except Exception:
+        return []
+
+
+def get_financials_from_db(cfg: dict) -> pd.DataFrame:
+    sb_cs = _get_effective_supabase_conn_str(cfg) or ""
+    rows = _fetch_financials_cached(sb_cs)
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id","entry_date","category","description","amount","notes","created_at"])
+
+
+def add_financial_entry(entry_date: str, category: str, description: str, amount: float, notes: str, cfg: dict) -> tuple[bool, str]:
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "INSERT INTO financials (entry_date, category, description, amount, notes) VALUES (?,?,?,?,?)",
+            (entry_date, category, description, amount, notes)
+        )
+        conn.commit(); conn.close()
+        results.append("SQLite")
+    except Exception as e:
+        results.append(f"SQLite failed: {e}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO financials (entry_date, category, description, amount, notes) VALUES (%s,%s,%s,%s,%s)",
+                        (entry_date, category, description, amount, notes)
+                    )
+            conn_sb.close(); results.append("Supabase")
+        except Exception as e:
+            results.append(f"Supabase failed: {e}")
+    _fetch_financials_cached.clear()
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def update_financial_entry(row_id: int, entry_date: str, category: str, description: str, amount: float, notes: str, cfg: dict) -> tuple[bool, str]:
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "UPDATE financials SET entry_date=?, category=?, description=?, amount=?, notes=? WHERE id=?",
+            (entry_date, category, description, amount, notes, row_id)
+        )
+        conn.commit(); conn.close()
+        results.append("SQLite")
+    except Exception as e:
+        results.append(f"SQLite failed: {e}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "UPDATE financials SET entry_date=%s, category=%s, description=%s, amount=%s, notes=%s WHERE id=%s",
+                        (entry_date, category, description, amount, notes, row_id)
+                    )
+            conn_sb.close(); results.append("Supabase")
+        except Exception as e:
+            results.append(f"Supabase failed: {e}")
+    _fetch_financials_cached.clear()
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def delete_financial_entry(row_id: int, cfg: dict) -> tuple[bool, str]:
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("DELETE FROM financials WHERE id=?", (row_id,))
+        conn.commit(); conn.close()
+        results.append("SQLite")
+    except Exception as e:
+        results.append(f"SQLite failed: {e}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute("DELETE FROM financials WHERE id=%s", (row_id,))
+            conn_sb.close(); results.append("Supabase")
+        except Exception as e:
+            results.append(f"Supabase failed: {e}")
+    _fetch_financials_cached.clear()
+    return any("failed" not in r for r in results), " · ".join(results)
 
 
 def load_outbound_logs(cfg: dict) -> pd.DataFrame:
@@ -3159,29 +3287,168 @@ elif page == "Inventory":
 
     # ── FINANCIALS ──────────────────────────────
     with tab_financials:
-        _fin_logs = load_outbound_logs(cfg)
+        # ── Load data ────────────────────────────────────────────────
+        _fin_logs    = load_outbound_logs(cfg)
+        _fin_ledger  = get_financials_from_db(cfg)
 
-        if _fin_logs.empty:
-            st.info("No financial data yet. Revenue is tracked automatically when order confirmation emails are sent from the **Mass Email** page.")
-        else:
-            _fin_df  = _fin_logs.copy()
-            _ts_col  = "timestamp" if "timestamp" in _fin_df.columns else ("created_at" if "created_at" in _fin_df.columns else None)
-            _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
+        # Parse outbound log revenue
+        _fin_df  = _fin_logs.copy()
+        _ts_col  = "timestamp" if "timestamp" in _fin_df.columns else ("created_at" if "created_at" in _fin_df.columns else None)
+        _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
+        _order_revenue = 0.0
+        _order_count   = 0
+        if _ts_col and _cost_col and not _fin_df.empty:
+            _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
+            _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
+            _fin_df = _fin_df.dropna(subset=["_date"])
+            _order_revenue = float(_fin_df["_cost"].sum())
+            _order_count   = len(_fin_df)
 
-            if _ts_col and _cost_col:
-                _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
-                _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
-                _fin_df = _fin_df.dropna(subset=["_date"])
+        # Parse ledger totals by category group
+        _led_revenue = 0.0
+        _led_expense = 0.0
+        if not _fin_ledger.empty and "amount" in _fin_ledger.columns:
+            _fin_ledger["_amount"] = pd.to_numeric(_fin_ledger["amount"], errors="coerce").fillna(0)
+            _rev_cats = {"Revenue"}
+            _exp_cats = {"Expense", "Cost of Goods (COGS)", "Marketing", "Payroll", "Operations", "Other"}
+            _led_revenue = float(_fin_ledger[_fin_ledger["category"].isin(_rev_cats)]["_amount"].sum())
+            _led_expense = float(_fin_ledger[_fin_ledger["category"].isin(_exp_cats)]["_amount"].sum())
 
-            if _fin_df.empty or not _ts_col or not _cost_col:
-                st.warning("Could not parse revenue data from outbound logs.")
+        _total_revenue_all = _order_revenue + _led_revenue
+        _net_income        = _total_revenue_all - _led_expense
+
+        # ── Radio mode ───────────────────────────────────────────────
+        _fin_mode = st.radio(
+            "Financial View",
+            ["Overview", "Add Entry", "Ledger", "Order Revenue", "Revenue by Product"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="fin_mode_radio",
+        )
+
+        # ════ OVERVIEW ══════════════════════════════════════════════
+        if _fin_mode == "Overview":
+            _fma, _fmb, _fmc, _fmd = st.columns(4)
+            _fma.metric("Total Revenue",       f"${_total_revenue_all:,.2f}")
+            _fmb.metric("Order Revenue",       f"${_order_revenue:,.2f}")
+            _fmc.metric("Ledger Revenue",      f"${_led_revenue:,.2f}")
+            _fmd.metric("Total Expenses",      f"${_led_expense:,.2f}")
+
+            _fme, _fmf, _fmg, _fmh = st.columns(4)
+            _net_color = "normal" if _net_income >= 0 else "inverse"
+            _fme.metric("Net Income",          f"${_net_income:,.2f}", delta=f"{'profit' if _net_income >= 0 else 'loss'}")
+            _fmf.metric("Total Orders",        f"{_order_count:,}")
+            _avg_ord = _order_revenue / _order_count if _order_count else 0
+            _fmg.metric("Avg Order Value",     f"${_avg_ord:,.2f}")
+            _ledger_entries = len(_fin_ledger) if not _fin_ledger.empty else 0
+            _fmh.metric("Ledger Entries",      f"{_ledger_entries:,}")
+
+            if not _fin_df.empty and _ts_col and _cost_col:
+                st.divider()
+                st.subheader("Monthly Revenue (Orders)")
+                _monthly_chart = _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"].sum().reset_index()
+                _monthly_chart.columns = ["Month", "Revenue"]
+                _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
+                st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
+
+            if not _fin_ledger.empty:
+                st.divider()
+                st.subheader("Expenses by Category")
+                _cat_totals = _fin_ledger.groupby("category")["_amount"].sum().reset_index()
+                _cat_totals.columns = ["Category", "Amount ($)"]
+                _cat_totals = _cat_totals.sort_values("Amount ($)", ascending=False)
+                st.bar_chart(_cat_totals.set_index("Category")["Amount ($)"], color="#ef4444")
+
+        # ════ ADD ENTRY ═════════════════════════════════════════════
+        elif _fin_mode == "Add Entry":
+            st.subheader("Add Financial Entry")
+            _ae1, _ae2 = st.columns(2)
+            with _ae1:
+                _ae_date = st.date_input("Date", value="today", key="fin_ae_date")
+                _ae_cat  = st.selectbox("Category", _FIN_CATEGORIES, key="fin_ae_cat")
+            with _ae2:
+                _ae_amt  = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="fin_ae_amt")
+                _ae_desc = st.text_input("Description", placeholder="e.g. Office supplies", key="fin_ae_desc")
+            _ae_notes = st.text_area("Notes (optional)", height=80, key="fin_ae_notes")
+
+            if st.button("Add Entry", type="primary", key="btn_fin_add"):
+                if not _ae_desc.strip():
+                    st.error("Description is required.")
+                elif _ae_amt <= 0:
+                    st.error("Amount must be greater than 0.")
+                else:
+                    _aok, _amsg = add_financial_entry(
+                        str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg
+                    )
+                    if _aok:
+                        st.success(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f} ({_ae_desc.strip()})")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {_amsg}")
+
+        # ════ LEDGER ════════════════════════════════════════════════
+        elif _fin_mode == "Ledger":
+            st.subheader("Financial Ledger")
+            st.caption("All manually entered income and expense records. Click a row to edit or delete it.")
+
+            if _fin_ledger.empty:
+                st.info("No entries yet — use **Add Entry** to record income or expenses.")
             else:
-                # ── Top-line Metrics ─────────────────────
-                _total_revenue = _fin_df["_cost"].sum()
-                _total_orders  = len(_fin_df)
-                _avg_order     = _total_revenue / _total_orders if _total_orders else 0
-                _months_active = _fin_df["_date"].dt.to_period("M").nunique()
+                _disp_led = _fin_ledger[["id","entry_date","category","description","amount","notes"]].copy()
+                _disp_led = _disp_led.rename(columns={
+                    "id": "ID", "entry_date": "Date", "category": "Category",
+                    "description": "Description", "amount": "Amount ($)", "notes": "Notes"
+                })
+                _disp_led["Amount ($)"] = pd.to_numeric(_disp_led["Amount ($)"], errors="coerce").round(2)
+                st.dataframe(
+                    _disp_led, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Amount ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Date":       st.column_config.TextColumn(),
+                    }
+                )
 
+                st.divider()
+                st.subheader("Edit / Delete Entry")
+                _all_ids = list(_fin_ledger["id"].astype(int))
+                _sel_id  = st.selectbox("Select entry ID", _all_ids, format_func=lambda i: f"#{i} — {_fin_ledger[_fin_ledger['id'].astype(int)==i]['description'].values[0] if len(_fin_ledger[_fin_ledger['id'].astype(int)==i]) else i}", key="fin_sel_id")
+                _sel_row = _fin_ledger[_fin_ledger["id"].astype(int) == int(_sel_id)]
+                if not _sel_row.empty:
+                    _sr = _sel_row.iloc[0]
+                    _ed1, _ed2 = st.columns(2)
+                    with _ed1:
+                        _ed_date = st.date_input("Date", value=pd.to_datetime(str(_sr.get("entry_date",""))).date() if _sr.get("entry_date") else None, key="fin_ed_date")
+                        _ed_cat  = st.selectbox("Category", _FIN_CATEGORIES, index=_FIN_CATEGORIES.index(str(_sr.get("category","Expense"))) if str(_sr.get("category","Expense")) in _FIN_CATEGORIES else 0, key="fin_ed_cat")
+                    with _ed2:
+                        _ed_amt  = st.number_input("Amount ($)", value=float(_sr.get("amount", 0) or 0), min_value=0.0, step=0.01, format="%.2f", key="fin_ed_amt")
+                        _ed_desc = st.text_input("Description", value=str(_sr.get("description","")), key="fin_ed_desc")
+                    _ed_notes = st.text_area("Notes", value=str(_sr.get("notes","")), height=80, key="fin_ed_notes")
+
+                    _edc1, _edc2 = st.columns(2)
+                    with _edc1:
+                        if st.button("Save Changes", type="primary", use_container_width=True, key="btn_fin_save"):
+                            _uok, _umsg = update_financial_entry(int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg)
+                            if _uok:
+                                st.success("Entry updated.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed: {_umsg}")
+                    with _edc2:
+                        if st.button("Delete Entry", type="secondary", use_container_width=True, key="btn_fin_del"):
+                            _dok, _dmsg = delete_financial_entry(int(_sel_id), cfg)
+                            if _dok:
+                                st.toast("Entry deleted.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed: {_dmsg}")
+
+        # ════ ORDER REVENUE ═════════════════════════════════════════
+        elif _fin_mode == "Order Revenue":
+            st.subheader("Order Revenue — Outbound Email Log")
+            st.caption("Revenue automatically tracked from every order confirmation email sent.")
+            if _fin_df.empty:
+                st.info("No orders sent yet. Revenue is captured automatically when emails are sent from Mass Email.")
+            else:
                 _fin_has_sub  = "subtotal"  in _fin_df.columns
                 _fin_has_tax  = "tax"       in _fin_df.columns
                 _fin_has_ship = "shipping"  in _fin_df.columns
@@ -3189,108 +3456,13 @@ elif page == "Inventory":
                 _total_tax    = pd.to_numeric(_fin_df.get("tax",       0), errors="coerce").fillna(0).sum() if _fin_has_tax  else 0
                 _total_ship   = pd.to_numeric(_fin_df.get("shipping",  0), errors="coerce").fillna(0).sum() if _fin_has_ship else 0
 
-                _fm1, _fm2, _fm3, _fm4 = st.columns(4)
-                _fm1.metric("Total Revenue",     f"${_total_revenue:,.2f}")
-                _fm2.metric("Total Orders",      f"{_total_orders:,}")
-                _fm3.metric("Avg. Order Value",  f"${_avg_order:,.2f}")
-                _fm4.metric("Months Active",     _months_active)
-
-                _fm5, _fm6, _fm7, _fm8 = st.columns(4)
-                _fm5.metric("Total Subtotal",    f"${_total_sub:,.2f}")
-                _fm6.metric("Total Tax",         f"${_total_tax:,.2f}")
-                _fm7.metric("Total Shipping",    f"${_total_ship:,.2f}")
-                _fm8.metric("Unique Customers",  _fin_df.get("recipient_email", _fin_df.get("recipient_name", pd.Series())).nunique() if "recipient_email" in _fin_df.columns else "—")
+                _oa, _ob, _oc, _od = st.columns(4)
+                _oa.metric("Total",    f"${_order_revenue:,.2f}")
+                _ob.metric("Subtotal", f"${_total_sub:,.2f}")
+                _oc.metric("Tax",      f"${_total_tax:,.2f}")
+                _od.metric("Shipping", f"${_total_ship:,.2f}")
 
                 st.divider()
-
-                # ── Monthly Revenue Chart ────────────────
-                st.subheader("Monthly Revenue")
-                _monthly_chart = (
-                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"]
-                    .sum().reset_index()
-                )
-                _monthly_chart.columns = ["Month", "Revenue"]
-                _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
-                st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
-
-                st.divider()
-
-                # ── Revenue by Month Table ───────────────
-                st.subheader("Revenue by Month")
-                _monthly_tbl = (
-                    _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))
-                    .agg(Orders=("_cost", "count"), Revenue=("_cost", "sum"), Avg_Order=("_cost", "mean"))
-                    .reset_index()
-                )
-                _monthly_tbl.columns = ["Month", "Orders", "Revenue ($)", "Avg Order ($)"]
-                _monthly_tbl["Month"] = _monthly_tbl["Month"].astype(str)
-                _monthly_tbl["Revenue ($)"]   = _monthly_tbl["Revenue ($)"].round(2)
-                _monthly_tbl["Avg Order ($)"] = _monthly_tbl["Avg Order ($)"].round(2)
-                _monthly_tbl = _monthly_tbl.sort_values("Month", ascending=False)
-                st.dataframe(
-                    _monthly_tbl, use_container_width=True, hide_index=True,
-                    column_config={
-                        "Revenue ($)":   st.column_config.NumberColumn(format="$%.2f"),
-                        "Avg Order ($)": st.column_config.NumberColumn(format="$%.2f"),
-                    }
-                )
-
-                st.divider()
-
-                # ── Revenue per Product ──────────────────
-                st.subheader("Revenue per Product")
-                st.caption("Calculated from price × quantity for each product across all sent orders.")
-                # Build a price lookup from inventory
-                _price_lookup: dict = {}
-                if not inv_df.empty and "item_name" in inv_df.columns and "price" in inv_df.columns:
-                    for _, _plr in inv_df.iterrows():
-                        _price_lookup[str(_plr["item_name"]).lower().strip()] = float(_plr.get("price", 0) or 0)
-
-                _prod_revenue: dict = {}
-                _prod_units:   dict = {}
-                _prod_orders:  dict = {}
-
-                _pl_col = "products_list" if "products_list" in _fin_df.columns else None
-                if _pl_col:
-                    for _, _frow in _fin_df.iterrows():
-                        _plist = str(_frow.get(_pl_col, ""))
-                        for _pentry in [p.strip() for p in _plist.split(",") if p.strip()]:
-                            _pname, _pqty = _parse_product_qty(_pentry)
-                            _pkey = _pname.lower().strip()
-                            _pprice = _price_lookup.get(_pkey, 0.0)
-                            if not _pprice:
-                                # fuzzy lookup
-                                for _lk, _lv in _price_lookup.items():
-                                    if _pkey in _lk or _lk in _pkey:
-                                        _pprice = _lv
-                                        break
-                            _prod_revenue[_pname] = _prod_revenue.get(_pname, 0.0) + _pprice * _pqty
-                            _prod_units[_pname]   = _prod_units.get(_pname, 0) + _pqty
-                            _prod_orders[_pname]  = _prod_orders.get(_pname, 0) + 1
-
-                if _prod_revenue:
-                    _pp_df = pd.DataFrame([
-                        {
-                            "Product":        p,
-                            "Units Sold":     _prod_units.get(p, 0),
-                            "Orders":         _prod_orders.get(p, 0),
-                            "Revenue ($)":    round(_prod_revenue.get(p, 0.0), 2),
-                        }
-                        for p in sorted(_prod_revenue, key=_prod_revenue.get, reverse=True)
-                    ])
-                    st.bar_chart(_pp_df.set_index("Product")["Revenue ($)"], color="#f59e0b")
-                    st.dataframe(
-                        _pp_df, use_container_width=True, hide_index=True,
-                        column_config={"Revenue ($)": st.column_config.NumberColumn(format="$%.2f")}
-                    )
-                else:
-                    st.info("Product revenue breakdown will appear once orders are sent through the Mass Email page.")
-
-                st.divider()
-
-                # ── Outbound Log (full history) ──────────
-                st.subheader("Outbound Email Log")
-                st.caption("Every order confirmation email sent through MERIT.")
                 _log_disp = _fin_df.copy()
                 _log_rename = {
                     "recipient_name": "Name", "recipient_email": "Email",
@@ -3312,9 +3484,47 @@ elif page == "Inventory":
                         "Products":  st.column_config.TextColumn(width="large"),
                     }
                 )
-                if st.button("Refresh Financial Data", key="btn_fin_refresh"):
-                    _clear_data_caches()
-                    st.rerun()
+
+        # ════ REVENUE BY PRODUCT ════════════════════════════════════
+        elif _fin_mode == "Revenue by Product":
+            st.subheader("Revenue by Product")
+            st.caption("Calculated from price × quantity across all sent order emails.")
+            _price_lookup: dict = {}
+            if not inv_df.empty and "item_name" in inv_df.columns and "price" in inv_df.columns:
+                for _, _plr in inv_df.iterrows():
+                    _price_lookup[str(_plr["item_name"]).lower().strip()] = float(_plr.get("price", 0) or 0)
+            _prod_revenue: dict[str, float] = {}
+            _prod_units:   dict[str, int]   = {}
+            _prod_orders:  dict[str, int]   = {}
+            _pl_col = "products_list" if "products_list" in _fin_df.columns else None
+            if _pl_col and not _fin_df.empty:
+                for _, _frow in _fin_df.iterrows():
+                    for _pentry in [p.strip() for p in str(_frow.get(_pl_col,"")).split(",") if p.strip()]:
+                        _pname, _pqty = _parse_product_qty(_pentry)
+                        _pkey  = _pname.lower().strip()
+                        _pprice = _price_lookup.get(_pkey, 0.0)
+                        if not _pprice:
+                            for _lk, _lv in _price_lookup.items():
+                                if _pkey in _lk or _lk in _pkey:
+                                    _pprice = _lv; break
+                        _prod_revenue[_pname] = _prod_revenue.get(_pname, 0.0) + _pprice * _pqty
+                        _prod_units[_pname]   = _prod_units.get(_pname, 0) + _pqty
+                        _prod_orders[_pname]  = _prod_orders.get(_pname, 0) + 1
+            if _prod_revenue:
+                _pp_df = pd.DataFrame([
+                    {"Product": p, "Units Sold": _prod_units.get(p,0), "Orders": _prod_orders.get(p,0), "Revenue ($)": round(_prod_revenue.get(p,0.0),2)}
+                    for p in sorted(_prod_revenue, key=_prod_revenue.get, reverse=True)
+                ])
+                st.bar_chart(_pp_df.set_index("Product")["Revenue ($)"], color="#f59e0b")
+                st.dataframe(_pp_df, use_container_width=True, hide_index=True,
+                    column_config={"Revenue ($)": st.column_config.NumberColumn(format="$%.2f")})
+            else:
+                st.info("Product revenue will appear once orders are sent from the Mass Email page.")
+
+        if st.button("Refresh", key="btn_fin_refresh", help="Reload all financial data"):
+            _clear_data_caches()
+            _fetch_financials_cached.clear()
+            st.rerun()
 
     # ── ADJUST STOCK ────────────────────────────
     with tab_adjust:
