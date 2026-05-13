@@ -20,8 +20,9 @@ import urllib.request as _urllib_request
 from pathlib import Path
 import warnings
 
-# Suppress Pandas UserWarning about SQLAlchemy
-warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
+# Suppress Pandas warnings about non-SQLAlchemy connectable (sqlite3 / psycopg2)
+warnings.filterwarnings("ignore", ".*SQLAlchemy.*")
+warnings.filterwarnings("ignore", ".*DBAPI2.*")
 
 import pandas as pd
 import streamlit as st
@@ -100,6 +101,13 @@ def _get_sqlite_conn():
     conn = sqlite3.connect(str(_SQLITE_DB), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _sqlite_read_sql(conn, sql: str, params=()) -> "pd.DataFrame":
+    """Execute SQL on a sqlite3 connection and return a DataFrame without using pd.read_sql."""
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description] if cur.description else []
+    return pd.DataFrame([dict(zip(cols, row)) for row in cur.fetchall()], columns=cols if cols else None)
 
 def _init_sqlite():
     conn = _get_sqlite_conn()
@@ -256,45 +264,66 @@ def _verify_password(stored_hash: str, password: str) -> bool:
         return False
 
 
-def get_users_from_db(cfg: dict) -> pd.DataFrame:
-    """Load users table from Supabase (preferred) or SQLite fallback."""
-    _sb_cs = _get_effective_supabase_conn_str(cfg)
-    if _sb_cs:
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_users_cached(sb_conn_str: str) -> list:
+    """Cached fetch of users — takes hashable conn string, returns list of row dicts."""
+    if sb_conn_str:
         try:
-            conn = _psycopg2_connect(_sb_cs)
-            df = pd.read_sql("SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at", conn)
+            conn = _psycopg2_connect(sb_conn_str, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
-            return df
+            if rows:
+                return rows
         except Exception:
             pass
     try:
         conn = _get_sqlite_conn()
-        df = pd.read_sql("SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at", conn)
+        df = _sqlite_read_sql(conn, "SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at")
         conn.close()
-        return df
+        return df.to_dict("records")
     except Exception:
-        return pd.DataFrame()
+        return []
+
+
+def get_users_from_db(cfg: dict) -> pd.DataFrame:
+    """Load users table from Supabase (preferred) or SQLite fallback. Result is cached 30s."""
+    sb_cs = _get_effective_supabase_conn_str(cfg) or ""
+    rows = _fetch_users_cached(sb_cs)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_roles_cached(sb_conn_str: str) -> list:
+    """Cached fetch of roles — takes hashable conn string, returns list of row dicts."""
+    if sb_conn_str:
+        try:
+            conn = _psycopg2_connect(sb_conn_str, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT role_name, pages FROM roles ORDER BY role_name")
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+            conn.close()
+            if rows:
+                return rows
+        except Exception:
+            pass
+    try:
+        conn = _get_sqlite_conn()
+        df = _sqlite_read_sql(conn, "SELECT role_name, pages FROM roles ORDER BY role_name")
+        conn.close()
+        return df.to_dict("records")
+    except Exception:
+        return []
 
 
 def get_roles_from_db(cfg: dict) -> pd.DataFrame:
-    """Load roles table from Supabase (preferred) or SQLite fallback."""
-    _sb_cs = _get_effective_supabase_conn_str(cfg)
-    if _sb_cs:
-        try:
-            conn = _psycopg2_connect(_sb_cs)
-            df = pd.read_sql("SELECT role_name, pages FROM roles ORDER BY role_name", conn)
-            conn.close()
-            if not df.empty:
-                return df
-        except Exception:
-            pass
-    try:
-        conn = _get_sqlite_conn()
-        df = pd.read_sql("SELECT role_name, pages FROM roles ORDER BY role_name", conn)
-        conn.close()
-        return df
-    except Exception:
-        return pd.DataFrame()
+    """Load roles table from Supabase (preferred) or SQLite fallback. Result is cached 30s."""
+    sb_cs = _get_effective_supabase_conn_str(cfg) or ""
+    rows = _fetch_roles_cached(sb_cs)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def get_pages_for_role(role_name: str, cfg: dict) -> list:
@@ -1147,7 +1176,7 @@ def load_inventory_from_sqlite() -> pd.DataFrame:
     """Load inventory table from SQLite."""
     try:
         conn = _get_sqlite_conn()
-        df = pd.read_sql("SELECT * FROM inventory ORDER BY item_name", conn)
+        df = _sqlite_read_sql(conn, "SELECT * FROM inventory ORDER BY item_name")
         conn.close()
         return df
     except Exception:
@@ -1493,7 +1522,7 @@ def load_outbound_logs(cfg: dict) -> pd.DataFrame:
 
     try:
         conn = _get_sqlite_conn()
-        df = pd.read_sql("SELECT * FROM outbound_logs ORDER BY timestamp DESC LIMIT 500", conn)
+        df = _sqlite_read_sql(conn, "SELECT * FROM outbound_logs ORDER BY timestamp DESC LIMIT 500")
         conn.close()
         return df
     except Exception:
@@ -2288,6 +2317,7 @@ You can also create custom roles below with exactly the page permissions you wan
                 )
                 if _gs_ok:
                     st.success(f"User **{_gs_u_name.strip()}** created with role **{_gs_u_role}**.")
+                    _fetch_users_cached.clear()
                     st.rerun()
                 else:
                     st.error(f"Failed: {_gs_msg}")
@@ -2307,6 +2337,7 @@ You can also create custom roles below with exactly the page permissions you wan
                         _del_ok, _del_msg = delete_user_all_dbs(str(_gu.get("email", "")), cfg)
                         if _del_ok:
                             st.toast("User removed.", icon=None)
+                            _fetch_users_cached.clear()
                             st.rerun()
                         else:
                             st.error(f"Failed: {_del_msg}")
@@ -2338,6 +2369,7 @@ You can also create custom roles below with exactly the page permissions you wan
                     _rok, _rmsg = create_role_all_dbs(_rn, _gs_checked_pages, cfg)
                     if _rok:
                         st.success(f"Role **{_rn}** created.")
+                        _fetch_roles_cached.clear()
                         st.rerun()
                     else:
                         st.error(f"Failed: {_rmsg}")
@@ -2356,6 +2388,7 @@ You can also create custom roles below with exactly the page permissions you wan
                             _drok, _drmsg = delete_role_all_dbs(str(_rrow.get("role_name", "")), cfg)
                             if _drok:
                                 st.toast("Role deleted.", icon=None)
+                                _fetch_roles_cached.clear()
                                 st.rerun()
                     else:
                         st.caption("built-in")
@@ -3913,6 +3946,7 @@ elif page == "Settings":
                     _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
                     if _rm_ok:
                         st.success(f"Role **{_rm_name.strip()}** saved with: {', '.join(_rm_checked)}")
+                        _fetch_roles_cached.clear()
                         st.rerun()
                     else:
                         st.error(f"Failed: {_rm_msg}")
@@ -3946,6 +3980,7 @@ elif page == "Settings":
                                 _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
                                 if _rrd_ok:
                                     st.toast(f"Role '{_rr_name}' deleted.")
+                                    _fetch_roles_cached.clear()
                                     st.rerun()
                                 else:
                                     st.error(f"Failed: {_rrd_msg}")
@@ -3980,6 +4015,7 @@ elif page == "Settings":
                     _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
                     if _um_ok:
                         st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
+                        _fetch_users_cached.clear()
                         st.rerun()
                     else:
                         st.error(f"Failed: {_um_msg}")
@@ -4012,6 +4048,7 @@ elif page == "Settings":
                                     _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
                                     if _uro_ok:
                                         st.toast(f"Role updated to {_new_role_sel}.")
+                                        _fetch_users_cached.clear()
                                         st.rerun()
                                     else:
                                         st.error(f"Failed: {_uro_msg}")
@@ -4039,6 +4076,7 @@ elif page == "Settings":
                             _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
                             if _del_ok:
                                 st.toast("User removed.")
+                                _fetch_users_cached.clear()
                                 st.rerun()
                             else:
                                 st.error(f"Failed: {_del_msg}")
