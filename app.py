@@ -1572,19 +1572,30 @@ _auth_cfg = st.session_state.cfg
 _users_df  = get_users_from_db(_auth_cfg)
 _has_users = not _users_df.empty
 
-if _has_users:
+# Only enforce the multi-user login gate after setup is complete (secrets saved to Streamlit).
+# During initial setup (no secrets yet) users can be created freely without getting locked out.
+_login_secrets_active = False
+try:
+    _login_secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
+except Exception:
+    pass
+
+if _has_users and _login_secrets_active:
     # Multi-user email/password auth
     if not st.session_state.get("auth_user"):
         st.markdown("""
             <style>[data-testid="stSidebar"] { display: none; }</style>
         """, unsafe_allow_html=True)
-        st.title("Sign in to MERIT")
         _li_c1, _li_c2, _li_c3 = st.columns([1, 2, 1])
         with _li_c2:
+            _sb_co_li = _auth_cfg.get("from_name", "MERIT").strip()
+            st.markdown(
+                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
+                f'{"Sign in to MERIT" if not _sb_co_li else _sb_co_li}</h1>'
+                f'<p style="text-align:center;color:#888;margin-bottom:1.5rem">Sign in to continue</p>',
+                unsafe_allow_html=True,
+            )
             with st.container(border=True):
-                _sb_co_li = _auth_cfg.get("from_name", "MERIT").strip()
-                st.subheader(f"{_sb_co_li}")
-                st.caption("Enter your email and password to continue.")
                 _li_email = st.text_input("Email", placeholder="you@example.com", key="li_email")
                 _li_pass  = st.text_input("Password", type="password", key="li_pass")
                 if st.button("Sign In", type="primary", key="li_btn", use_container_width=True):
@@ -1600,21 +1611,29 @@ if _has_users:
                         st.warning("Please enter your email and password.")
         st.stop()
 else:
-    # Legacy single-password fallback (backward compatibility)
+    # Legacy single-password fallback (backward compatibility / pre-setup)
     _app_pwd = _auth_cfg.get("app_login_password")
     if _app_pwd and not st.session_state.get("authenticated"):
         st.markdown("""
             <style>[data-testid="stSidebar"] { display: none; }</style>
         """, unsafe_allow_html=True)
-        st.title("Login to MERIT")
-        st.info("This app is password protected. Enter the password set during configuration.")
-        _in_pwd = st.text_input("Enter Password", type="password", key="login_pwd_input")
-        if st.button("Login", type="primary", key="login_btn"):
-            if _in_pwd == _app_pwd:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
+        _li_c1, _li_c2, _li_c3 = st.columns([1, 2, 1])
+        with _li_c2:
+            _sb_co_pw = _auth_cfg.get("from_name", "MERIT").strip()
+            st.markdown(
+                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
+                f'{"MERIT" if not _sb_co_pw else _sb_co_pw}</h1>'
+                f'<p style="text-align:center;color:#888;margin-bottom:1.5rem">Enter your password to continue</p>',
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+                _in_pwd = st.text_input("Password", type="password", key="login_pwd_input")
+                if st.button("Login", type="primary", key="login_btn", use_container_width=True):
+                    if _in_pwd == _app_pwd:
+                        st.session_state["authenticated"] = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect password.")
         st.stop()
 
 # ─────────────────────────────────────────────
