@@ -13,6 +13,10 @@ import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+import warnings
+ 
+# Suppress Pandas UserWarning about SQLAlchemy
+warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 import pandas as pd
 import streamlit as st
@@ -1008,8 +1012,9 @@ _title_co = _early_cfg.get("from_name", "").strip()
 _app_title = f"{_title_co} - MERIT" if _title_co else "MERIT"
 st.set_page_config(page_title=_app_title, layout="wide")
 
-if "cfg" not in st.session_state:
-    st.session_state.cfg = _early_cfg
+# Always refresh cfg from disk/secrets at the start of every run to be adaptive
+st.session_state.cfg = load_config()
+cfg = st.session_state.cfg
 
 if "queue" not in st.session_state:
     st.session_state.queue = []
@@ -1068,6 +1073,11 @@ By clicking **I Agree**, you confirm that you have read and understood the above
 
 _app_pwd = st.session_state.cfg.get("app_login_password")
 if _app_pwd and not st.session_state.get("authenticated"):
+    st.markdown("""
+        <style>
+        [data-testid="stSidebar"] { display: none; }
+        </style>
+    """, unsafe_allow_html=True)
     st.title("Login to MERIT")
     st.info("This app is password protected. Enter the password set during configuration.")
     _in_pwd = st.text_input("Enter Password", type="password", key="login_pwd_input")
@@ -1142,9 +1152,9 @@ with st.sidebar:
     except Exception:
         pass
     _nav_pages = (
-        ["Email Sender", "Products", "Inventory", "Settings", "API Endpoints"]
+        ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
         if _secrets_active
-        else ["Get Started", "Email Sender", "Products", "Inventory", "Settings", "API Endpoints"]
+        else ["Get Started", "Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
     )
     # Ensure current value is valid after hiding Get Started
     if "sidebar_page" not in st.session_state or st.session_state["sidebar_page"] not in _nav_pages:
@@ -1164,6 +1174,8 @@ with st.sidebar:
     products_count = len(cfg.get("products", []))
     if products_count:
         st.caption(f"Catalog Products: {products_count}")
+    
+    st.caption("Version: **v1.4.0**")
     
     # ── Queue Status Indicator in Sidebar ─────
     _queue_count = len(st.session_state.queue)
@@ -2456,10 +2468,12 @@ elif page == "Settings":
         "inp_sb_conn":          "supabase_connection_string",
     }
 
-    # Initialise session state keys from cfg (once per session)
+    # Initialise session state keys from cfg (ensures secrets auto-fill)
     for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
-        if _ss_k not in st.session_state:
-            st.session_state[_ss_k] = cfg.get(_cfg_k, "")
+        # Only overwrite if empty or if we have a new secret to show
+        _val = cfg.get(_cfg_k, "")
+        if not st.session_state.get(_ss_k) and _val:
+            st.session_state[_ss_k] = _val
 
     def _auto_save_settings():
         _new = {**st.session_state.cfg}
@@ -3426,76 +3440,35 @@ const supabase = createClient(
 )
 
 // Fetch all in-stock products
-async function getProducts() {{
+async function getProducts() {{{
   const {{ data, error }} = await supabase
     .from('inventory')
     .select('*')
     .gt('stock_left', 0)       // only show products that have stock
-    .order('item_name')         // alphabetical order
+    .order('item_name', {{ ascending: true }})
 
   if (error) throw error
   return data  // each item has: sku, item_name, price, image_url, stock_left, category
-}}
-
-// Fetch by category (for filter buttons)
-async function getByCategory(category) {{
-  const {{ data }} = await supabase
-    .from('inventory')
-    .select('*')
-    .eq('category', category)
-    .gt('stock_left', 0)
-
-  return data
-}}
+}}}
 """, language="javascript")
 
         with _ex_ts:
             st.markdown("For Next.js or any TypeScript project:")
             st.code(f"""\
 // lib/supabase.ts
-import {{ createClient }} from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
 export const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
-
-// .env.local  (create this file in your project root)
-NEXT_PUBLIC_SUPABASE_URL={_sb_url_ph}
-NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
-
-// types.ts
-export interface Product {{
-  sku: string
-  item_name: string
-  category: string
-  price: number
-  stock_left: number
-  status: string          // 'In stock' | 'Low stock' | 'Out of stock' | 'Backordered'
-  image_url: string       // full HTTPS URL — use directly in <img src>
-}}
-
-// lib/products.ts
-import {{ supabase }} from './supabase'
-import type {{ Product }} from './types'
-
-export async function getProducts(): Promise<Product[]> {{
-  const {{ data, error }} = await supabase
-    .from('inventory')
-    .select('*')
-    .gt('stock_left', 0)
-    .order('item_name')
-
-  if (error) throw error
-  return data as Product[]
-}}
 """, language="typescript")
 
         with _ex_react:
             st.markdown("A React hook that auto-refreshes when MERIT updates a product:")
             st.code(f"""\
 // hooks/useProducts.ts
-import {{ useEffect, useState }} from 'react'
-import {{ supabase }} from '../lib/supabase'
+import { useEffect, useState } from 'react'
+import { supabase } from '../lib/supabase'
 
 export function useProducts(category?: string) {{
   const [products, setProducts] = useState([])
@@ -3513,7 +3486,7 @@ export function useProducts(category?: string) {{
     const {{ data }} = await q
     setProducts(data ?? [])
     setLoading(false)
-  }}
+  }
 
   useEffect(() => {{
     fetchProducts()
@@ -3527,14 +3500,10 @@ export function useProducts(category?: string) {{
       .subscribe()
 
     return () => {{ supabase.removeChannel(channel) }}
-  }}, [category])
+  }, [category])
 
   return {{ products, loading }}
 }}
-
-// Usage:
-// const {{ products, loading }} = useProducts()          — all products
-// const {{ products }} = useProducts('Apparel')          — filtered by category
 """, language="typescript")
 
         with _ex_rt:
@@ -3544,7 +3513,7 @@ export function useProducts(category?: string) {{
                 "then use this code:"
             )
             st.code(f"""\
-import {{ createClient }} from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient('{_sb_url_ph}', 'YOUR_SUPABASE_ANON_KEY')
 
@@ -3634,25 +3603,24 @@ ORDER BY t.tablename;"""
 
 
 # ═════════════════════════════════════════════
-# EMAIL SENDER PAGE
+# MASS EMAIL PAGE
 # ═════════════════════════════════════════════
 
-elif page == "Email Sender":
+elif page == "Mass Email":
 
     cfg = st.session_state.cfg
     missing_cfg = [k for k in ("from_name", "smtp_email", "smtp_password") if not cfg.get(k)]
     if missing_cfg:
         st.warning("Go to **Settings** and fill in your SMTP credentials before sending.")
 
-    st.title("Email Sender")
-    st.caption("Build a queue of orders and send personalised confirmation emails in bulk.")
+    st.title("Mass Email")
+    st.caption("Send professional order confirmations or run bulk email campaigns from one place.")
 
     # Build catalog lookup once — used for image-match warnings and inventory deduction
-    # Load from cloud/SQLite so deductions work even when cfg["products"] is stale
     _catalog_products = load_products_for_catalog(cfg)
-
+ 
     if not _catalog_products:
-        st.warning("No products found. Add products in the **Products** page first — each product must be named exactly as it appears in the VEI Store Manager and Wholesale Marketplace so images and inventory deduction work correctly.")
+        st.warning("No products found. Add products in the **Products** page first.")
     _catalog_name_lower: set[str] = {
         str(p.get("item_name", "")).lower().strip()
         for p in _catalog_products if p.get("item_name")
@@ -3661,7 +3629,7 @@ elif page == "Email Sender":
         str(p.get("item_name", "")).lower().strip(): str(p.get("sku", ""))
         for p in _catalog_products if p.get("sku") and p.get("item_name")
     }
-
+ 
     def _unmatched_products(raw_products: str) -> list[str]:
         """Return product names that have no fuzzy match in the catalog."""
         if not _catalog_name_lower:
@@ -3675,226 +3643,73 @@ elif page == "Email Sender":
 
     # ── Entry tabs ──────────────────────────────
 
-    tab_single, tab_bulk, tab_csv, tab_excel, tab_template, tab_campaign = st.tabs(
-        ["Single Entry", "Bulk Entry", "CSV Import", "Excel Import", "Email Template", "Email Campaigns"]
+    tab_order, tab_excel, tab_template, tab_campaign = st.tabs(
+        ["Mass Email", "Excel Import", "Order Template", "Email Campaigns"]
     )
 
-    # ─ Single ───────────────────────────────────
-    with tab_single:
-        st.markdown("#### Add one order")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            s_name  = st.text_input("Name *",    key="s_name",  placeholder="Jane Smith")
-            s_email = st.text_input("Email *",   key="s_email", placeholder="jane@example.com")
-        with c2:
-            s_order = st.text_input("Order # *", key="s_order", placeholder="ORD-1001")
-            s_sub   = st.number_input("Subtotal ($)", key="s_sub", min_value=0.0, step=0.01, format="%.2f")
-            s_tax   = st.number_input("Tax ($)",      key="s_tax", min_value=0.0, step=0.01, format="%.2f")
-        with c3:
-            s_disc  = st.number_input("Discount ($)", key="s_disc", min_value=0.0, step=0.01, format="%.2f")
-            s_ship  = st.number_input("Shipping ($)", key="s_ship", min_value=0.0, step=0.01, format="%.2f")
-            s_cost  = st.number_input("Total Cost ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
-            if s_cost == 0 and s_sub > 0:
-                st.caption(f"Suggested Total: ${s_sub + s_tax + s_ship - s_disc:.2f}")
-
-        s_prods = st.text_area(
-            "Products *", key="s_prods", height=108,
-            placeholder="Blue T-Shirt\nBlack Jeans\nRunning Shoes",
-            help="One product per line, or separate with | or ;",
-        )
-
-        if s_prods and _catalog_name_lower:
-            _s_unmatched = _unmatched_products(s_prods)
-            if _s_unmatched:
-                st.warning(
-                    f"No catalog match for: **{', '.join(_s_unmatched)}** — "
-                    "product image(s) won't appear in the email. "
-                    "Check spelling or add the product in the Products page."
-                )
-
-        if st.button("Add to Queue", key="single_add", type="primary"):
-            if not s_name.strip() or not s_email.strip() or not s_order.strip() or not s_prods.strip() or s_cost <= 0:
-                st.error("All fields marked with * are required.")
-            else:
-                    if add_to_queue(s_name, s_email, s_order, s_prods, s_sub, s_tax, s_ship, s_cost, s_disc):
-                        st.toast(f"Added {s_name} to queue.", icon="👤")
+    # ─ Single / Bulk Order Entry ──────────────────
+    with tab_order:
+        _mode = st.radio("Entry Method", ["Single Order", "Bulk Table"], horizontal=True, label_visibility="collapsed")
+        
+        if _mode == "Single Order":
+            st.markdown("#### Add one order")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                s_name  = st.text_input("Name *",    key="s_name",  placeholder="Jane Smith")
+                s_email = st.text_input("Email *",   key="s_email", placeholder="jane@example.com")
+            with c2:
+                s_order = st.text_input("Order # *", key="s_order", placeholder="ORD-1001")
+            with c3:
+                s_cost  = st.number_input("Total Cost ($) *", key="s_cost", min_value=0.0, step=0.01, format="%.2f")
+            
+            s_prods = st.text_area(
+                "Products *", key="s_prods", height=108,
+                placeholder="Blue T-Shirt\nBlack Jeans",
+                help="One product per line, or separate with | or ;",
+            )
+            
+            if st.button("Add to Queue", key="single_add", type="primary"):
+                if s_name and s_email and s_order and s_prods and s_cost > 0:
+                    if add_to_queue(s_name, s_email, s_order, s_prods, 0, 0, 0, s_cost, 0):
                         st.success(f"Added {s_name} to the queue.")
-                        time.sleep(0.5)
                         st.rerun()
-
-        if st.button("Preview Order Email", key="preview_single", width="stretch"):
-            if not s_name.strip() or not s_email.strip() or not s_prods.strip():
-                st.error("Name, Email, and Products are required for a preview.")
-            else:
-                _preview_order = {
-                    "name": s_name,
-                    "email": s_email,
-                    "order_number": s_order or "ORD-PREVIEW",
-                    "products": s_prods,
-                    "subtotal": s_sub,
-                    "tax": s_tax,
-                    "shipping": s_ship,
-                    "total_cost": s_cost or (s_sub + s_tax + s_ship - s_disc),
-                    "discount": s_disc,
-                }
-                st.session_state["_tpl_preview_html"] = build_html(
-                    _preview_order,
-                    cfg.get("from_name") or "Your VEI Firm",
-                    template=cfg.get("email_html_template") or None,
-                )
-                st.rerun()
-
-    # ─ Bulk ─────────────────────────────────────
-    with tab_bulk:
-        st.markdown("#### Enter multiple orders")
-        st.caption("Type directly in the table. Use the + icon to add rows. Separate multiple products with |")
-
-        _BULK_BASE = pd.DataFrame({
-            "Name":       pd.Series([], dtype=str),
-            "Email":      pd.Series([], dtype=str),
-            "Order #":    pd.Series([], dtype=str),
-            "Products":   pd.Series([], dtype=str),
-            "Subtotal":   pd.Series([], dtype=float),
-            "Discount":   pd.Series([], dtype=float),
-            "Tax":        pd.Series([], dtype=float),
-            "Shipping":   pd.Series([], dtype=float),
-            "Total Cost": pd.Series([], dtype=float),
-        })
-
-        edited = st.data_editor(
-            _BULK_BASE,
-            num_rows="dynamic",
-            width="stretch",
-            key="bulk_editor",
-            column_config={
-                "Name":     st.column_config.TextColumn(width="medium"),
-                "Email":    st.column_config.TextColumn(width="medium"),
-                "Order #":  st.column_config.TextColumn(width="small"),
-                "Products": st.column_config.TextColumn(
-                    width="medium",
-                    help="Separate multiple products with |",
-                ),
-                "Subtotal": st.column_config.NumberColumn(width="small", format="$%.2f"),
-                "Discount": st.column_config.NumberColumn(width="small", format="$%.2f"),
-                "Tax":      st.column_config.NumberColumn(width="small", format="$%.2f"),
-                "Shipping": st.column_config.NumberColumn(width="small", format="$%.2f"),
-                "Total Cost": st.column_config.NumberColumn(width="small", format="$%.2f"),
-            },
-        )
-
-        # Warn about unmatched products across all rows
-        if _catalog_name_lower:
-            _bulk_all_prods: list[str] = []
-            for _, _brow in edited.iterrows():
-                _bpr = str(_brow.get("Products", "")).strip()
-                if _bpr and _bpr not in ("nan", ""):
-                    _bulk_all_prods.extend(split_products(_bpr))
-            _bulk_unmatched = sorted({
-                p for p in _bulk_all_prods
-                if p and not any(p.lower() in cn or cn in p.lower() for cn in _catalog_name_lower)
+                else:
+                    st.error("All fields marked with * are required.")
+        else:
+            st.markdown("#### Enter multiple orders")
+            _BULK_BASE = pd.DataFrame({
+                "Name":       pd.Series([], dtype=str),
+                "Email":      pd.Series([], dtype=str),
+                "Order #":    pd.Series([], dtype=str),
+                "Products":   pd.Series([], dtype=str),
+                "Total Cost": pd.Series([], dtype=float),
             })
-            if _bulk_unmatched:
-                st.warning(
-                    f"No catalog match for: **{', '.join(_bulk_unmatched)}** — "
-                    "product image(s) won't appear in emails. "
-                    "Check spelling or add them in the Products page."
-                )
-
-        col_add, col_clear = st.columns(2)
-        with col_add:
-            if st.button("Add All to Queue", type="primary", width="stretch", key="bulk_add"):
+            edited = st.data_editor(_BULK_BASE, num_rows="dynamic", width="stretch", key="bulk_editor")
+            if st.button("Add All to Queue", type="primary", key="bulk_add"):
                 added = 0
                 for _, row in edited.iterrows():
-                    nm = str(row.get("Name",     "")).strip()
-                    em = str(row.get("Email",    "")).strip()
-                    on = str(row.get("Order #",  "")).strip()
-                    pr = str(row.get("Products", "")).strip()
-                    sb = float(row.get("Subtotal", 0.0) or 0.0)
-                    ds = float(row.get("Discount", 0.0) or 0.0)
-                    tx = float(row.get("Tax", 0.0) or 0.0)
-                    sh = float(row.get("Shipping", 0.0) or 0.0)
-                    co = float(row.get("Total Cost", 0.0) or 0.0)
-                    
-                    if not nm or nm == "nan" or not em or em == "nan" or not pr or pr == "nan" or co <= 0:
-                        continue
-                    # Skip if any of the key fields are missing or zero (optional ones like tax/disc/ship can be 0)
-                    if not on or on == "nan":
-                        continue
-                    if add_to_queue(nm, em, on, pr, sb, tx, sh, co, ds):
-                        added += 1
+                    nm, em, on, pr, co = row["Name"], row["Email"], row["Order #"], row["Products"], row["Total Cost"]
+                    if nm and em and on and pr and co > 0:
+                        if add_to_queue(nm, em, on, pr, 0, 0, 0, co, 0): added += 1
                 if added:
-                    st.toast(f"Added {added} orders to queue.", icon="📋")
                     st.success(f"Added {added} order(s) to the queue.")
-                    if "bulk_editor" in st.session_state:
-                        del st.session_state["bulk_editor"]
-                    time.sleep(0.5)
                     st.rerun()
-                else:
-                    st.warning("No valid rows found. Make sure Name and Email are filled in.")
-
-        with col_clear:
-            if st.button("Clear Table", width="stretch", key="bulk_clear"):
-                if "bulk_editor" in st.session_state:
-                    del st.session_state["bulk_editor"]
-                st.rerun()
 
     # ─ Excel ────────────────────────────────────
     with tab_excel:
         st.markdown("#### Import from VEI Checkout Excel File")
-        st.caption(
-            "Upload an `.xlsx` file from the VEI Checkout system. "
-            "It must contain 'Sales transactions' and 'Sales transaction items' sheets."
-        )
-
         xl_file = st.file_uploader("Choose an Excel file", type=["xlsx"], key="excel_upload")
-
         if st.button("Import Excel", type="primary", key="btn_xl_import"):
-            if not xl_file:
-                st.warning("Upload an Excel file first.")
-            else:
-                with st.spinner("Linking transactions and products..."):
+            if xl_file:
+                with st.spinner("Importing..."):
                     rows, warns = parse_excel_file(xl_file.read())
-                    for w in warns:
-                        st.warning(w)
+                    for w in warns: st.warning(w)
                     if rows:
                         st.session_state.queue.extend(rows)
-                        st.toast(f"Imported {len(rows)} orders.", icon="📊")
-                        st.success(f"Imported {len(rows)} orders from Excel.")
-                        time.sleep(0.5)
+                        st.success(f"Imported {len(rows)} order(s) from Excel.")
                         st.rerun()
                     else:
-                        st.error("No valid orders found in the Excel file.")
-    # ─ CSV ──────────────────────────────────────
-    with tab_csv:
-        st.markdown("#### Import from CSV files")
-        st.caption("Provide both the Transactions and Items CSV files exported from VEI Checkout.")
-
-        c_up1, c_up2 = st.columns(2)
-        with c_up1:
-            tx_csv = st.file_uploader("1. Sales Transactions CSV", type=["csv"], key="tx_csv_sep")
-        with c_up2:
-            items_csv = st.file_uploader("2. Sales Transaction Items CSV", type=["csv"], key="items_csv_sep")
-
-        if st.button("Link and Import CSVs", type="primary", key="btn_csv_duo"):
-            if not tx_csv or not items_csv:
-                st.warning("Upload both CSV files.")
-            else:
-                with st.spinner("Linking data..."):
-                    try:
-                        t_raw = tx_csv.read().decode("utf-8", errors="replace")
-                        i_raw = items_csv.read().decode("utf-8", errors="replace")
-                        rows, warns = parse_multi_csv(t_raw, i_raw)
-                        for w in warns: st.warning(w)
-                        if rows:
-                            st.session_state.queue.extend(rows)
-                            st.toast(f"Imported {len(rows)} orders.", icon="📥")
-                            st.success(f"Imported {len(rows)} linked orders into the queue.")
-                            time.sleep(0.5)
-                            st.rerun()
-                        else:
-                            st.error("No valid linked orders found.")
-                    except Exception as e:
-                        st.error(f"Error reading CSVs: {e}")
+                        st.error("No valid orders found.")
 
     # ─ Email Template ───────────────────────────
     with tab_template:
@@ -4015,41 +3830,52 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
         if not _camp_smtp_email or not _camp_smtp_pass:
             st.warning("Configure your Gmail credentials in **Settings → Email** before sending campaigns.")
 
-        # ── Contacts table (bulk-entry style) ─────────────────────────────
-        st.markdown("**Contacts**")
-        if "camp_contact_ids" not in st.session_state:
-            st.session_state.camp_contact_ids = list(range(3))
-            st.session_state.camp_contact_next = 3
-
-        _CC = [3, 4, 0.45]
-        _cch = st.columns(_CC)
-        for _lbl, _col in zip(["Name", "Email *", ""], _cch):
-            _col.caption(_lbl)
-
-        for _cid in list(st.session_state.camp_contact_ids):
-            _crow = st.columns(_CC)
-            with _crow[0]:
-                st.text_input("name", key=f"cc_name_{_cid}", placeholder="Jane Smith", label_visibility="collapsed")
-            with _crow[1]:
-                st.text_input("email", key=f"cc_email_{_cid}", placeholder="jane@example.com", label_visibility="collapsed")
-            with _crow[2]:
-                if st.button("×", key=f"cc_del_{_cid}", use_container_width=True):
-                    st.session_state.camp_contact_ids.remove(_cid)
-                    st.rerun()
-
-        _cc_btn1, _cc_btn2 = st.columns([1, 4])
-        with _cc_btn1:
-            if st.button("+ Add Row", key="cc_add_row", use_container_width=True):
-                st.session_state.camp_contact_ids.append(st.session_state.camp_contact_next)
-                st.session_state.camp_contact_next += 1
-                st.rerun()
+        # ── Contacts Entry (Bulk/CSV style) ───────────────────────────────
+        st.markdown("**Contacts List**")
+        st.caption("Format: `Name, email@example.com` (one per line).")
+        
+        _camp_contacts_raw = st.text_area(
+            "Contact List",
+            placeholder="Jane Smith, jane@example.com\nJohn Doe, john@veinternational.org",
+            height=180,
+            key="camp_contacts_bulk",
+            label_visibility="collapsed",
+        )
 
         _camp_contacts_parsed = []
-        for _cid in st.session_state.camp_contact_ids:
-            _cnm = str(st.session_state.get(f"cc_name_{_cid}", "")).strip()
-            _cem = str(st.session_state.get(f"cc_email_{_cid}", "")).strip()
-            if _cem and "@" in _cem:
-                _camp_contacts_parsed.append({"name": _cnm or _cem.split("@")[0], "email": _cem})
+        if _camp_contacts_raw.strip():
+            for _line in _camp_contacts_raw.strip().split("\n"):
+                if "," in _line:
+                    _parts = [p.strip() for p in _line.split(",", 1)]
+                    if len(_parts) == 2 and "@" in _parts[1]:
+                        _camp_contacts_parsed.append({"name": _parts[0], "email": _parts[1]})
+                elif "@" in _line:
+                    _em = _line.strip()
+                    _camp_contacts_parsed.append({"name": _em.split("@")[0], "email": _em})
+
+        if _camp_contacts_parsed:
+            st.success(f"Detected {len(_camp_contacts_parsed)} valid contact(s).")
+
+        st.divider()
+
+        # ── AI Template Prompt ──────────────────────────────────────────
+        _camp_ai_prompt = """\
+You are building an HTML email template for a marketing/broadcast campaign.
+Use ONLY these variables (double curly braces, exactly as shown):
+  {{name}}         — recipient's name
+  {{from_name}}    — your VEI firm name
+
+Requirements:
+- Return a COMPLETE HTML document (<!DOCTYPE html> … </html>)
+- Email-safe: inline styles only, no external CSS or JS, table-based layout
+- Mobile-friendly: max content width 600 px, readable on small screens
+- Must include {{name}} for personalization
+
+Design brief: [describe your campaign style here — e.g. "modern and bold, high contrast, blue background with white text, include a 'Shop Now' button style link"]
+"""
+        with st.expander("AI prompt — copy this into any AI to generate a campaign template"):
+            st.code(_camp_ai_prompt, language=None)
+            st.caption("Replace the design brief at the bottom, paste into your AI, then copy the returned HTML back here.")
 
         st.divider()
 
