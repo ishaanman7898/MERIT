@@ -262,6 +262,7 @@ _SECRETS_CREDENTIAL_KEYS = [
     "subject",
     "freeimage_api_key",
     "imghippo_api_key",
+    "app_login_password",
     "privacy_acknowledged",
 ]
 
@@ -369,7 +370,7 @@ def upload_to_freeimage(
     )
 
     body = resp.json()
-    if resp.status_code == 200 and body.get("status_code") == 200:
+    if resp.status_code == 200 and str(body.get("status_code")) == "200":
         return body["image"]["display_url"]
 
     raise RuntimeError(body.get("status_txt") or f"HTTP {resp.status_code}: {resp.text[:120]}")
@@ -1062,6 +1063,23 @@ By clicking **I Agree**, you confirm that you have read and understood the above
     st.stop()
 
 # ─────────────────────────────────────────────
+# Login Gate (Persists via Session State)
+# ─────────────────────────────────────────────
+
+_app_pwd = st.session_state.cfg.get("app_login_password")
+if _app_pwd and not st.session_state.get("authenticated"):
+    st.title("Login to MERIT")
+    st.info("This app is password protected. Enter the password set during configuration.")
+    _in_pwd = st.text_input("Enter Password", type="password", key="login_pwd_input")
+    if st.button("Login", type="primary", key="login_btn"):
+        if _in_pwd == _app_pwd:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+# ─────────────────────────────────────────────
 # Shared helpers
 # ─────────────────────────────────────────────
 
@@ -1603,6 +1621,7 @@ if page == "Get Started":
     _gs_has_img = _has_image_host(cfg)
     _gs_has_smtp = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
     _gs_has_identity = bool(cfg.get("from_name") and cfg.get("subject"))
+    _gs_has_pwd = bool(cfg.get("app_login_password"))
     _gs_has_secrets = False
     try:
         _gs_has_secrets = hasattr(st, "secrets") and "merit" in st.secrets
@@ -1611,41 +1630,41 @@ if page == "Get Started":
 
     st.title("Get Started with MERIT")
     st.caption("MERIT is a product catalog + email order system. Follow the steps below to get fully set up.")
+    
+    st.info("**Device Recommendation:** MERIT runs on **Streamlit**, which often has issues on school-issued Chromebooks. For the best experience, please use your **personal laptop** or your **school-provided VE laptop**.")
+    
+    st.warning("**IMPORTANT:** Once you complete Step 1, **DO NOT REFRESH** your browser. Refreshing early can wipe your temporary settings before they are permanently locked in. Complete all steps to ensure your keys are saved safely.")
+    
+    st.error("**VE Email Requirement:** You **MUST** use your **official VE email address** (e.g. yourcompanyname@veinternational.org) for everything — including Supabase, Gmail SMTP, and Image Hosting signups.")
 
     # ── Step status indicators ────────────────────────────────────────
     _step1_ok = _gs_has_sb
     _step2_ok = _gs_has_img
     _step3_ok = _gs_has_smtp
     _step4_ok = _gs_has_identity
-    _step5_ok = _gs_has_secrets
+    _step5_ok = _gs_has_pwd
+    _step6_ok = _gs_has_secrets
 
     st.markdown("### Setup Checklist")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        if _step1_ok:
-            st.success("Step 1 — Supabase Connected")
-        else:
-            st.error("Step 1 — Connect Supabase (required)")
+        if _step1_ok: st.success("Step 1 — Supabase")
+        else: st.error("Step 1 — Connect")
     with col2:
-        if _step2_ok:
-            st.success("Step 2 — Image Hosting Ready")
-        else:
-            st.warning("Step 2 — Add Image Hosting Key")
+        if _step2_ok: st.success("Step 2 — Images")
+        else: st.warning("Step 2 — Add Key")
     with col3:
-        if _step3_ok:
-            st.success("Step 3 — Email Configured")
-        else:
-            st.warning("Step 3 — Configure Email")
+        if _step3_ok: st.success("Step 3 — Email")
+        else: st.warning("Step 3 — Configure")
     with col4:
-        if _step4_ok:
-            st.success("Step 4 — Sender Identity Set")
-        else:
-            st.warning("Step 4 — Set Sender Identity")
+        if _step4_ok: st.success("Step 4 — Sender")
+        else: st.warning("Step 4 — Identity")
     with col5:
-        if _step5_ok:
-            st.success("Step 5 — Secrets Saved (persists reboots)")
-        else:
-            st.warning("Step 5 — Save Secrets TOML (prevents settings loss)")
+        if _step5_ok: st.success("Step 5 — Password")
+        else: st.warning("Step 5 — Set Pwd")
+    with col6:
+        if _step6_ok: st.success("Step 6 — Secrets")
+        else: st.warning("Step 6 — Save TOML")
 
     st.divider()
 
@@ -1653,37 +1672,27 @@ if page == "Get Started":
     with st.expander("Step 1 — Connect Supabase (REQUIRED)", expanded=not _step1_ok):
         st.markdown("""
 Supabase is **required** for MERIT to work properly. It stores your products and inventory in the cloud
-so your data survives app reboots, and powers the **API Endpoints** page so your website auto-updates.
+so your data survives app reboots.
 
-**Without Supabase:** products are only stored in a local SQLite file that gets wiped every time Streamlit restarts.
-
----
-
-**Step GIF Placeholder**
-
+**IMPORTANT:** When signing up, you **MUST** use your **official VE email address**.
 
 #### 1. Sign up for Supabase
-Go to [supabase.com](https://supabase.com) and click **Sign Up**. Use your email address.
+Go to [supabase.com](https://supabase.com) and click **Sign Up**. Use your VE email (e.g. yourcompanyname@veinternational.org).
 
 ---
 
 #### 2. Create a new project
 
-Once logged in, click the green **New Project** button.
-
-Fill in the form **exactly** like this:
+Once logged in, click the green **New Project** button. Fill in the form **exactly** like this:
 
 | Field | What to enter |
 |---|---|
-| **Organization** | Your email address (already pre-selected — leave it) |
+| **Organization** | Your VE email address (already pre-selected) |
 | **Project name** | Your **VEI firm name** (e.g. `BluePeak Ventures`) |
-| **Database password** | Make up your own password — **do NOT use "Generate"**. Use something you will remember, like `BluePeak2024!`. Write it down. |
-| **Region** | Pick the region **closest to where you are** (e.g. if you are in the US East, pick `East US (North Virginia)`) |
-| **Security options** | Leave at default — do not change anything here |
+| **Database password** | Make up your own password — **do NOT use "Generate"**. Write it down. |
+| **Region** | Pick the region **closest to where you are** |
 
-Click **Create new project** and wait about 60 seconds while it provisions. The spinning icon will go away when it is ready.
-
-> **Important:** Supabase free projects **pause after 1 week of no activity**. If you get a connection error, log back into supabase.com and click **Restore project** — it takes about 30 seconds to wake up.
+Click **Create new project** and wait about 60 seconds while it provisions.
 
 ---
 
@@ -1691,127 +1700,94 @@ Click **Create new project** and wait about 60 seconds while it provisions. The 
 
 Once the project is ready:
 
-1. Click the green **Connect** button at the **top right** of your project dashboard
-2. A dialog opens — scroll down and click the **Session Pooler** tab
-   *(do NOT use "Direct connection" — that uses IPv6 which many networks block)*
-3. Scroll down to **Connection string**
-4. Copy the URL — it looks like:
+1. Click the green **Connect** button at the **top right** of your project dashboard.
+2. A dialog opens — find where it says **Direct connection string** and make sure you are on that tab.
+3. Once in that tab, scroll down to **Connection method** and ensure **Session pooler** is selected.
+4. Scroll down and copy your **Connection string**. It looks like:
    `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres`
 
 ---
 
 #### 4. Connect MERIT to Supabase
 
-Go to **Settings → Database Connections** (use the left sidebar) and paste:
-- **Connection String** — the `postgresql://...` URL you just copied
-- **Database Password** — the password you made up in step 2 (this replaces `[YOUR-PASSWORD]`)
-
-Click **Test Connection** to verify, then click **Setup Tables** to create all required tables.
-
-Once connected, the Step 1 indicator above turns green.
+Go to **Settings → Database Connections** (use the left sidebar) and paste your URL and password. Click **Test Connection**, then click **Setup Tables**.
         """)
 
     # ── Step 2: Image Hosting ─────────────────────────────────────────
     with st.expander("Step 2 — Set Up Image Hosting", expanded=not _step2_ok and _step1_ok):
         st.markdown("""
-Product images need to be hosted online so they show up in emails and on your website.
-MERIT supports two **free** image hosting services — pick one:
+Product images need to be hosted online. MERIT supports two **free** services — pick one:
 
----
-
-**Step GIF Placeholder**
-
+**Note:** Use your **official VE email** when signing up.
 
 #### Option A ── Freeimage.host (recommended)
-1. Go to [freeimage.host](https://freeimage.host) → click **API** (top menu) → sign up or log in
-2. After logging in, go back to the **API** page and copy your **API key**
-3. In MERIT → **Settings → Image Hosting**, paste the key into **Freeimage.host API Key**
+1. Go to [freeimage.host](https://freeimage.host) and sign in.
+2. Click the **top-left menu** (three lines) → select **API**.
+3. Copy your **API key** from the API page.
+4. In MERIT → **Settings → Image Hosting**, paste the key.
 
 #### Option B — Imghippo
-1. Go to [imghippo.com](https://imghippo.com) → sign up for a free account
-2. After signing up, go directly to your API keys page: [imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys)
-3. Complete the API access form (5 quick steps):
-   - **Step 1:** Select *Website/Web Application*
-   - **Step 2:** Select *Less than 1,000*
-   - **Step 3:** Select *Image upload and sharing*
-   - **Step 4:** Skip (optional)
-   - **Step 5:** Select *Yes, I agree*
-4. Copy the generated **API Version 1** key
-5. In MERIT → **Settings → Image Hosting**, paste the key into **Imghippo API Key**
-
----
-
-You only need **one** of the two keys. Once a key is saved, MERIT automatically uploads and
-compresses product images whenever you add or edit a product.
-
-Once a key is saved, the Step 2 indicator above turns green.
+1. Go to [imghippo.com](https://imghippo.com) → sign up for a free account.
+2. Go to your API keys page: [imghippo.com/settings?tab=api-keys](https://www.imghippo.com/settings?tab=api-keys).
+3. Copy the generated **API Version 1** key and paste it into **Settings → Image Hosting**.
         """)
 
     # ── Step 3: Email ────────────────────────────────────────────────
     with st.expander("Step 3 — Configure Gmail SMTP", expanded=not _step3_ok and _step2_ok):
         st.markdown("""
-MERIT sends order emails via your **VEI Google (Gmail) account**. To do this safely,
-Google requires you to generate a special **App Password** instead of using your normal password.
-
-**Step GIF Placeholder**
-
+MERIT sends order emails via your **official VE Gmail account**. 
 
 #### How to set up:
-1. Go to [myaccount.google.com](https://myaccount.google.com) and sign in
-2. Click **Security** in the left sidebar
-3. Under *How you sign in to Google*, confirm **2-Step Verification** is **On** — turn it on if not
-4. Search for **App passwords** at the top of the page and click the result
-5. Under *App name*, type `MERIT Email` then click **Create**
-6. Google shows a **16-character password** (e.g. `abcd efgh ijkl mnop`) — copy it now
-7. In MERIT → **Settings → Email**, fill in:
-   - **Gmail Address**: your Gmail address (e.g. `yourname@gmail.com`)
-   - **App Password**: the 16-character password — spaces are fine, MERIT strips them automatically
-
-Fields auto-save as you type. Once both fields are filled, the Step 3 indicator above turns green.
+1. Go to [myaccount.google.com](https://myaccount.google.com) and sign in with your **VE email** (e.g. yourcompanyname@veinternational.org).
+2. Click **Security** and ensure **2-Step Verification** is **On**.
+3. Search for **App passwords** at the top of the page.
+4. Create a new app password named `MERIT Email`.
+5. Copy the **16-character password** Google shows you.
+6. In MERIT → **Settings → Email**, paste your VE Gmail address and the App Password.
         """)
 
     # ── Step 4: Sender Identity ───────────────────────────────────────
     with st.expander("Step 4 — Set Sender Identity", expanded=not _step4_ok and _step3_ok):
         st.markdown("""
-Sender Identity controls **who the email appears to come from** in the recipient's inbox.
-This is separate from the Gmail credentials — it's the display name and subject line your customers see.
-
-**Step GIF Placeholder**
-
+Sender Identity controls **who the email appears to come from**.
 
 #### How to set up:
-1. In MERIT → **Settings → Email**, scroll to the **Sender Identity** section and fill in:
-   - **From Name**: your VEI firm name exactly as it appears in VEI (e.g. `Acme VEI`)
-   - **Default Subject Line**: `Your order is here` (or customise as you like)
-     - You can use `{order_number}` in the subject to insert the customer's order number automatically
-2. Fields auto-save as you type — no save button needed
-
-> **Tip:** Ask your firm coordinator for the exact firm name if you're unsure.
-
-Once both fields are filled, the Step 4 indicator above turns green.
+1. In MERIT → **Settings → Email**, scroll to **Sender Identity**:
+   - **From Name**: Your VEI firm name (e.g. `Acme VEI`).
+   - **Default Subject Line**: `Your order from {from_name}`.
         """)
 
-    # ── Step 5: Streamlit Secrets ────────────────────────────────────
-    with st.expander("Step 5 — Save Secrets TOML (prevents settings loss on reboot)", expanded=not _step5_ok and _step4_ok):
+    # ── Step 5: App Login Password ────────────────────────────────────
+    with st.expander("Step 5 — Set App Login Password", expanded=not _step5_ok and _step4_ok):
         st.markdown("""
-**Why is this needed?**
-Streamlit Cloud restarts your app container periodically. When it does, any files written to disk
-(including `config.json`) are wiped. Your settings disappear.
+### **Step 5: Protect your App**
+Set a password to prevent unauthorized users from accessing your MERIT dashboard.
 
-**The fix:** Streamlit has a built-in **Secrets** store that persists across reboots. You paste
-your credentials there once, and MERIT reads from it automatically on every startup.
+#### How to set up:
+1. In MERIT → **Settings**, scroll to **Step 5 — App Login Password**.
+2. Type in a secure password.
+3. This password will be required every time you open the app (after you complete Step 6).
+        """)
 
-**Step GIF Placeholder**
+    # ── Step 6: Streamlit Secrets ────────────────────────────────────
+    with st.expander("Step 6 — Save Secrets TOML (The Final Step: Permanently Save Settings)", expanded=not _step6_ok and _step5_ok):
+        st.markdown("""
+### **Step 6: Lock in your Settings**
 
+#### **What is TOML?**
+TOML is a simple configuration format. Think of it like a **"Save File"** for your app.
 
-#### How to save your secrets:
-1. Go to **Settings → Secrets TOML** in MERIT and copy the generated TOML block
-2. Click **Manage app** in the bottom-right corner of your Streamlit app
-3. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
-4. Paste the TOML → click **Save**
-5. Streamlit reboots the app — your settings persist forever
+#### **Why do I need this?**
+Streamlit Cloud "forgets" everything when it reboots. By saving your credentials as **Secrets**, you're making sure MERIT remembers your database, email, and hosting keys forever.
 
-Once saved, the Step 5 indicator above turns green and **Get Started disappears from the sidebar**.
+#### **How to Save your Secrets:**
+1.  **Go to Settings → Step 6: Secrets TOML** (at the very bottom).
+2.  **Copy the code block** you find there.
+3.  Click **Manage app** (bottom-right) → **⋮ (three dots)** → **Settings** → **Secrets**.
+4.  **Paste your code** into the text box and click **Save**.
+5.  The app will reboot, and you're done! Your settings are now permanent.
+
+Once saved, the setup checklist above turns green and **Get Started disappears from the sidebar**.
         """)
 
     st.divider()
@@ -1845,7 +1821,7 @@ elif page == "Products":
     _has_cloud_db = _has_supabase(cfg)
     if not _has_cloud_db:
         st.warning(
-            "⚠️ **Supabase not configured.** Products are only saved locally to `data.db` on this machine. "
+            "**Supabase not configured.** Products are only saved locally to `data.db` on this machine. "
             "If this computer is lost or the app is redeployed, all product and inventory data will be gone. "
             "Go to **Settings → Database** to connect Supabase. "
             "Supabase also powers the **API Endpoints** page so your website auto-updates when you change products here."
@@ -1891,13 +1867,13 @@ elif page == "Products":
                         st.markdown("<div style='width:80px;height:80px;background:#f4f4f5;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:11px;'>No image</div>", unsafe_allow_html=True)
                 with _c_txt:
                     _store_active = prod.get("active", True)
-                    _store_badge = "🟢 In Store" if _store_active else "🔴 Out of Store"
+                    _store_badge = "In Store" if _store_active else "Out of Store"
                     st.markdown(f"**{_name}**  ·  {_store_badge}")
                     st.caption(f"`{_sku}`  ·  {prod.get('category','General')}  ·  ${prod.get('price',0):.2f}  ·  Stock: {prod.get('stock_left',0)}")
                     if prod.get("description"):
-                        st.caption(f"📝 {prod['description'][:120]}")
+                        st.caption(f"{prod['description'][:120]}")
                     if prod.get("buy_button_url"):
-                        st.caption(f"🛒 [Buy Button]({prod['buy_button_url']})")
+                        st.caption(f"[Buy Button]({prod['buy_button_url']})")
                 
                 with _c_act:
                     with st.popover("Add Image", width="stretch"):
@@ -1920,7 +1896,7 @@ elif page == "Products":
                                         cfg["products"] = _cfg_prods
                                         save_config(cfg)
                                         st.session_state.cfg = cfg
-                                        st.toast("Image added.", icon="✅")
+                                        st.toast("Image added.", icon=None)
                                         _clear_data_caches()
                                         time.sleep(0.5)
                                         st.rerun()
@@ -2002,13 +1978,13 @@ elif page == "Products":
                     }
                     ok, saved_to = save_product_to_db(product, cfg)
                     if not ok:
-                        st.toast("Something went wrong. Please try again.", icon="❌")
+                        st.toast("Something went wrong. Please try again.", icon=None)
                     _cp = cfg.get("products", [])
                     cfg["products"] = [p for p in _cp if p.get("sku") != product["sku"]]
                     cfg["products"].append(product)
                     save_config(cfg)
                     st.session_state.cfg = cfg
-                    st.toast("Product added successfully.", icon="✅")
+                    st.toast("Product added successfully.", icon=None)
                     st.success(f"**{product['item_name']}** added · Synced to: {saved_to}")
                     _clear_data_caches()
                     time.sleep(0.5)
@@ -2084,7 +2060,7 @@ elif page == "Products":
                     save_config(cfg)
                     st.session_state.cfg = cfg
                     st.session_state.pb_ids, st.session_state.pb_next = list(range(4)), 4
-                    st.toast(f"Added {added} products.", icon="✅")
+                    st.toast(f"Added {added} products.", icon=None)
                     st.success(f"Successfully added {added} products.")
                     _clear_data_caches()
                     time.sleep(0.5)
@@ -2174,13 +2150,13 @@ elif page == "Products":
                                 "active":         _e_store == "In Store",
                             }
                             _ok, _msg = save_product_to_db(_upd, cfg)
-                            if not _ok: st.toast("Error saving to database.", icon="❌")
+                            if not _ok: st.toast("Error saving to database.", icon=None)
                             _cp = cfg.get("products", [])
                             cfg["products"] = [_upd if p.get("sku") == _edit_sku else p for p in _cp]
                             if not any(p.get("sku") == _edit_sku for p in _cp): cfg["products"].append(_upd)
                             save_config(cfg)
                             st.session_state.cfg = cfg
-                            st.toast("Product updated.", icon="✅")
+                            st.toast("Product updated.", icon=None)
                             _clear_data_caches()
                             time.sleep(0.5)
                             st.rerun()
@@ -2204,7 +2180,7 @@ elif page == "Products":
                         cfg["products"] = [p for p in cfg.get("products", []) if p.get("sku") not in _bd_selected]
                         save_config(cfg)
                         st.session_state.cfg = cfg
-                        st.toast(f"Deleted {len(_bd_selected)} items.", icon="✅")
+                        st.toast(f"Deleted {len(_bd_selected)} items.", icon=None)
                         _clear_data_caches()
                         time.sleep(0.5)
                         st.rerun()
@@ -2299,7 +2275,7 @@ elif page == "Inventory":
                         if _has_sb_inv: adjust_inventory_supabase(_asku, _adelta, cfg)
                         _adj_applied += 1
                     if _adj_applied:
-                        st.toast("Stock updated successfully.", icon="✅")
+                        st.toast("Stock updated successfully.", icon=None)
                         st.success(f"Applied {_adj_applied} adjustment(s) · {' + '.join(_sync_targets)}")
                         _clear_data_caches()
                         time.sleep(0.5)
@@ -2358,9 +2334,9 @@ elif page == "Inventory":
                             else:
                                 ok, _am = adjust_inventory_sqlite(_psku, int(_delta_val))
                                 if not ok:
-                                    st.toast("Something went wrong. Please try again.", icon="❌")
+                                    st.toast("Something went wrong. Please try again.", icon=None)
                                 if _has_sb_inv: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
-                                st.toast(f"Stock updated: {_pname}", icon="✅")
+                                st.toast(f"Stock updated: {_pname}", icon=None)
                                 _clear_data_caches()
                                 time.sleep(0.5)
                                 st.rerun()
@@ -2637,7 +2613,7 @@ elif page == "Settings":
                         timeout=20,
                     )
                     _fi_body = _fi_resp.json() if _fi_resp.content else {}
-                    if _fi_resp.status_code == 200 and _fi_body.get("status_code") == 200:
+                    if _fi_resp.status_code == 200 and str(_fi_body.get("status_code")) == "200":
                         st.session_state["_fi_test_result"] = ("ok", "Freeimage.host key verified.")
                     else:
                         _fi_err = str(_fi_body.get("status_txt") or f"HTTP {_fi_resp.status_code}")[:120]
@@ -2698,6 +2674,9 @@ elif page == "Settings":
                 st.warning(_ihr[1])
             else:
                 st.error(f"Key test failed: {_ihr[1]}")
+ 
+    if inp_freeimage_key.strip() or inp_imgbb_key.strip():
+        st.success("Image hosting configuration saved.")
 
     # ── Step 3: Gmail SMTP ───────────────────────────────────────────
     st.divider()
@@ -2743,6 +2722,9 @@ elif page == "Settings":
             st.success("Gmail connected successfully.")
         else:
             st.error(f"Connection failed: {_smr[1]}")
+ 
+    if inp_smtp_email.strip() and inp_smtp_pass.strip():
+        st.success("Gmail SMTP configuration saved.")
 
     # ── Step 4: Sender Identity ──────────────────────────────────────
     st.divider()
@@ -2765,26 +2747,45 @@ elif page == "Settings":
             key="_cfg_subject",
             on_change=_auto_save_settings,
         )
+ 
+    if inp_from_name.strip() and inp_subject.strip():
+        st.success("Sender Identity configured.")
 
-    # ── Step 5: Secrets TOML ─────────────────────────────────────────
+    # ── Step 5: App Login Password ───────────────────────────────────
     st.divider()
-    st.subheader("Step 5 — Secrets TOML (Last Step of Get Started)")
+    st.subheader("Step 5 — App Login Password")
+    st.info("Set a password to protect your MERIT app from unauthorized access.")
+    inp_app_pwd = st.text_input(
+        "Set App Login Password",
+        type="password",
+        placeholder="Enter a password",
+        help="This password will be required to access MERIT after setup is complete.",
+        key="_cfg_app_login_password",
+        on_change=_auto_save_settings,
+    )
+ 
+    if inp_app_pwd.strip():
+        st.success("App Login Password set.")
+
+    # ── Step 6: Secrets TOML ─────────────────────────────────────────
+    st.divider()
+    st.subheader("Step 6 — Secrets TOML (Permanently Save Settings)")
     st.warning(
-        "**Complete Steps 1–4 above before doing this.** "
-        "This step saves all your credentials into Streamlit's secrets store so they survive app reboots."
+        "**Complete Steps 1–5 first.** "
+        "This final step 'locks in' your credentials so they aren't lost when the app reboots."
     )
     st.markdown("""
-Streamlit Cloud wipes the local filesystem on every reboot, so `config.json` disappears.
-**Fix this in one step:** copy the TOML below and paste it into Streamlit's built-in secrets store.
-MERIT reads from `st.secrets` automatically on startup — your settings will survive reboots forever.
+### **What is TOML & Why use it?**
+Streamlit Cloud restarts your app periodically and wipes any local files. **TOML** is a simple text format used by Streamlit to store **Secrets** safely. By pasting your settings here, they will survive reboots forever.
 
-**How to paste it:**
-1. Click **Manage app** in the bottom-right corner of your Streamlit app
-2. Click the **⋮ three-dot menu** → **Settings** → **Secrets**
-3. Paste the TOML below into the editor → click **Save**
-4. Streamlit reboots the app with your secrets loaded
+### **How to save your settings:**
+1.  **Copy the TOML code block below.** It contains all the keys you entered in the previous steps.
+2.  Click **Manage app** in the bottom-right corner of your browser.
+3.  Click the **⋮ (three dots)** menu → **Settings** → **Secrets**.
+4.  **Paste the code** into the text area and click **Save**.
+5.  Streamlit will reboot your app, and your settings will be permanent!
 
-*If running locally:* save the TOML to `.streamlit/secrets.toml` in the project folder.
+*If running locally:* Create a folder named `.streamlit` and save this text as a file named `secrets.toml` inside it.
     """)
 
     _toml_cfg = st.session_state.cfg
@@ -2801,7 +2802,7 @@ MERIT reads from `st.secrets` automatically on startup — your settings will su
 
     _has_toml_data = any(_toml_cfg.get(k) for k in _SECRETS_CREDENTIAL_KEYS)
     if not _has_toml_data:
-        st.info("Fill in Steps 1–4 above first, then come back here to generate your TOML.")
+        st.info("Fill in Steps 1–5 above first, then come back here to generate your TOML.")
 
     _gs_secrets_active = False
     try:
@@ -4175,7 +4176,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
             if st.button("Clear All", key="clear_queue", width="stretch"):
                 with st.spinner("Clearing queue..."):
                     st.session_state.queue = []
-                    st.toast("Queue cleared.", icon="🧹")
+                    st.toast("Queue cleared.", icon=None)
                     time.sleep(0.5)
                     st.rerun()
 
@@ -4203,12 +4204,12 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                     unsafe_allow_html=True,
                 )
                 if unmatched:
-                    st.caption(f"⚠️ Unmatched: {', '.join(unmatched)}")
+                    st.caption(f"Unmatched: {', '.join(unmatched)}")
             with row_r:
                 if st.button("Delete", key=f"del_{i}", width="stretch"):
                     with st.spinner("Deleting..."):
                         st.session_state.queue.pop(i)
-                        st.toast("Order removed.", icon="🗑️")
+                        st.toast("Order removed.", icon=None)
                         time.sleep(0.5)
                         st.rerun()
             st.divider()
@@ -4329,7 +4330,7 @@ Design brief: [describe your style here — e.g. "clean and minimal, brand color
                 st.warning(f"{sent_n} sent, {failed_n} failed. See the results table above.")
 
             st.session_state.queue    = []
-            st.toast("All emails sent!", icon="🚀")
+            st.toast("All emails sent!", icon=None)
             time.sleep(1)
             st.rerun()
 

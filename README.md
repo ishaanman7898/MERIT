@@ -1,6 +1,6 @@
 # MERIT — Mass Email and Inventory Tool
 
-MERIT is the definitive productivity tool for Virtual Enterprise International (VEI) firms. Automate order confirmations, manage a professional product catalog, and track live inventory from a single dashboard. No coding or complex spreadsheets required.
+MERIT is the definitive productivity tool for Virtual Enterprise International (VEI) firms. Automate order confirmations, manage a professional product catalog, and track live inventory from a single dashboard. While no coding is required, users should have a general technical understanding of database operations to effectively work this system.
 
 [Documentation](#getting-started) • [API Reference](#api-endpoints)
 
@@ -10,9 +10,16 @@ MERIT is the definitive productivity tool for Virtual Enterprise International (
 
 - **Bulk Emailing**: Send personalized confirmation emails to hundreds of customers in seconds.
 - **Inventory Sync**: Stock levels deduct automatically when order emails are sent.
-- **Image Hosting**: Built-in integration with FreeImage and Imghippo. Supports multiple images per product — all stored, first image used in emails.
+- **Image Hosting**: Built-in integration with FreeImage and Imghippo. Supports multiple images per product.
+- **App Security**: Protect your MERIT dashboard with a custom login password.
 - **Cloud Powered**: Supabase integration ensures your data is secure and synchronized.
 - **Excel Import**: Support for VEI Checkout Excel exports to eliminate manual data entry.
+
+---
+
+## Hardware Recommendations
+
+MERIT runs on **Streamlit**, which often has performance and storage issues on school-issued Chromebooks. For the best setup experience, please use a **personal laptop** or a **school-provided VE laptop** rather than a Chromebook.
 
 ---
 
@@ -71,12 +78,21 @@ MERIT sends emails through your firm's Gmail account. An App Password is require
 
 ---
 
-### 5. Save Your Settings (Prevents Settings Loss on Restart)
+### 5. Set App Login Password
+Protect your dashboard from unauthorized changes.
+
+1. In the MERIT Settings, navigate to Step 5.
+2. Enter a secure password that your firm will use to log in.
+3. This password will be required every time the app is opened once setup is finalized.
+
+---
+
+### 6. Save Your Settings (The Final Step)
 Streamlit Cloud restarts your app periodically and wipes any saved files. To keep your settings:
 
-1. After completing steps 2-4 in the MERIT app, go to **Settings → Secrets TOML** and copy the generated block.
+1. After completing steps 2-5 in the MERIT app, go to **Settings → Secrets TOML** and copy the generated block.
 2. In Streamlit Cloud, open your app → click **Manage app** (bottom-right) → **Settings** → **Secrets**.
-3. Paste the TOML block and click **Save**. Your credentials are now safe across restarts.
+3. Paste the TOML block and click **Save**. Your credentials and login password are now safe across restarts.
 
 ---
 
@@ -107,7 +123,7 @@ MERIT is designed with data privacy as a core principle:
 ## Frequently Asked Questions
 
 **Q: Is coding knowledge required?**  
-A: No coding is required. The setup involves standard copy and paste operations for configuration keys.
+A: No coding is required, but you should have some general technical knowledge of how databases operate in order to work this system. The setup involves copy and paste operations for configuration keys.
 
 **Q: Can multiple users access the system?**  
 A: Yes. Once Supabase is connected, all firm members can manage inventory and send emails simultaneously.
