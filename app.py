@@ -128,6 +128,7 @@ def _init_sqlite():
             item_name  TEXT NOT NULL,
             category   TEXT NOT NULL DEFAULT '',
             price      REAL NOT NULL DEFAULT 0.0,
+            unit_cost  REAL NOT NULL DEFAULT 0.0,
             stock_left INTEGER NOT NULL DEFAULT 0,
             status     TEXT NOT NULL DEFAULT 'In stock',
             image_url  TEXT NOT NULL DEFAULT 'N/A',
@@ -156,7 +157,8 @@ def _init_sqlite():
             email         TEXT NOT NULL UNIQUE,
             full_name     TEXT NOT NULL DEFAULT '',
             role          TEXT NOT NULL DEFAULT 'staff',
-            password_hash TEXT NOT NULL,
+            password_hash TEXT NOT NULL DEFAULT '',
+            invite_token  TEXT,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS roles (
@@ -217,6 +219,16 @@ def _init_sqlite():
         conn.commit()
     except Exception: pass
 
+    # Migration for users table (add invite_token)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(users)")
+        _user_cols = [r[1] for r in cur.fetchall()]
+        if "invite_token" not in _user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN invite_token TEXT")
+            conn.commit()
+    except Exception: pass
+
     conn.close()
 
 _init_sqlite()
@@ -241,19 +253,19 @@ def _parse_product_qty(pname: str) -> tuple:
 # Role-based access control
 # ─────────────────────────────────────────────
 
-_ALL_PAGES = ["Mass Email", "Products", "Inventory", "Settings", "API Endpoints"]
+_ALL_PAGES = ["Mass Email", "Products", "Inventory", "Financials", "Settings", "API Endpoints"]
 
 # Fallback role→pages map used before DB is available
 _ROLE_PAGES = {
     "admin":  list(_ALL_PAGES),
-    "staff":  ["Mass Email", "Products", "Inventory"],
-    "viewer": ["Inventory"],
+    "staff":  ["Mass Email", "Products", "Inventory", "Financials"],
+    "viewer": ["Inventory", "Financials"],
 }
 
 _ROLE_LABELS = {
     "admin":  "Admin — full access",
-    "staff":  "Staff — Email, Products, Inventory",
-    "viewer": "Viewer — Inventory only",
+    "staff":  "Staff — Email, Products, Inventory, Financials",
+    "viewer": "Viewer — Inventory & Financials",
 }
 
 
@@ -505,6 +517,133 @@ def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
     return any("failed" not in r for r in results), " · ".join(results)
 
 
+def create_user_with_invite(email: str, full_name: str, role: str, cfg: dict) -> tuple[bool, str, str]:
+    """Create a user without a password via invite link. Returns (ok, message, invite_token)."""
+    token = hashlib.sha256(
+        f"{email}{time.time()}{_os.urandom(16).hex()}".encode()
+    ).hexdigest()[:48]
+    placeholder_hash = f"INVITE_PENDING:{token}"
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "INSERT INTO users (email, full_name, role, password_hash, invite_token) VALUES (?, ?, ?, ?, ?)",
+            (email.lower().strip(), full_name.strip(), role, placeholder_hash, token)
+        )
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO users (email, full_name, role, password_hash, invite_token) VALUES (%s, %s, %s, %s, %s)",
+                        (email.lower().strip(), full_name.strip(), role, placeholder_hash, token)
+                    )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    ok = any("failed" not in r for r in results)
+    return ok, " · ".join(results), token if ok else ""
+
+
+def validate_invite_token(token: str, cfg: dict) -> dict | None:
+    """Return user info dict if invite token is valid and unused, else None."""
+    if not token:
+        return None
+    _sb_cs = _get_effective_supabase_conn_str(cfg)
+    if _sb_cs:
+        try:
+            conn = _psycopg2_connect(_sb_cs)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT email, full_name, role FROM users WHERE invite_token=%s", (token,)
+                )
+                row = cur.fetchone()
+            conn.close()
+            if row:
+                return {"email": row[0], "full_name": row[1], "role": row[2]}
+        except Exception:
+            pass
+    try:
+        conn = _get_sqlite_conn()
+        row = conn.execute(
+            "SELECT email, full_name, role FROM users WHERE invite_token=?", (token,)
+        ).fetchone()
+        conn.close()
+        if row:
+            return {"email": row["email"], "full_name": row["full_name"], "role": row["role"]}
+    except Exception:
+        pass
+    return None
+
+
+def complete_invite(token: str, new_password: str, cfg: dict) -> tuple[bool, str]:
+    """Set password and clear invite token, completing the new-user onboarding."""
+    pw_hash = _hash_password(new_password)
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute(
+            "UPDATE users SET password_hash=?, invite_token=NULL WHERE invite_token=?",
+            (pw_hash, token)
+        )
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET password_hash=%s, invite_token=NULL WHERE invite_token=%s",
+                        (pw_hash, token)
+                    )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    return any("failed" not in r for r in results), " · ".join(results)
+
+
+def generate_new_invite_token(email: str, cfg: dict) -> tuple[bool, str]:
+    """Regenerate an invite token for an existing user. Returns (ok, token)."""
+    token = hashlib.sha256(
+        f"{email}{time.time()}{_os.urandom(16).hex()}".encode()
+    ).hexdigest()[:48]
+    results = []
+    try:
+        conn = _get_sqlite_conn()
+        conn.execute("UPDATE users SET invite_token=? WHERE email=?", (token, email.lower().strip()))
+        conn.commit()
+        conn.close()
+        results.append("SQLite")
+    except Exception as exc:
+        results.append(f"SQLite failed: {exc}")
+    conn_sb = _get_supabase_conn(cfg)
+    if conn_sb is not None:
+        try:
+            with conn_sb:
+                with conn_sb.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET invite_token=%s WHERE email=%s", (token, email.lower().strip())
+                    )
+            conn_sb.close()
+            results.append("Supabase")
+        except Exception as exc:
+            results.append(f"Supabase failed: {exc}")
+    ok = any("failed" not in r for r in results)
+    return ok, token if ok else ""
+
+
 def update_user_role_all_dbs(email: str, new_role: str, cfg: dict) -> tuple[bool, str]:
     """Update a user's role in both SQLite and Supabase."""
     results = []
@@ -714,9 +853,18 @@ CREATE TABLE IF NOT EXISTS users (
     email         TEXT           NOT NULL UNIQUE,
     full_name     TEXT           NOT NULL DEFAULT '',
     role          TEXT           NOT NULL DEFAULT 'staff',
-    password_hash TEXT           NOT NULL,
+    password_hash TEXT           NOT NULL DEFAULT '',
+    invite_token  TEXT,
     created_at    TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
+
+-- Migration for existing users (add invite_token column)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='invite_token') THEN
+    ALTER TABLE users ADD COLUMN invite_token TEXT;
+  END IF;
+END $$;
 
 -- ── Roles table (custom role definitions) ────────────────────────────────
 CREATE TABLE IF NOT EXISTS roles (
@@ -758,7 +906,6 @@ _SECRETS_CREDENTIAL_KEYS = [
     "subject",
     "freeimage_api_key",
     "imghippo_api_key",
-    "app_login_password",
     "privacy_acknowledged",
 ]
 
@@ -1739,6 +1886,58 @@ try:
 except Exception:
     pass
 
+# ── Invite Link Handler ────────────────────────────────────────────────────
+# When ?invite=TOKEN is in the URL, show the Set Password page instead of login.
+_invite_token_param = st.query_params.get("invite", "")
+if _invite_token_param:
+    _invite_user_info = validate_invite_token(_invite_token_param, _auth_cfg)
+    st.markdown("""
+        <style>[data-testid="stSidebar"] { display: none; }</style>
+    """, unsafe_allow_html=True)
+    _inv_c1, _inv_c2, _inv_c3 = st.columns([1, 2, 1])
+    with _inv_c2:
+        _firm_li = _auth_cfg.get("from_name", "MERIT").strip()
+        if _invite_user_info:
+            st.markdown(
+                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
+                f'{_firm_li if _firm_li else "MERIT"}</h1>'
+                f'<p style="text-align:center;color:#888;margin-bottom:0.4rem">'
+                f'Welcome, {_invite_user_info["full_name"]}!</p>'
+                f'<p style="text-align:center;color:#aaa;font-size:0.9rem;margin-bottom:1.5rem">'
+                f'Create your password to access MERIT.</p>',
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+                st.markdown(f"**Email:** {_invite_user_info['email']}")
+                st.markdown(f"**Role:** {_invite_user_info['role'].capitalize()}")
+                st.divider()
+                _inv_pass  = st.text_input("New Password", type="password", key="inv_pass")
+                _inv_pass2 = st.text_input("Confirm Password", type="password", key="inv_pass2")
+                if st.button("Set Password & Sign In", type="primary", key="inv_btn", use_container_width=True):
+                    if len(_inv_pass) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    elif _inv_pass != _inv_pass2:
+                        st.error("Passwords do not match.")
+                    else:
+                        _inv_ok, _inv_msg = complete_invite(_invite_token_param, _inv_pass, _auth_cfg)
+                        if _inv_ok:
+                            _invite_user_info["pages"] = get_pages_for_role(_invite_user_info["role"], _auth_cfg)
+                            st.session_state["auth_user"] = _invite_user_info
+                            st.session_state["authenticated"] = True
+                            st.query_params.clear()
+                            _fetch_users_cached.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to set password: {_inv_msg}")
+        else:
+            st.markdown(
+                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
+                f'{_firm_li if _firm_li else "MERIT"}</h1>',
+                unsafe_allow_html=True,
+            )
+            st.warning("This invite link is invalid or has already been used. Ask your admin for a new link.")
+    st.stop()
+
 if _has_users and _login_secrets_active:
     # Multi-user email/password auth
     if not st.session_state.get("auth_user"):
@@ -1769,31 +1968,7 @@ if _has_users and _login_secrets_active:
                     else:
                         st.warning("Please enter your email and password.")
         st.stop()
-else:
-    # Legacy single-password fallback — only active once secrets are saved (same rule as multi-user gate)
-    _app_pwd = _auth_cfg.get("app_login_password")
-    if _app_pwd and _login_secrets_active and not st.session_state.get("authenticated"):
-        st.markdown("""
-            <style>[data-testid="stSidebar"] { display: none; }</style>
-        """, unsafe_allow_html=True)
-        _li_c1, _li_c2, _li_c3 = st.columns([1, 2, 1])
-        with _li_c2:
-            _sb_co_pw = _auth_cfg.get("from_name", "MERIT").strip()
-            st.markdown(
-                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
-                f'{"MERIT" if not _sb_co_pw else _sb_co_pw}</h1>'
-                f'<p style="text-align:center;color:#888;margin-bottom:1.5rem">Enter your password to continue</p>',
-                unsafe_allow_html=True,
-            )
-            with st.container(border=True):
-                _in_pwd = st.text_input("Password", type="password", key="login_pwd_input")
-                if st.button("Login", type="primary", key="login_btn", use_container_width=True):
-                    if _in_pwd == _app_pwd:
-                        st.session_state["authenticated"] = True
-                        st.rerun()
-                    else:
-                        st.error("Incorrect password.")
-        st.stop()
+# (No legacy password gate — individual user accounts handle all access control)
 
 # ─────────────────────────────────────────────
 # Shared helpers
@@ -2405,13 +2580,14 @@ if page == "Get Started":
     st.divider()
 
     # ── STEP 1: Users & Custom Roles ─────────────────────────────────
-    with st.expander("Step 1 — Create Users & Roles (Do This First)", expanded=not _step1_ok):
+    with st.expander("Step 1 — Create Your Admin Account (Do This First)", expanded=not _step1_ok):
         st.markdown("""
-Create at least one **Admin** user so your firm members can sign in with their own email and password.
-Users are stored locally on this device first — they get synced to Supabase automatically when you complete Step 2.
+Create at least one **Admin** user so you can sign in after setup is complete.
+
+**After setup is done** (secrets saved + app reboots), go to **Settings → Team** to invite additional
+team members — they receive a shareable link and set their own password, no need to share credentials.
 
 **Roles** control which pages each person can see. The three built-in roles cover most firms.
-You can also create custom roles below with exactly the page permissions you want.
         """)
 
         _gs_roles_df = get_roles_from_db(cfg)
@@ -2618,8 +2794,9 @@ Streamlit Cloud forgets everything on reboot. Saving a **Secrets TOML** makes al
 |---|---|
 | **Mass Email** | Upload CSV orders, send bulk emails, manage templates and campaigns |
 | **Products** | Add, edit, and delete products with images and descriptions |
-| **Inventory** | Overview, Financials, Adjust Stock, Original Stock |
-| **Settings** | All credentials — database, email, image hosting, user management |
+| **Inventory** | Stock overview, adjust stock, and original stock tracking |
+| **Financials** | Revenue overview, ledger, order history, and product revenue breakdowns |
+| **Settings** | All credentials — database, email, image hosting, team management with invite links |
 | **API Endpoints** | Pre-built code to connect your website to the live product database |
     """)
 
@@ -3202,10 +3379,10 @@ elif page == "Inventory":
     except: pass
 
     st.title("Inventory")
-    st.caption("Stock overview, financials, and adjustments — all in one place.")
+    st.caption("Stock overview and adjustments. See the **Financials** page for revenue and ledger tracking.")
 
-    tab_overview, tab_financials, tab_adjust, tab_original, tab_inv_docs = st.tabs(
-        ["Overview", "Financials", "Adjust Stock", "Original Stock", "Documentation"]
+    tab_overview, tab_adjust, tab_original, tab_inv_docs = st.tabs(
+        ["Overview", "Adjust Stock", "Original Stock", "Documentation"]
     )
 
     # Load shared data
@@ -3284,247 +3461,6 @@ elif page == "Inventory":
                 }
             )
             st.caption("To modify stock levels use **Adjust Stock** or **Original Stock** tabs. To edit product details go to the **Products** page.")
-
-    # ── FINANCIALS ──────────────────────────────
-    with tab_financials:
-        # ── Load data ────────────────────────────────────────────────
-        _fin_logs    = load_outbound_logs(cfg)
-        _fin_ledger  = get_financials_from_db(cfg)
-
-        # Parse outbound log revenue
-        _fin_df  = _fin_logs.copy()
-        _ts_col  = "timestamp" if "timestamp" in _fin_df.columns else ("created_at" if "created_at" in _fin_df.columns else None)
-        _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
-        _order_revenue = 0.0
-        _order_count   = 0
-        if _ts_col and _cost_col and not _fin_df.empty:
-            _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
-            _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
-            _fin_df = _fin_df.dropna(subset=["_date"])
-            _order_revenue = float(_fin_df["_cost"].sum())
-            _order_count   = len(_fin_df)
-
-        # Parse ledger totals by category group
-        _led_revenue = 0.0
-        _led_expense = 0.0
-        if not _fin_ledger.empty and "amount" in _fin_ledger.columns:
-            _fin_ledger["_amount"] = pd.to_numeric(_fin_ledger["amount"], errors="coerce").fillna(0)
-            _rev_cats = {"Revenue"}
-            _exp_cats = {"Expense", "Cost of Goods (COGS)", "Marketing", "Payroll", "Operations", "Other"}
-            _led_revenue = float(_fin_ledger[_fin_ledger["category"].isin(_rev_cats)]["_amount"].sum())
-            _led_expense = float(_fin_ledger[_fin_ledger["category"].isin(_exp_cats)]["_amount"].sum())
-
-        _total_revenue_all = _order_revenue + _led_revenue
-        _net_income        = _total_revenue_all - _led_expense
-
-        # ── Radio mode ───────────────────────────────────────────────
-        _fin_mode = st.radio(
-            "Financial View",
-            ["Overview", "Add Entry", "Ledger", "Order Revenue", "Revenue by Product"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="fin_mode_radio",
-        )
-
-        # ════ OVERVIEW ══════════════════════════════════════════════
-        if _fin_mode == "Overview":
-            _fma, _fmb, _fmc, _fmd = st.columns(4)
-            _fma.metric("Total Revenue",       f"${_total_revenue_all:,.2f}")
-            _fmb.metric("Order Revenue",       f"${_order_revenue:,.2f}")
-            _fmc.metric("Ledger Revenue",      f"${_led_revenue:,.2f}")
-            _fmd.metric("Total Expenses",      f"${_led_expense:,.2f}")
-
-            _fme, _fmf, _fmg, _fmh = st.columns(4)
-            _net_color = "normal" if _net_income >= 0 else "inverse"
-            _fme.metric("Net Income",          f"${_net_income:,.2f}", delta=f"{'profit' if _net_income >= 0 else 'loss'}")
-            _fmf.metric("Total Orders",        f"{_order_count:,}")
-            _avg_ord = _order_revenue / _order_count if _order_count else 0
-            _fmg.metric("Avg Order Value",     f"${_avg_ord:,.2f}")
-            _ledger_entries = len(_fin_ledger) if not _fin_ledger.empty else 0
-            _fmh.metric("Ledger Entries",      f"{_ledger_entries:,}")
-
-            if not _fin_df.empty and _ts_col and _cost_col:
-                st.divider()
-                st.subheader("Monthly Revenue (Orders)")
-                _monthly_chart = _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"].sum().reset_index()
-                _monthly_chart.columns = ["Month", "Revenue"]
-                _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
-                st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
-
-            if not _fin_ledger.empty:
-                st.divider()
-                st.subheader("Expenses by Category")
-                _cat_totals = _fin_ledger.groupby("category")["_amount"].sum().reset_index()
-                _cat_totals.columns = ["Category", "Amount ($)"]
-                _cat_totals = _cat_totals.sort_values("Amount ($)", ascending=False)
-                st.bar_chart(_cat_totals.set_index("Category")["Amount ($)"], color="#ef4444")
-
-        # ════ ADD ENTRY ═════════════════════════════════════════════
-        elif _fin_mode == "Add Entry":
-            st.subheader("Add Financial Entry")
-            _ae1, _ae2 = st.columns(2)
-            with _ae1:
-                _ae_date = st.date_input("Date", value="today", key="fin_ae_date")
-                _ae_cat  = st.selectbox("Category", _FIN_CATEGORIES, key="fin_ae_cat")
-            with _ae2:
-                _ae_amt  = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="fin_ae_amt")
-                _ae_desc = st.text_input("Description", placeholder="e.g. Office supplies", key="fin_ae_desc")
-            _ae_notes = st.text_area("Notes (optional)", height=80, key="fin_ae_notes")
-
-            if st.button("Add Entry", type="primary", key="btn_fin_add"):
-                if not _ae_desc.strip():
-                    st.error("Description is required.")
-                elif _ae_amt <= 0:
-                    st.error("Amount must be greater than 0.")
-                else:
-                    _aok, _amsg = add_financial_entry(
-                        str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg
-                    )
-                    if _aok:
-                        st.success(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f} ({_ae_desc.strip()})")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed: {_amsg}")
-
-        # ════ LEDGER ════════════════════════════════════════════════
-        elif _fin_mode == "Ledger":
-            st.subheader("Financial Ledger")
-            st.caption("All manually entered income and expense records. Click a row to edit or delete it.")
-
-            if _fin_ledger.empty:
-                st.info("No entries yet — use **Add Entry** to record income or expenses.")
-            else:
-                _disp_led = _fin_ledger[["id","entry_date","category","description","amount","notes"]].copy()
-                _disp_led = _disp_led.rename(columns={
-                    "id": "ID", "entry_date": "Date", "category": "Category",
-                    "description": "Description", "amount": "Amount ($)", "notes": "Notes"
-                })
-                _disp_led["Amount ($)"] = pd.to_numeric(_disp_led["Amount ($)"], errors="coerce").round(2)
-                st.dataframe(
-                    _disp_led, use_container_width=True, hide_index=True,
-                    column_config={
-                        "Amount ($)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Date":       st.column_config.TextColumn(),
-                    }
-                )
-
-                st.divider()
-                st.subheader("Edit / Delete Entry")
-                _all_ids = list(_fin_ledger["id"].astype(int))
-                _sel_id  = st.selectbox("Select entry ID", _all_ids, format_func=lambda i: f"#{i} — {_fin_ledger[_fin_ledger['id'].astype(int)==i]['description'].values[0] if len(_fin_ledger[_fin_ledger['id'].astype(int)==i]) else i}", key="fin_sel_id")
-                _sel_row = _fin_ledger[_fin_ledger["id"].astype(int) == int(_sel_id)]
-                if not _sel_row.empty:
-                    _sr = _sel_row.iloc[0]
-                    _ed1, _ed2 = st.columns(2)
-                    with _ed1:
-                        _ed_date = st.date_input("Date", value=pd.to_datetime(str(_sr.get("entry_date",""))).date() if _sr.get("entry_date") else None, key="fin_ed_date")
-                        _ed_cat  = st.selectbox("Category", _FIN_CATEGORIES, index=_FIN_CATEGORIES.index(str(_sr.get("category","Expense"))) if str(_sr.get("category","Expense")) in _FIN_CATEGORIES else 0, key="fin_ed_cat")
-                    with _ed2:
-                        _ed_amt  = st.number_input("Amount ($)", value=float(_sr.get("amount", 0) or 0), min_value=0.0, step=0.01, format="%.2f", key="fin_ed_amt")
-                        _ed_desc = st.text_input("Description", value=str(_sr.get("description","")), key="fin_ed_desc")
-                    _ed_notes = st.text_area("Notes", value=str(_sr.get("notes","")), height=80, key="fin_ed_notes")
-
-                    _edc1, _edc2 = st.columns(2)
-                    with _edc1:
-                        if st.button("Save Changes", type="primary", use_container_width=True, key="btn_fin_save"):
-                            _uok, _umsg = update_financial_entry(int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg)
-                            if _uok:
-                                st.success("Entry updated.")
-                                st.rerun()
-                            else:
-                                st.error(f"Failed: {_umsg}")
-                    with _edc2:
-                        if st.button("Delete Entry", type="secondary", use_container_width=True, key="btn_fin_del"):
-                            _dok, _dmsg = delete_financial_entry(int(_sel_id), cfg)
-                            if _dok:
-                                st.toast("Entry deleted.")
-                                st.rerun()
-                            else:
-                                st.error(f"Failed: {_dmsg}")
-
-        # ════ ORDER REVENUE ═════════════════════════════════════════
-        elif _fin_mode == "Order Revenue":
-            st.subheader("Order Revenue — Outbound Email Log")
-            st.caption("Revenue automatically tracked from every order confirmation email sent.")
-            if _fin_df.empty:
-                st.info("No orders sent yet. Revenue is captured automatically when emails are sent from Mass Email.")
-            else:
-                _fin_has_sub  = "subtotal"  in _fin_df.columns
-                _fin_has_tax  = "tax"       in _fin_df.columns
-                _fin_has_ship = "shipping"  in _fin_df.columns
-                _total_sub    = pd.to_numeric(_fin_df.get("subtotal",  0), errors="coerce").fillna(0).sum() if _fin_has_sub  else 0
-                _total_tax    = pd.to_numeric(_fin_df.get("tax",       0), errors="coerce").fillna(0).sum() if _fin_has_tax  else 0
-                _total_ship   = pd.to_numeric(_fin_df.get("shipping",  0), errors="coerce").fillna(0).sum() if _fin_has_ship else 0
-
-                _oa, _ob, _oc, _od = st.columns(4)
-                _oa.metric("Total",    f"${_order_revenue:,.2f}")
-                _ob.metric("Subtotal", f"${_total_sub:,.2f}")
-                _oc.metric("Tax",      f"${_total_tax:,.2f}")
-                _od.metric("Shipping", f"${_total_ship:,.2f}")
-
-                st.divider()
-                _log_disp = _fin_df.copy()
-                _log_rename = {
-                    "recipient_name": "Name", "recipient_email": "Email",
-                    "order_number": "Order #", "products_list": "Products",
-                    "subtotal": "Sub ($)", "tax": "Tax ($)", "shipping": "Ship ($)",
-                    "total_cost": "Total ($)", "timestamp": "Sent At", "created_at": "Sent At"
-                }
-                _log_disp = _log_disp.rename(columns={k: v for k, v in _log_rename.items() if k in _log_disp.columns})
-                _log_cols = ["Sent At", "Name", "Email", "Order #", "Products", "Sub ($)", "Tax ($)", "Ship ($)", "Total ($)"]
-                _log_disp = _log_disp[[c for c in _log_cols if c in _log_disp.columns]]
-                st.dataframe(
-                    _log_disp, use_container_width=True, hide_index=True,
-                    column_config={
-                        "Total ($)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Sub ($)":   st.column_config.NumberColumn(format="$%.2f"),
-                        "Tax ($)":   st.column_config.NumberColumn(format="$%.2f"),
-                        "Ship ($)":  st.column_config.NumberColumn(format="$%.2f"),
-                        "Sent At":   st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
-                        "Products":  st.column_config.TextColumn(width="large"),
-                    }
-                )
-
-        # ════ REVENUE BY PRODUCT ════════════════════════════════════
-        elif _fin_mode == "Revenue by Product":
-            st.subheader("Revenue by Product")
-            st.caption("Calculated from price × quantity across all sent order emails.")
-            _price_lookup: dict = {}
-            if not inv_df.empty and "item_name" in inv_df.columns and "price" in inv_df.columns:
-                for _, _plr in inv_df.iterrows():
-                    _price_lookup[str(_plr["item_name"]).lower().strip()] = float(_plr.get("price", 0) or 0)
-            _prod_revenue: dict[str, float] = {}
-            _prod_units:   dict[str, int]   = {}
-            _prod_orders:  dict[str, int]   = {}
-            _pl_col = "products_list" if "products_list" in _fin_df.columns else None
-            if _pl_col and not _fin_df.empty:
-                for _, _frow in _fin_df.iterrows():
-                    for _pentry in [p.strip() for p in str(_frow.get(_pl_col,"")).split(",") if p.strip()]:
-                        _pname, _pqty = _parse_product_qty(_pentry)
-                        _pkey  = _pname.lower().strip()
-                        _pprice = _price_lookup.get(_pkey, 0.0)
-                        if not _pprice:
-                            for _lk, _lv in _price_lookup.items():
-                                if _pkey in _lk or _lk in _pkey:
-                                    _pprice = _lv; break
-                        _prod_revenue[_pname] = _prod_revenue.get(_pname, 0.0) + _pprice * _pqty
-                        _prod_units[_pname]   = _prod_units.get(_pname, 0) + _pqty
-                        _prod_orders[_pname]  = _prod_orders.get(_pname, 0) + 1
-            if _prod_revenue:
-                _pp_df = pd.DataFrame([
-                    {"Product": p, "Units Sold": _prod_units.get(p,0), "Orders": _prod_orders.get(p,0), "Revenue ($)": round(_prod_revenue.get(p,0.0),2)}
-                    for p in sorted(_prod_revenue, key=_prod_revenue.get, reverse=True)
-                ])
-                st.bar_chart(_pp_df.set_index("Product")["Revenue ($)"], color="#f59e0b")
-                st.dataframe(_pp_df, use_container_width=True, hide_index=True,
-                    column_config={"Revenue ($)": st.column_config.NumberColumn(format="$%.2f")})
-            else:
-                st.info("Product revenue will appear once orders are sent from the Mass Email page.")
-
-        if st.button("Refresh", key="btn_fin_refresh", help="Reload all financial data"):
-            _clear_data_caches()
-            _fetch_financials_cached.clear()
-            st.rerun()
 
     # ── ADJUST STOCK ────────────────────────────
     with tab_adjust:
@@ -3751,16 +3687,9 @@ This prevents overselling and keeps physical inventory in sync with MERIT.
 
 ---
 
-### Financials Tab
+### Financials Page
 
-The **Financials** tab shows complete revenue tracking:
-
-- **Top-line metrics**: Total revenue, orders, average order value, unique customers
-- **Monthly revenue chart**: Visualize revenue trends over time
-- **Revenue per product**: See which products generate the most revenue (price × units sold)
-- **Outbound log**: Full history of every order email sent with timestamps and cost breakdowns
-
-All revenue data comes from the `outbound_logs` table and is stored in both SQLite and Supabase.
+Revenue tracking, the ledger, and order history have moved to the dedicated **Financials** page in the sidebar.
 
 ---
 
@@ -3769,6 +3698,276 @@ All revenue data comes from the `outbound_logs` table and is stored in both SQLi
 - **SQLite (Local):** Primary local database, always active
 - **Supabase (Cloud):** All changes are synced in real-time when connected — recommended for persistence across deployments
         """)
+
+# ═════════════════════════════════════════════
+# FINANCIALS PAGE
+# ═════════════════════════════════════════════
+
+elif page == "Financials":
+    cfg = st.session_state.cfg
+
+    st.title("Financials")
+    st.caption("Revenue overview, ledger, order history, and product-level revenue tracking.")
+
+    # ── Load data ────────────────────────────────────────────────
+    _fin_logs    = load_outbound_logs(cfg)
+    _fin_ledger  = get_financials_from_db(cfg)
+
+    # Parse outbound log revenue
+    _fin_df   = _fin_logs.copy()
+    _ts_col   = "timestamp" if "timestamp" in _fin_df.columns else ("created_at" if "created_at" in _fin_df.columns else None)
+    _cost_col = "total_cost" if "total_cost" in _fin_df.columns else None
+    _order_revenue = 0.0
+    _order_count   = 0
+    if _ts_col and _cost_col and not _fin_df.empty:
+        _fin_df["_date"] = pd.to_datetime(_fin_df[_ts_col], errors="coerce")
+        _fin_df["_cost"] = pd.to_numeric(_fin_df[_cost_col], errors="coerce").fillna(0)
+        _fin_df = _fin_df.dropna(subset=["_date"])
+        _order_revenue = float(_fin_df["_cost"].sum())
+        _order_count   = len(_fin_df)
+
+    # Load inventory for Revenue by Product
+    if "_inv_cache" not in st.session_state:
+        with st.spinner("Loading inventory…"):
+            st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
+    _fin_inv_df = st.session_state["_inv_cache"]
+
+    # Parse ledger totals by category group
+    _led_revenue = 0.0
+    _led_expense = 0.0
+    if not _fin_ledger.empty and "amount" in _fin_ledger.columns:
+        _fin_ledger["_amount"] = pd.to_numeric(_fin_ledger["amount"], errors="coerce").fillna(0)
+        _rev_cats = {"Revenue"}
+        _exp_cats = {"Expense", "Cost of Goods (COGS)", "Marketing", "Payroll", "Operations", "Other"}
+        _led_revenue = float(_fin_ledger[_fin_ledger["category"].isin(_rev_cats)]["_amount"].sum())
+        _led_expense = float(_fin_ledger[_fin_ledger["category"].isin(_exp_cats)]["_amount"].sum())
+
+    _total_revenue_all = _order_revenue + _led_revenue
+    _net_income        = _total_revenue_all - _led_expense
+
+    # ── Radio mode ───────────────────────────────────────────────
+    _fin_mode = st.radio(
+        "Financial View",
+        ["Overview", "Add Entry", "Ledger", "Order Revenue", "Revenue by Product"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="fin_mode_radio",
+    )
+
+    # ════ OVERVIEW ══════════════════════════════════════════════
+    if _fin_mode == "Overview":
+        _fma, _fmb, _fmc, _fmd = st.columns(4)
+        _fma.metric("Total Revenue",   f"${_total_revenue_all:,.2f}")
+        _fmb.metric("Order Revenue",   f"${_order_revenue:,.2f}")
+        _fmc.metric("Ledger Revenue",  f"${_led_revenue:,.2f}")
+        _fmd.metric("Total Expenses",  f"${_led_expense:,.2f}")
+
+        _fme, _fmf, _fmg, _fmh = st.columns(4)
+        _fme.metric("Net Income",      f"${_net_income:,.2f}", delta=f"{'profit' if _net_income >= 0 else 'loss'}")
+        _fmf.metric("Total Orders",    f"{_order_count:,}")
+        _avg_ord = _order_revenue / _order_count if _order_count else 0
+        _fmg.metric("Avg Order Value", f"${_avg_ord:,.2f}")
+        _ledger_entries = len(_fin_ledger) if not _fin_ledger.empty else 0
+        _fmh.metric("Ledger Entries",  f"{_ledger_entries:,}")
+
+        if not _fin_df.empty and _ts_col and _cost_col:
+            st.divider()
+            st.subheader("Monthly Revenue (Orders)")
+            _monthly_chart = _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"].sum().reset_index()
+            _monthly_chart.columns = ["Month", "Revenue"]
+            _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
+            st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
+
+        if not _fin_ledger.empty:
+            st.divider()
+            st.subheader("Expenses by Category")
+            _cat_totals = _fin_ledger.groupby("category")["_amount"].sum().reset_index()
+            _cat_totals.columns = ["Category", "Amount ($)"]
+            _cat_totals = _cat_totals.sort_values("Amount ($)", ascending=False)
+            st.bar_chart(_cat_totals.set_index("Category")["Amount ($)"], color="#ef4444")
+
+    # ════ ADD ENTRY ═════════════════════════════════════════════
+    elif _fin_mode == "Add Entry":
+        st.subheader("Add Financial Entry")
+        _ae1, _ae2 = st.columns(2)
+        with _ae1:
+            _ae_date = st.date_input("Date", value="today", key="fin_ae_date")
+            _ae_cat  = st.selectbox("Category", _FIN_CATEGORIES, key="fin_ae_cat")
+        with _ae2:
+            _ae_amt  = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="fin_ae_amt")
+            _ae_desc = st.text_input("Description", placeholder="e.g. Office supplies", key="fin_ae_desc")
+        _ae_notes = st.text_area("Notes (optional)", height=80, key="fin_ae_notes")
+
+        if st.button("Add Entry", type="primary", key="btn_fin_add"):
+            if not _ae_desc.strip():
+                st.error("Description is required.")
+            elif _ae_amt <= 0:
+                st.error("Amount must be greater than 0.")
+            else:
+                _aok, _amsg = add_financial_entry(
+                    str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg
+                )
+                if _aok:
+                    st.success(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f} ({_ae_desc.strip()})")
+                    _fetch_financials_cached.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Failed: {_amsg}")
+
+    # ════ LEDGER ════════════════════════════════════════════════
+    elif _fin_mode == "Ledger":
+        st.subheader("Financial Ledger")
+        st.caption("All manually entered income and expense records.")
+
+        if _fin_ledger.empty:
+            st.info("No entries yet — use **Add Entry** to record income or expenses.")
+        else:
+            _disp_led = _fin_ledger[["id","entry_date","category","description","amount","notes"]].copy()
+            _disp_led = _disp_led.rename(columns={
+                "id": "ID", "entry_date": "Date", "category": "Category",
+                "description": "Description", "amount": "Amount ($)", "notes": "Notes"
+            })
+            _disp_led["Amount ($)"] = pd.to_numeric(_disp_led["Amount ($)"], errors="coerce").round(2)
+            st.dataframe(
+                _disp_led, use_container_width=True, hide_index=True,
+                column_config={
+                    "Amount ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "Date":       st.column_config.TextColumn(),
+                }
+            )
+
+            st.divider()
+            st.subheader("Edit / Delete Entry")
+            _all_ids = list(_fin_ledger["id"].astype(int))
+            _sel_id  = st.selectbox(
+                "Select entry ID", _all_ids,
+                format_func=lambda i: f"#{i} — {_fin_ledger[_fin_ledger['id'].astype(int)==i]['description'].values[0] if len(_fin_ledger[_fin_ledger['id'].astype(int)==i]) else i}",
+                key="fin_sel_id"
+            )
+            _sel_row = _fin_ledger[_fin_ledger["id"].astype(int) == int(_sel_id)]
+            if not _sel_row.empty:
+                _sr = _sel_row.iloc[0]
+                _ed1, _ed2 = st.columns(2)
+                with _ed1:
+                    _ed_date = st.date_input(
+                        "Date",
+                        value=pd.to_datetime(str(_sr.get("entry_date",""))).date() if _sr.get("entry_date") else None,
+                        key="fin_ed_date"
+                    )
+                    _ed_cat  = st.selectbox(
+                        "Category", _FIN_CATEGORIES,
+                        index=_FIN_CATEGORIES.index(str(_sr.get("category","Expense"))) if str(_sr.get("category","Expense")) in _FIN_CATEGORIES else 0,
+                        key="fin_ed_cat"
+                    )
+                with _ed2:
+                    _ed_amt  = st.number_input("Amount ($)", value=float(_sr.get("amount", 0) or 0), min_value=0.0, step=0.01, format="%.2f", key="fin_ed_amt")
+                    _ed_desc = st.text_input("Description", value=str(_sr.get("description","")), key="fin_ed_desc")
+                _ed_notes = st.text_area("Notes", value=str(_sr.get("notes","")), height=80, key="fin_ed_notes")
+
+                _edc1, _edc2 = st.columns(2)
+                with _edc1:
+                    if st.button("Save Changes", type="primary", use_container_width=True, key="btn_fin_save"):
+                        _uok, _umsg = update_financial_entry(int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg)
+                        if _uok:
+                            st.success("Entry updated.")
+                            _fetch_financials_cached.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {_umsg}")
+                with _edc2:
+                    if st.button("Delete Entry", type="secondary", use_container_width=True, key="btn_fin_del"):
+                        _dok, _dmsg = delete_financial_entry(int(_sel_id), cfg)
+                        if _dok:
+                            st.toast("Entry deleted.")
+                            _fetch_financials_cached.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {_dmsg}")
+
+    # ════ ORDER REVENUE ═════════════════════════════════════════
+    elif _fin_mode == "Order Revenue":
+        st.subheader("Order Revenue — Outbound Email Log")
+        st.caption("Revenue automatically tracked from every order confirmation email sent.")
+        if _fin_df.empty:
+            st.info("No orders sent yet. Revenue is captured automatically when emails are sent from Mass Email.")
+        else:
+            _fin_has_sub  = "subtotal"  in _fin_df.columns
+            _fin_has_tax  = "tax"       in _fin_df.columns
+            _fin_has_ship = "shipping"  in _fin_df.columns
+            _total_sub    = pd.to_numeric(_fin_df.get("subtotal",  0), errors="coerce").fillna(0).sum() if _fin_has_sub  else 0
+            _total_tax    = pd.to_numeric(_fin_df.get("tax",       0), errors="coerce").fillna(0).sum() if _fin_has_tax  else 0
+            _total_ship   = pd.to_numeric(_fin_df.get("shipping",  0), errors="coerce").fillna(0).sum() if _fin_has_ship else 0
+
+            _oa, _ob, _oc, _od = st.columns(4)
+            _oa.metric("Total",    f"${_order_revenue:,.2f}")
+            _ob.metric("Subtotal", f"${_total_sub:,.2f}")
+            _oc.metric("Tax",      f"${_total_tax:,.2f}")
+            _od.metric("Shipping", f"${_total_ship:,.2f}")
+
+            st.divider()
+            _log_disp = _fin_df.copy()
+            _log_rename = {
+                "recipient_name": "Name", "recipient_email": "Email",
+                "order_number": "Order #", "products_list": "Products",
+                "subtotal": "Sub ($)", "tax": "Tax ($)", "shipping": "Ship ($)",
+                "total_cost": "Total ($)", "timestamp": "Sent At", "created_at": "Sent At"
+            }
+            _log_disp = _log_disp.rename(columns={k: v for k, v in _log_rename.items() if k in _log_disp.columns})
+            _log_cols = ["Sent At", "Name", "Email", "Order #", "Products", "Sub ($)", "Tax ($)", "Ship ($)", "Total ($)"]
+            _log_disp = _log_disp[[c for c in _log_cols if c in _log_disp.columns]]
+            st.dataframe(
+                _log_disp, use_container_width=True, hide_index=True,
+                column_config={
+                    "Total ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "Sub ($)":   st.column_config.NumberColumn(format="$%.2f"),
+                    "Tax ($)":   st.column_config.NumberColumn(format="$%.2f"),
+                    "Ship ($)":  st.column_config.NumberColumn(format="$%.2f"),
+                    "Sent At":   st.column_config.DatetimeColumn(format="MMM DD, YYYY, HH:mm"),
+                    "Products":  st.column_config.TextColumn(width="large"),
+                }
+            )
+
+    # ════ REVENUE BY PRODUCT ════════════════════════════════════
+    elif _fin_mode == "Revenue by Product":
+        st.subheader("Revenue by Product")
+        st.caption("Calculated from price × quantity across all sent order emails.")
+        _price_lookup: dict = {}
+        if not _fin_inv_df.empty and "item_name" in _fin_inv_df.columns and "price" in _fin_inv_df.columns:
+            for _, _plr in _fin_inv_df.iterrows():
+                _price_lookup[str(_plr["item_name"]).lower().strip()] = float(_plr.get("price", 0) or 0)
+        _prod_revenue: dict[str, float] = {}
+        _prod_units:   dict[str, int]   = {}
+        _prod_orders:  dict[str, int]   = {}
+        _pl_col = "products_list" if "products_list" in _fin_df.columns else None
+        if _pl_col and not _fin_df.empty:
+            for _, _frow in _fin_df.iterrows():
+                for _pentry in [p.strip() for p in str(_frow.get(_pl_col,"")).split(",") if p.strip()]:
+                    _pname, _pqty = _parse_product_qty(_pentry)
+                    _pkey  = _pname.lower().strip()
+                    _pprice = _price_lookup.get(_pkey, 0.0)
+                    if not _pprice:
+                        for _lk, _lv in _price_lookup.items():
+                            if _pkey in _lk or _lk in _pkey:
+                                _pprice = _lv; break
+                    _prod_revenue[_pname] = _prod_revenue.get(_pname, 0.0) + _pprice * _pqty
+                    _prod_units[_pname]   = _prod_units.get(_pname, 0) + _pqty
+                    _prod_orders[_pname]  = _prod_orders.get(_pname, 0) + 1
+        if _prod_revenue:
+            _pp_df = pd.DataFrame([
+                {"Product": p, "Units Sold": _prod_units.get(p,0), "Orders": _prod_orders.get(p,0), "Revenue ($)": round(_prod_revenue.get(p,0.0),2)}
+                for p in sorted(_prod_revenue, key=_prod_revenue.get, reverse=True)
+            ])
+            st.bar_chart(_pp_df.set_index("Product")["Revenue ($)"], color="#f59e0b")
+            st.dataframe(_pp_df, use_container_width=True, hide_index=True,
+                column_config={"Revenue ($)": st.column_config.NumberColumn(format="$%.2f")})
+        else:
+            st.info("Product revenue will appear once orders are sent from the Mass Email page.")
+
+    st.divider()
+    if st.button("Refresh", key="btn_fin_refresh", help="Reload all financial data"):
+        _clear_data_caches()
+        _fetch_financials_cached.clear()
+        st.rerun()
 
 # ═════════════════════════════════════════════
 # SETTINGS PAGE
@@ -3988,19 +4187,6 @@ elif page == "Settings":
                 on_change=_auto_save_settings,
             )
 
-        st.divider()
-        st.subheader("App Login Password")
-        st.caption("When set, this password protects the app. Only active after Secrets TOML is saved.")
-        inp_app_pwd = st.text_input(
-            "Password",
-            type="password",
-            placeholder="Enter a password",
-            key="_cfg_app_login_password",
-            on_change=_auto_save_settings,
-        )
-        if inp_app_pwd.strip():
-            st.success("Login password set.")
-
     # ════════════════ IMAGE HOSTING TAB ══════════════════════════════
     with _s_tab_img:
         st.subheader("Image Hosting")
@@ -4162,100 +4348,169 @@ elif page == "Settings":
         # ════════════════ USERS TAB ═══════════════════════════════════
         with _ta_tab_users:
 
-            # Add new user
-            with st.expander("Add New User", expanded=_ta_users.empty):
-                _um_c1, _um_c2 = st.columns(2)
-                with _um_c1:
-                    _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
-                    _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
-                with _um_c2:
-                    _um_role  = st.selectbox(
-                        "Role", _ta_role_names,
-                        format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
-                        key="um_role"
-                    )
-                    _um_pass  = st.text_input("Password", type="password", key="um_pass")
-                    _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
-                if st.button("Create User", type="primary", key="btn_um_create"):
-                    if not _um_name.strip():
-                        st.error("Full name is required.")
-                    elif not _um_email.strip() or "@" not in _um_email:
-                        st.error("A valid email is required.")
-                    elif len(_um_pass) < 6:
-                        st.error("Password must be at least 6 characters.")
-                    elif _um_pass != _um_pass2:
-                        st.error("Passwords do not match.")
-                    else:
-                        _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass, cfg)
-                        if _um_ok:
-                            st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
-                            _fetch_users_cached.clear()
-                            st.rerun()
-                        else:
-                            st.error(f"Failed: {_um_msg}")
+            _ta_secrets_active = False
+            try:
+                _ta_secrets_active = hasattr(st, "secrets") and "merit" in st.secrets
+            except Exception:
+                pass
 
-            # All users — each card shows permissions + inline role change for admins
-            if not _ta_users.empty:
-                for _, _ur in _ta_users.iterrows():
-                    _ur_email_val = str(_ur.get("email", ""))
-                    _ur_role_val  = str(_ur.get("role", "viewer"))
-                    _ur_pages     = get_pages_for_role(_ur_role_val, cfg)
-                    _is_self      = (_ta_cur_user.get("email", "").lower() == _ur_email_val.lower())
+            if not _ta_secrets_active:
+                st.warning(
+                    "**Setup not complete.** User management is available after you finish **Get Started** "
+                    "and save your Secrets TOML — the app reboots once secrets are saved, then you can "
+                    "create and invite team members here."
+                )
+            else:
+                st.caption(
+                    "Create team members and send them a shareable invite link. "
+                    "They set their own password when they open the link — no admin needs to share a password."
+                )
 
-                    with st.container(border=True):
-                        _uc1, _uc2, _uc3 = st.columns([4, 3, 1])
-                        with _uc1:
-                            st.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur_email_val}")
-                        with _uc2:
-                            if _ta_is_admin and not _is_self:
-                                # Inline role selector — admin can change anyone's role
-                                _new_role_sel = st.selectbox(
-                                    "Role",
-                                    _ta_role_names,
-                                    index=_ta_role_names.index(_ur_role_val) if _ur_role_val in _ta_role_names else 0,
-                                    format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
-                                    key=f"ur_role_sel_{_ur_email_val}",
-                                    label_visibility="collapsed",
-                                )
-                                if _new_role_sel != _ur_role_val:
-                                    if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
-                                        _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
-                                        if _uro_ok:
-                                            st.toast(f"Role updated to {_new_role_sel}.")
-                                            _fetch_users_cached.clear()
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Failed: {_uro_msg}")
-                                # Show pages for selected role (live preview as admin changes selectbox)
-                                _preview_pages = get_pages_for_role(_new_role_sel, cfg)
-                                _badge2 = " ".join(
-                                    f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
-                                    for p in _preview_pages
-                                ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
-                                st.markdown(_badge2, unsafe_allow_html=True)
+                # ── Invite new user ───────────────────────────────────
+                with st.expander("Invite New Team Member", expanded=_ta_users.empty):
+                    _um_c1, _um_c2 = st.columns(2)
+                    with _um_c1:
+                        _um_name  = st.text_input("Full Name", placeholder="Jane Smith", key="um_name")
+                        _um_email = st.text_input("Email", placeholder="jane@yourfirm.org", key="um_email")
+                    with _um_c2:
+                        _um_role  = st.selectbox(
+                            "Role", _ta_role_names,
+                            format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                            key="um_role"
+                        )
+                        _um_invite_mode = st.radio(
+                            "Password method",
+                            ["Send invite link (recommended)", "Set password now"],
+                            key="um_invite_mode",
+                            horizontal=True,
+                        )
+                        if _um_invite_mode == "Set password now":
+                            _um_pass  = st.text_input("Password", type="password", key="um_pass")
+                            _um_pass2 = st.text_input("Confirm Password", type="password", key="um_pass2")
+
+                    if st.button("Create User", type="primary", key="btn_um_create", disabled=not _ta_is_admin):
+                        if not _um_name.strip():
+                            st.error("Full name is required.")
+                        elif not _um_email.strip() or "@" not in _um_email:
+                            st.error("A valid email is required.")
+                        elif _um_invite_mode == "Set password now":
+                            _um_pass_val  = st.session_state.get("um_pass", "")
+                            _um_pass2_val = st.session_state.get("um_pass2", "")
+                            if len(_um_pass_val) < 6:
+                                st.error("Password must be at least 6 characters.")
+                            elif _um_pass_val != _um_pass2_val:
+                                st.error("Passwords do not match.")
                             else:
-                                # Non-admin or self: show role label + pages read-only
-                                st.caption(_ROLE_LABELS.get(_ur_role_val, _ur_role_val.capitalize()))
-                                _badge3 = " ".join(
-                                    f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
-                                    for p in _ur_pages
-                                ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
-                                st.markdown(_badge3, unsafe_allow_html=True)
-                        with _uc3:
-                            if st.button("Remove", key=f"um_del_{_ur_email_val}",
-                                         disabled=_is_self or not _ta_is_admin,
-                                         help="Cannot remove your own account" if _is_self else
-                                              "Only admins can remove users" if not _ta_is_admin else None,
-                                         use_container_width=True):
-                                _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
-                                if _del_ok:
-                                    st.toast("User removed.")
+                                _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass_val, cfg)
+                                if _um_ok:
+                                    st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
                                     _fetch_users_cached.clear()
                                     st.rerun()
                                 else:
-                                    st.error(f"Failed: {_del_msg}")
-            else:
-                st.info("No users yet. Use the form above to create your first user.")
+                                    st.error(f"Failed: {_um_msg}")
+                        else:
+                            # Invite link flow
+                            _inv_ok, _inv_msg, _inv_tok = create_user_with_invite(
+                                _um_email.strip(), _um_name.strip(), _um_role, cfg
+                            )
+                            if _inv_ok:
+                                _base_url = st.session_state.get("_app_base_url", "")
+                                _invite_url = f"{_base_url}?invite={_inv_tok}" if _base_url else f"?invite={_inv_tok}"
+                                st.success(f"User **{_um_name.strip()}** created. Share the invite link below:")
+                                st.code(_invite_url, language="text")
+                                st.caption("The link is single-use. Once they set their password, it expires automatically.")
+                                _fetch_users_cached.clear()
+                            else:
+                                st.error(f"Failed: {_inv_msg}")
+                    if not _ta_is_admin:
+                        st.caption("Only admins can create users.")
+
+                # ── Capture app base URL for invite links ─────────────
+                try:
+                    _hdrs = getattr(st, "context", None)
+                    _hdrs = getattr(_hdrs, "headers", None) if _hdrs else None
+                    if _hdrs:
+                        _detected_base = _hdrs.get("origin", "") or _hdrs.get("referer", "").rstrip("/")
+                        if _detected_base and "localhost" not in _detected_base and "127.0.0.1" not in _detected_base:
+                            st.session_state["_app_base_url"] = _detected_base
+                except Exception:
+                    pass
+
+                # ── All users — role management + invite link generation ──
+                if not _ta_users.empty:
+                    st.divider()
+                    for _, _ur in _ta_users.iterrows():
+                        _ur_email_val = str(_ur.get("email", ""))
+                        _ur_role_val  = str(_ur.get("role", "viewer"))
+                        _ur_pages     = get_pages_for_role(_ur_role_val, cfg)
+                        _is_self      = (_ta_cur_user.get("email", "").lower() == _ur_email_val.lower())
+
+                        with st.container(border=True):
+                            _uc1, _uc2, _uc3, _uc4 = st.columns([4, 3, 1.2, 1])
+                            with _uc1:
+                                st.markdown(f"**{_ur.get('full_name', '')}**  \n{_ur_email_val}")
+                            with _uc2:
+                                if _ta_is_admin and not _is_self:
+                                    _new_role_sel = st.selectbox(
+                                        "Role",
+                                        _ta_role_names,
+                                        index=_ta_role_names.index(_ur_role_val) if _ur_role_val in _ta_role_names else 0,
+                                        format_func=lambda r: _ROLE_LABELS.get(r, r.capitalize()),
+                                        key=f"ur_role_sel_{_ur_email_val}",
+                                        label_visibility="collapsed",
+                                    )
+                                    if _new_role_sel != _ur_role_val:
+                                        if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
+                                            _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
+                                            if _uro_ok:
+                                                st.toast(f"Role updated to {_new_role_sel}.")
+                                                _fetch_users_cached.clear()
+                                                st.rerun()
+                                            else:
+                                                st.error(f"Failed: {_uro_msg}")
+                                    _preview_pages = get_pages_for_role(_new_role_sel, cfg)
+                                    _badge2 = " ".join(
+                                        f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                        for p in _preview_pages
+                                    ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                                    st.markdown(_badge2, unsafe_allow_html=True)
+                                else:
+                                    st.caption(_ROLE_LABELS.get(_ur_role_val, _ur_role_val.capitalize()))
+                                    _badge3 = " ".join(
+                                        f'<span style="background:#1f7aec;color:#fff;padding:1px 7px;border-radius:8px;font-size:0.72rem;margin-right:3px">{p}</span>'
+                                        for p in _ur_pages
+                                    ) or "<span style='color:#888;font-size:0.72rem'>No pages</span>"
+                                    st.markdown(_badge3, unsafe_allow_html=True)
+                            with _uc3:
+                                if _ta_is_admin and not _is_self:
+                                    if st.button("Invite Link", key=f"um_invite_{_ur_email_val}", use_container_width=True,
+                                                 help="Generate a new shareable link for this user to set or reset their password"):
+                                        _ri_ok, _ri_tok = generate_new_invite_token(_ur_email_val, cfg)
+                                        if _ri_ok:
+                                            _base_url2 = st.session_state.get("_app_base_url", "")
+                                            _ri_url = f"{_base_url2}?invite={_ri_tok}" if _base_url2 else f"?invite={_ri_tok}"
+                                            st.session_state[f"_invite_link_{_ur_email_val}"] = _ri_url
+                                            _fetch_users_cached.clear()
+                                        else:
+                                            st.error("Failed to generate invite link.")
+                                _shown_link = st.session_state.get(f"_invite_link_{_ur_email_val}", "")
+                                if _shown_link:
+                                    st.code(_shown_link, language="text")
+                            with _uc4:
+                                if st.button("Remove", key=f"um_del_{_ur_email_val}",
+                                             disabled=_is_self or not _ta_is_admin,
+                                             help="Cannot remove your own account" if _is_self else
+                                                  "Only admins can remove users" if not _ta_is_admin else None,
+                                             use_container_width=True):
+                                    _del_ok, _del_msg = delete_user_all_dbs(_ur_email_val, cfg)
+                                    if _del_ok:
+                                        st.toast("User removed.")
+                                        _fetch_users_cached.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed: {_del_msg}")
+                else:
+                    st.info("No users yet. Use the **Invite New Team Member** form above.")
 
     # ════════════════ SECRETS TAB ════════════════════════════════════
     with _s_tab_secrets:
@@ -4467,35 +4722,63 @@ For Next.js projects:
             if _ai_conn_str.startswith("postgresql://"):
                 _ai_conn = _psycopg2_connect(_ai_conn_str)
                 try:
-                    import pandas as _pd_ai
-                    _ai_prods_df = _pd_ai.read_sql(
-                        "SELECT sku, name, category, price, description, buy_button_url, active "
-                        "FROM products ORDER BY name",
-                        _ai_conn,
-                    )
-                    if not _ai_prods_df.empty:
+                    _ai_cur = _ai_conn.cursor()
+                    _ai_cur.execute("""
+                        SELECT
+                            p.sku,
+                            p.name,
+                            p.category,
+                            p.price,
+                            p.description,
+                            p.buy_button_url,
+                            p.active,
+                            p.image_url   AS prod_image,
+                            i.stock_left,
+                            i.status      AS stock_status,
+                            i.image_url   AS inv_image
+                        FROM products p
+                        LEFT JOIN inventory i ON i.sku = p.sku
+                        ORDER BY p.name
+                    """)
+                    _ai_cols = [d[0] for d in _ai_cur.description]
+                    _ai_rows = [dict(zip(_ai_cols, row)) for row in _ai_cur.fetchall()]
+                    _ai_cur.close()
+                    if _ai_rows:
                         _prod_lines = []
-                        for _, _r in _ai_prods_df.iterrows():
-                            _desc = str(_r.get("description") or "").strip()
-                            _buy  = str(_r.get("buy_button_url") or "").strip()
+                        for _r in _ai_rows:
+                            _desc   = str(_r.get("description") or "").strip()
+                            _buy    = str(_r.get("buy_button_url") or "").strip()
                             _active = "In Store" if _r.get("active") else "Out of Store"
+                            _img    = str(_r.get("inv_image") or _r.get("prod_image") or "").strip()
+                            _img_first = _img.split(",")[0].strip() if _img and "," in _img else _img
+                            _stock  = _r.get("stock_left")
+                            _status = str(_r.get("stock_status") or ("In stock" if _stock and _stock > 0 else "Out of stock"))
                             _line = (
-                                f"  SKU: {_r['sku']} | Name: {_r['name']} | "
-                                f"Category: {_r.get('category', '')} | "
-                                f"Price: ${float(_r.get('price') or 0):.2f} | "
-                                f"Status: {_active} | "
-                                f"Description: {_desc if _desc else '(none)'} | "
-                                f"Buy URL: {_buy if _buy else '(none)'}"
+                                f"  SKU: {_r['sku']}\n"
+                                f"    Name: {_r['name']}\n"
+                                f"    Category: {_r.get('category', '') or '(none)'}\n"
+                                f"    Price: ${float(_r.get('price') or 0):.2f}\n"
+                                f"    Store Status: {_active}\n"
+                                f"    Stock Status: {_status} ({_stock if _stock is not None else 'N/A'} units)\n"
+                                f"    Description: {_desc if _desc else '(none — do not invent one)'}\n"
+                                f"    Buy Button URL: {_buy if _buy else '(none — hide Buy Now button)'}\n"
+                                f"    Primary Image URL: {_img_first if _img_first and _img_first != 'N/A' else '(none)'}"
                             )
                             _prod_lines.append(_line)
                         _products_block = (
                             "\n\n=== YOUR ACTUAL PRODUCTS (live from Supabase) ===\n"
-                            "Use these exact descriptions and buy button URLs when building the storefront.\n"
-                            "Do NOT invent descriptions or buy links — use only what is listed here.\n\n"
-                            + "\n".join(_prod_lines)
-                            + "\n\nNOTE: buy_button_url values above are the real VEI purchase links. "
-                            "Use them as the href for every Buy Now button. "
-                            "If a product's Buy URL is '(none)', hide the Buy Now button for that product."
+                            "Use these exact values when building the storefront. "
+                            "Do NOT invent descriptions, buy links, or image URLs.\n"
+                            "Each entry below is one product with all fields needed for a product card and detail page.\n\n"
+                            + "\n\n".join(_prod_lines)
+                            + "\n\n--- END OF PRODUCT LIST ---\n"
+                            "RULES:\n"
+                            "- Buy Button URL is the direct VEI purchase link — use as href for Buy Now button\n"
+                            "- If Buy Button URL is '(none)', hide or disable the Buy Now button\n"
+                            "- Primary Image URL: use as <img src>, show grey placeholder if '(none)'\n"
+                            "- image_url may contain comma-separated URLs — always use only the first one\n"
+                            "- Store Status 'Out of Store' = do NOT show this product to customers\n"
+                            "- Stock Status shows current availability — use for badge text\n"
                         )
                 finally:
                     _ai_conn.close()
