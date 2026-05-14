@@ -4250,8 +4250,8 @@ elif page == "Inventory":
     st.title("Inventory")
     st.caption("Stock overview and adjustments. See the **Financials** page for revenue and ledger tracking.")
 
-    tab_overview, tab_adjust, tab_original, tab_inv_docs = st.tabs(
-        ["Overview", "Adjust Stock", "Original Stock", "Documentation"]
+    tab_overview, tab_adjust, tab_original, tab_inv_docs, tab_inv_reset = st.tabs(
+        ["Overview", "Adjust Stock", "Original Stock", "Documentation", "Reset Inventory"]
     )
 
     # Load shared data
@@ -4586,6 +4586,106 @@ Revenue tracking, the ledger, and order history have moved to the dedicated **Fi
 - **SQLite (Local):** Primary local database, always active
 - **Supabase (Cloud):** All changes are synced in real-time when connected — recommended for persistence across deployments
         """)
+
+    # ── RESET INVENTORY ──────────────────────────
+    with tab_inv_reset:
+        st.subheader("Reset Inventory")
+        st.warning(
+            "**This is a destructive action.** "
+            "Resetting inventory wipes **all stock levels** across every database — "
+            "SQLite, Turso, and Supabase. Product records (names, prices, descriptions) "
+            "are kept. Only stock quantities are cleared."
+        )
+
+        _ri_mode = st.radio(
+            "What do you want to reset?",
+            ["Zero out all stock (set every product to 0 units)", "Delete all inventory rows entirely"],
+            key="ri_mode",
+        )
+        _ri_zero = _ri_mode.startswith("Zero")
+
+        st.divider()
+        st.markdown("**Type** `RESET` **below to confirm, then click the button.**")
+        _ri_confirm = st.text_input("Confirmation", placeholder="RESET", key="ri_confirm_text", label_visibility="collapsed")
+
+        _ri_cols = st.columns([1, 3])
+        with _ri_cols[0]:
+            _ri_go = st.button(
+                "Reset Inventory" if _ri_zero else "Delete All Inventory Rows",
+                type="primary",
+                use_container_width=True,
+                key="btn_ri_go",
+                disabled=(_ri_confirm.strip() != "RESET"),
+            )
+
+        if _ri_go and _ri_confirm.strip() == "RESET":
+            _ri_results = []
+
+            # ── SQLite ──────────────────────────────────────────────────
+            try:
+                _ri_conn = _get_sqlite_conn()
+                if _ri_zero:
+                    _ri_conn.execute(
+                        "UPDATE inventory SET stock_left=0, original_stock=0, status='Out of stock'"
+                    )
+                else:
+                    _ri_conn.execute("DELETE FROM inventory")
+                _ri_conn.commit()
+                _ri_conn.close()
+                _ri_results.append("SQLite")
+            except Exception as _rie:
+                _ri_results.append(f"SQLite failed: {_rie}")
+
+            # ── Turso ───────────────────────────────────────────────────
+            if _has_trs_inv:
+                try:
+                    _ri_turl = _turso_http_url(cfg.get("turso_url", "").strip())
+                    _ri_ttok = cfg.get("turso_auth_token", "").strip()
+                    if _ri_zero:
+                        _turso_pipeline(_ri_turl, _ri_ttok, [(
+                            "UPDATE inventory SET stock_left=0, original_stock=0, status='Out of stock'",
+                            (),
+                        )])
+                    else:
+                        _turso_pipeline(_ri_turl, _ri_ttok, [
+                            ("DELETE FROM inventory", ()),
+                        ])
+                    _ri_results.append("Turso")
+                except Exception as _rie2:
+                    _ri_results.append(f"Turso failed: {_rie2}")
+
+            # ── Supabase ────────────────────────────────────────────────
+            _ri_sb = _get_supabase_conn(cfg)
+            if _ri_sb is not None:
+                try:
+                    with _ri_sb:
+                        with _ri_sb.cursor() as _ri_cur:
+                            if _ri_zero:
+                                _ri_cur.execute(
+                                    "UPDATE inventory SET stock_left=0, original_stock=0, status='Out of stock'"
+                                )
+                            else:
+                                _ri_cur.execute("DELETE FROM inventory")
+                    _ri_sb.close()
+                    _ri_results.append("Supabase")
+                except Exception as _rie3:
+                    _ri_results.append(f"Supabase failed: {_rie3}")
+
+            # ── result ──────────────────────────────────────────────────
+            _ri_ok = any("failed" not in r for r in _ri_results)
+            _ri_label = "zeroed" if _ri_zero else "deleted"
+            if _ri_ok:
+                st.toast(f"Inventory {_ri_label}.", icon=None)
+                st.success(f"Inventory {_ri_label} · {' + '.join(_ri_results)}")
+            else:
+                st.toast("Reset failed.", icon=None)
+                st.error(f"Reset failed: {' · '.join(_ri_results)}")
+
+            _clear_data_caches()
+            st.session_state.pop("_inv_cache", None)
+            if _ri_ok:
+                import time as _t; _t.sleep(0.4)
+                st.rerun()
 
 # ═════════════════════════════════════════════
 # FINANCIALS PAGE
