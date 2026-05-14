@@ -3407,14 +3407,15 @@ It looks like: `libsql://[your-org-name]-[username].turso.io`
 Paste it into **Settings → Database → Turso → Database URL**.
 
 #### 4. Get your Auth Token
-1. In the left sidebar, look below the usage bar and click your **logo / avatar**.
-2. Click **Platform API Tokens**.
-3. Click **Create token**.
-4. **Name** — enter your organization name.
-5. **Scope** — select your username.
-6. Press **Enter** (or click Create) and copy the token.
+1. Click on your database (from the Databases page).
+2. Click the **Connect** tab at the top.
+3. Scroll down to the **Auth Tokens** section and click **Generate Token**.
+4. Leave expiry as **No expiry** and click **Generate**.
+5. Copy the token that appears (starts with `eyJ…`).
 
 Paste it into **Settings → Database → Turso → Auth Token**.
+
+> **Note:** This is a *database* token — do NOT use the Platform API token from the sidebar. That one is for managing Turso itself, not for querying your database.
 
 #### 5. Setup tables
 In MERIT go to **Settings → Database** and click **Setup Turso Tables**.
@@ -4834,7 +4835,7 @@ elif page == "Settings":
                 "Auth Token",
                 type="password",
                 placeholder="eyJ...",
-                help="Turso → sidebar → your avatar (below usage bar) → Platform API Tokens → Create token",
+                help="Turso Dashboard → your database → Connect tab → Auth Tokens → Generate Token (NOT Platform API Tokens)",
                 key="inp_turso_token",
                 on_change=_on_turso_change,
             )
