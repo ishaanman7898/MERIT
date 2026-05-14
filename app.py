@@ -5068,11 +5068,12 @@ elif page == "Settings":
                     try:
                         import requests as _rq
                         import base64 as _b64
-                        _fi_raw = _b64.b64decode("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=")
+                        # 1×1 white PNG — valid enough for an API key check
+                        _fi_raw = _b64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAABjE+ibYAAAAASUVORK5CYII=")
                         _fi_resp = _rq.post(
                             "https://freeimage.host/api/1/upload",
                             data={"key": inp_freeimage_key.strip(), "action": "upload", "format": "json"},
-                            files={"source": ("test.jpg", io.BytesIO(_fi_raw), "image/jpeg")},
+                            files={"source": ("test.png", io.BytesIO(_fi_raw), "image/png")},
                             timeout=20,
                         )
                         _fi_body = _fi_resp.json() if _fi_resp.content else {}
@@ -5085,7 +5086,10 @@ elif page == "Settings":
                         st.session_state["_fi_test_result"] = ("err", "Connection failed — check your internet." if len(_fi_em) > 200 else _fi_em[:200])
             if "_fi_test_result" in st.session_state:
                 _fir = st.session_state["_fi_test_result"]
-                st.success("Freeimage.host is working.") if _fir[0] == "ok" else st.error(f"Test failed: {_fir[1]}")
+                if _fir[0] == "ok":
+                    st.success("Freeimage.host is working.")
+                else:
+                    st.error(f"Test failed: {_fir[1]}")
 
         with _img_tab_ih:
             inp_imgbb_key = st.text_input(
