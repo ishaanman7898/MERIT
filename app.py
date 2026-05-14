@@ -1,6 +1,6 @@
 ﻿"""
 MERIT — Mass Email & Inventory Tool for Virtual Enterprise (VEI) firms
-Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase database
+Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase / Turso database
 """
 
 import base64
@@ -327,7 +327,7 @@ def _verify_password(stored_hash: str, password: str) -> bool:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_users_cached(sb_conn_str: str) -> list:
+def _fetch_users_cached(sb_conn_str: str, turso_key: str = "") -> list:
     """Cached fetch of users — takes hashable conn string, returns list of row dicts."""
     if sb_conn_str:
         try:
@@ -337,6 +337,15 @@ def _fetch_users_cached(sb_conn_str: str) -> list:
                 cols = [d[0] for d in cur.description]
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
+            if rows:
+                return rows
+        except Exception:
+            pass
+    if turso_key:
+        try:
+            _tu, _tt = turso_key.split("|", 1)
+            rows = _turso_execute_direct(_tu, _tt,
+                "SELECT id, email, full_name, role, created_at FROM users ORDER BY created_at")
             if rows:
                 return rows
         except Exception:
@@ -351,14 +360,14 @@ def _fetch_users_cached(sb_conn_str: str) -> list:
 
 
 def get_users_from_db(cfg: dict) -> pd.DataFrame:
-    """Load users table from Supabase (preferred) or SQLite fallback. Result is cached 30s."""
+    """Load users table from Supabase (preferred), Turso, or SQLite fallback. Result is cached 30s."""
     sb_cs = _get_effective_supabase_conn_str(cfg) or ""
-    rows = _fetch_users_cached(sb_cs)
+    rows = _fetch_users_cached(sb_cs, _turso_cache_key(cfg))
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_roles_cached(sb_conn_str: str) -> list:
+def _fetch_roles_cached(sb_conn_str: str, turso_key: str = "") -> list:
     """Cached fetch of roles — takes hashable conn string, returns list of row dicts."""
     if sb_conn_str:
         try:
@@ -368,6 +377,15 @@ def _fetch_roles_cached(sb_conn_str: str) -> list:
                 cols = [d[0] for d in cur.description]
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
+            if rows:
+                return rows
+        except Exception:
+            pass
+    if turso_key:
+        try:
+            _tu, _tt = turso_key.split("|", 1)
+            rows = _turso_execute_direct(_tu, _tt,
+                "SELECT role_name, pages FROM roles ORDER BY role_name")
             if rows:
                 return rows
         except Exception:
@@ -382,9 +400,9 @@ def _fetch_roles_cached(sb_conn_str: str) -> list:
 
 
 def get_roles_from_db(cfg: dict) -> pd.DataFrame:
-    """Load roles table from Supabase (preferred) or SQLite fallback. Result is cached 30s."""
+    """Load roles table from Supabase (preferred), Turso, or SQLite fallback. Result is cached 30s."""
     sb_cs = _get_effective_supabase_conn_str(cfg) or ""
-    rows = _fetch_roles_cached(sb_cs)
+    rows = _fetch_roles_cached(sb_cs, _turso_cache_key(cfg))
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
@@ -398,7 +416,7 @@ def get_pages_for_role(role_name: str, cfg: dict) -> list:
 
 
 def create_role_all_dbs(role_name: str, pages: list, cfg: dict) -> tuple[bool, str]:
-    """Create or update a role in both SQLite and Supabase."""
+    """Create or update a role in SQLite, Supabase, and Turso."""
     pages_str = ",".join(pages)
     results = []
     try:
@@ -427,11 +445,20 @@ def create_role_all_dbs(role_name: str, pages: list, cfg: dict) -> tuple[bool, s
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO roles (role_name, pages) VALUES (?, ?) "
+                "ON CONFLICT(role_name) DO UPDATE SET pages=excluded.pages",
+                (role_name.lower().strip(), pages_str))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
 def delete_role_all_dbs(role_name: str, cfg: dict) -> tuple[bool, str]:
-    """Delete a role from both SQLite and Supabase. Refuses to delete built-in roles."""
+    """Delete a role from SQLite, Supabase, and Turso. Refuses to delete built-in roles."""
     if role_name in ("admin", "staff", "viewer"):
         return False, "Cannot delete built-in roles."
     results = []
@@ -453,6 +480,12 @@ def delete_role_all_dbs(role_name: str, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "DELETE FROM roles WHERE role_name=?", (role_name,))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
@@ -502,7 +535,7 @@ def sync_local_to_supabase(cfg: dict) -> tuple[int, int, list]:
 
 
 def create_user_all_dbs(email: str, full_name: str, role: str, password: str, cfg: dict) -> tuple[bool, str]:
-    """Create a new user in both SQLite and Supabase."""
+    """Create a new user in SQLite, Supabase, and Turso."""
     pw_hash = _hash_password(password)
     results = []
     # SQLite
@@ -531,11 +564,20 @@ def create_user_all_dbs(email: str, full_name: str, role: str, password: str, cf
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    # Turso
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO users (email, full_name, role, password_hash) VALUES (?,?,?,?)",
+                (email.lower().strip(), full_name.strip(), role, pw_hash))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
 def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
-    """Delete a user by email from both SQLite and Supabase."""
+    """Delete a user by email from SQLite, Supabase, and Turso."""
     results = []
     try:
         conn = _get_sqlite_conn()
@@ -555,6 +597,12 @@ def delete_user_all_dbs(email: str, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "DELETE FROM users WHERE email=?", (email.lower().strip(),))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
@@ -589,6 +637,14 @@ def create_user_with_invite(email: str, full_name: str, role: str, cfg: dict) ->
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO users (email, full_name, role, password_hash, invite_token) VALUES (?,?,?,?,?)",
+                (email.lower().strip(), full_name.strip(), role, placeholder_hash, token))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     ok = any("failed" not in r for r in results)
     return ok, " · ".join(results), token if ok else ""
 
@@ -609,6 +665,14 @@ def validate_invite_token(token: str, cfg: dict) -> dict | None:
             conn.close()
             if row:
                 return {"email": row[0], "full_name": row[1], "role": row[2]}
+        except Exception:
+            pass
+    if _has_turso(cfg):
+        try:
+            rows = _turso_execute(cfg,
+                "SELECT email, full_name, role FROM users WHERE invite_token=?", (token,))
+            if rows:
+                return {"email": rows[0]["email"], "full_name": rows[0]["full_name"], "role": rows[0]["role"]}
         except Exception:
             pass
     try:
@@ -652,6 +716,14 @@ def complete_invite(token: str, new_password: str, cfg: dict) -> tuple[bool, str
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "UPDATE users SET password_hash=?, invite_token=NULL WHERE invite_token=?",
+                (pw_hash, token))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
@@ -681,12 +753,19 @@ def generate_new_invite_token(email: str, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "UPDATE users SET invite_token=? WHERE email=?", (token, email.lower().strip()))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     ok = any("failed" not in r for r in results)
     return ok, token if ok else ""
 
 
 def update_user_role_all_dbs(email: str, new_role: str, cfg: dict) -> tuple[bool, str]:
-    """Update a user's role in both SQLite and Supabase."""
+    """Update a user's role in SQLite, Supabase, and Turso."""
     results = []
     try:
         conn = _get_sqlite_conn()
@@ -706,6 +785,12 @@ def update_user_role_all_dbs(email: str, new_role: str, cfg: dict) -> tuple[bool
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "UPDATE users SET role=? WHERE email=?", (new_role, email.lower().strip()))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
     return any("failed" not in r for r in results), " · ".join(results)
 
 
@@ -724,6 +809,15 @@ def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
             conn.close()
             if row and _verify_password(row[3], password):
                 user = {"email": row[0], "full_name": row[1], "role": row[2]}
+        except Exception:
+            pass
+    # Try Turso
+    if user is None and _has_turso(cfg):
+        try:
+            rows = _turso_execute(cfg,
+                "SELECT email, full_name, role, password_hash FROM users WHERE email=?", (_em,))
+            if rows and _verify_password(rows[0]["password_hash"] or "", password):
+                user = {"email": rows[0]["email"], "full_name": rows[0]["full_name"], "role": rows[0]["role"]}
         except Exception:
             pass
     # Fall back to SQLite
@@ -746,7 +840,7 @@ def authenticate_user(email: str, password: str, cfg: dict) -> dict | None:
 
 
 def save_email_template(key: str, html: str, cfg: dict) -> bool:
-    """Save an email template to SQLite and Supabase by key ('order_template' or 'campaign_template')."""
+    """Save an email template to SQLite, Supabase, and Turso."""
     try:
         conn = _get_sqlite_conn()
         conn.execute("""
@@ -774,6 +868,15 @@ def save_email_template(key: str, html: str, cfg: dict) -> bool:
                     """, (key, html))
             conn_sb.close()
         except Exception: pass
+
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO email_templates (template_key, html_content) VALUES (?,?) "
+                "ON CONFLICT(template_key) DO UPDATE SET html_content=excluded.html_content, "
+                "updated_at=datetime('now')",
+                (key, html))
+        except Exception: pass
     return True
 
 
@@ -789,6 +892,14 @@ def load_email_template(key: str, cfg: dict) -> str:
             conn_sb.close()
             if row and row[0]:
                 return row[0]
+        except Exception: pass
+    # Try Turso
+    if _has_turso(cfg):
+        try:
+            rows = _turso_execute(cfg,
+                "SELECT html_content FROM email_templates WHERE template_key=?", (key,))
+            if rows and rows[0].get("html_content"):
+                return rows[0]["html_content"]
         except Exception: pass
     # Fall back to SQLite
     try:
@@ -977,6 +1088,8 @@ _SECRETS_CREDENTIAL_KEYS = [
     "supabase_connection_string",
     "supabase_db_password",
     "supabase_anon_key",
+    "turso_url",
+    "turso_auth_token",
     "smtp_email",
     "smtp_password",
     "from_name",
@@ -1282,7 +1395,206 @@ def _get_supabase_project_url(cfg: dict) -> str:
 
 
 def _has_any_db(cfg: dict) -> bool:
-    return True  # SQLite is always available; Supabase is optional
+    return True  # SQLite is always available; Supabase/Turso are optional
+
+
+# ─────────────────────────────────────────────
+# Turso helpers (libsql HTTP API, no extra package needed)
+# ─────────────────────────────────────────────
+
+def _turso_http_url(raw: str) -> str:
+    """Convert libsql:// URL to https:// for the HTTP pipeline API."""
+    u = raw.strip().rstrip("/")
+    if u.startswith("libsql://"):
+        return "https://" + u[len("libsql://"):]
+    return u
+
+
+def _has_turso(cfg: dict) -> bool:
+    return bool(cfg.get("turso_url", "").strip() and cfg.get("turso_auth_token", "").strip())
+
+
+def _turso_cache_key(cfg: dict) -> str:
+    url = _turso_http_url(cfg.get("turso_url", "").strip())
+    tok = cfg.get("turso_auth_token", "").strip()
+    return f"{url}|{tok}" if (url and tok) else ""
+
+
+def _turso_execute_direct(url: str, token: str, sql: str, params=()) -> list[dict]:
+    """Execute one SQL statement on Turso via Hrana v2 HTTP. Returns list of row dicts."""
+    import json as _j
+
+    def _arg(v):
+        if v is None:
+            return {"type": "null"}
+        if isinstance(v, bool):
+            return {"type": "integer", "value": "1" if v else "0"}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "real", "value": str(v)}
+        return {"type": "text", "value": str(v)}
+
+    payload = {
+        "requests": [
+            {"type": "execute", "stmt": {"sql": sql, "args": [_arg(p) for p in params]}},
+            {"type": "close"},
+        ]
+    }
+    data = _j.dumps(payload).encode("utf-8")
+    req = _urllib_request.Request(
+        f"{url}/v2/pipeline",
+        data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    with _urllib_request.urlopen(req, timeout=10) as resp:
+        result = _j.loads(resp.read())
+
+    for r in result.get("results", []):
+        if r.get("type") == "error":
+            raise RuntimeError(r.get("error", {}).get("message", "Unknown Turso error"))
+
+    exec_resp = result["results"][0].get("response", {}).get("result", {})
+    cols = [c["name"] for c in exec_resp.get("cols", [])]
+    rows = exec_resp.get("rows", [])
+    if not cols:
+        return []
+
+    def _coerce(cell):
+        t, v = cell.get("type"), cell.get("value")
+        if t == "null" or v is None:
+            return None
+        if t == "integer":
+            return int(v)
+        if t == "real":
+            return float(v)
+        return v
+
+    return [dict(zip(cols, [_coerce(c) for c in row])) for row in rows]
+
+
+def _turso_execute(cfg: dict, sql: str, params=()) -> list[dict]:
+    url = _turso_http_url(cfg.get("turso_url", "").strip())
+    tok = cfg.get("turso_auth_token", "").strip()
+    if not url or not tok:
+        raise RuntimeError("Turso not configured")
+    return _turso_execute_direct(url, tok, sql, params)
+
+
+TURSO_SETUP_SQL = """
+CREATE TABLE IF NOT EXISTS products (
+    sku            TEXT PRIMARY KEY,
+    item_name      TEXT NOT NULL,
+    category       TEXT NOT NULL DEFAULT '',
+    price          REAL NOT NULL DEFAULT 0.0,
+    description    TEXT NOT NULL DEFAULT '',
+    buy_button_url TEXT NOT NULL DEFAULT '',
+    image_url      TEXT NOT NULL DEFAULT 'N/A',
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS inventory (
+    sku            TEXT PRIMARY KEY,
+    item_name      TEXT NOT NULL,
+    category       TEXT NOT NULL DEFAULT '',
+    price          REAL NOT NULL DEFAULT 0.0,
+    unit_cost      REAL NOT NULL DEFAULT 0.0,
+    stock_left     INTEGER NOT NULL DEFAULT 0,
+    status         TEXT NOT NULL DEFAULT 'In stock',
+    image_url      TEXT NOT NULL DEFAULT 'N/A',
+    original_stock INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS outbound_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_name  TEXT NOT NULL,
+    recipient_email TEXT NOT NULL,
+    order_number    TEXT NOT NULL,
+    products_list   TEXT NOT NULL,
+    subtotal        REAL NOT NULL DEFAULT 0.0,
+    tax             REAL NOT NULL DEFAULT 0.0,
+    shipping        REAL NOT NULL DEFAULT 0.0,
+    total_cost      REAL NOT NULL DEFAULT 0.0,
+    timestamp       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS email_templates (
+    template_key TEXT PRIMARY KEY,
+    html_content TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT NOT NULL UNIQUE,
+    full_name     TEXT NOT NULL DEFAULT '',
+    role          TEXT NOT NULL DEFAULT 'staff',
+    password_hash TEXT NOT NULL DEFAULT '',
+    invite_token  TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS roles (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_name  TEXT NOT NULL UNIQUE,
+    pages      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS financials (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_date      TEXT    NOT NULL DEFAULT (date('now')),
+    category        TEXT    NOT NULL DEFAULT 'Expense',
+    description     TEXT    NOT NULL DEFAULT '',
+    amount          REAL    NOT NULL DEFAULT 0.0,
+    notes           TEXT    NOT NULL DEFAULT '',
+    payment_method  TEXT    NOT NULL DEFAULT '',
+    tags            TEXT    NOT NULL DEFAULT '',
+    is_recurring    INTEGER NOT NULL DEFAULT 0,
+    recur_frequency TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS fin_budgets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    category      TEXT    NOT NULL,
+    period        TEXT    NOT NULL DEFAULT 'monthly',
+    budget_amount REAL    NOT NULL DEFAULT 0.0,
+    notes         TEXT    NOT NULL DEFAULT '',
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(category, period)
+)
+"""
+
+
+def sync_local_to_turso(cfg: dict) -> tuple[int, int, list]:
+    """Sync all local SQLite users and roles to Turso. Returns (users_synced, roles_synced, errors)."""
+    if not _has_turso(cfg):
+        return 0, 0, ["Turso not connected"]
+    errors = []
+    users_synced = roles_synced = 0
+    try:
+        local_conn = _get_sqlite_conn()
+        local_roles = local_conn.execute("SELECT role_name, pages FROM roles").fetchall()
+        for row in local_roles:
+            try:
+                _turso_execute(cfg,
+                    "INSERT INTO roles (role_name, pages) VALUES (?, ?) "
+                    "ON CONFLICT(role_name) DO UPDATE SET pages=excluded.pages",
+                    (row["role_name"], row["pages"]))
+                roles_synced += 1
+            except Exception as e:
+                errors.append(f"Role {row['role_name']}: {e}")
+        local_users = local_conn.execute("SELECT email, full_name, role, password_hash, invite_token FROM users").fetchall()
+        for row in local_users:
+            try:
+                _turso_execute(cfg,
+                    "INSERT INTO users (email, full_name, role, password_hash, invite_token) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(email) DO UPDATE SET full_name=excluded.full_name, role=excluded.role, "
+                    "password_hash=excluded.password_hash, invite_token=excluded.invite_token",
+                    (row["email"], row["full_name"], row["role"], row["password_hash"], row["invite_token"]))
+                users_synced += 1
+            except Exception as e:
+                errors.append(f"User {row['email']}: {e}")
+        local_conn.close()
+    except Exception as exc:
+        errors.append(f"SQLite read failed: {exc}")
+    return users_synced, roles_synced, errors
 
 
 def _split_sql_statements(sql: str) -> list:
@@ -1382,7 +1694,6 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
         try:
             with conn_sb:
                 with conn_sb.cursor() as cur:
-                    # inventory table — stock tracking + all catalog fields
                     cur.execute("""
                         INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
@@ -1391,7 +1702,6 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
                             price=EXCLUDED.price, image_url=EXCLUDED.image_url
                     """, (row["sku"],row["item_name"],row["category"],row["price"],
                           row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
-                    # products table — clean catalog for external websites
                     cur.execute("""
                         INSERT INTO products (sku,name,category,price,description,buy_button_url,image_url,active)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
@@ -1406,6 +1716,28 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+
+    # ── Turso ────────────────────────────────────────────────────────
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
+                "item_name=excluded.item_name, category=excluded.category, "
+                "price=excluded.price, image_url=excluded.image_url",
+                (row["sku"],row["item_name"],row["category"],row["price"],
+                 row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
+            _turso_execute(cfg,
+                "INSERT INTO products (sku,item_name,category,price,description,buy_button_url,image_url,active) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
+                "item_name=excluded.item_name, category=excluded.category, price=excluded.price, "
+                "description=excluded.description, buy_button_url=excluded.buy_button_url, "
+                "image_url=excluded.image_url, active=excluded.active",
+                (row["sku"],row["item_name"],row["category"],row["price"],
+                 row["description"],row["buy_button_url"],row["image_url"],row["active"]))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
 
     ok = any("failed" not in r for r in results)
     return ok, " · ".join(results)
@@ -1448,6 +1780,13 @@ def set_original_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, s
             conn_sb.close()
             results.append("Supabase")
         except Exception as exc: results.append(f"Supabase failed: {exc}")
+
+    # Turso
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "UPDATE inventory SET original_stock=? WHERE sku=?", (stock, sku))
+            results.append("Turso")
+        except Exception as exc: results.append(f"Turso failed: {exc}")
 
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1503,6 +1842,20 @@ def adjust_original_stock_all_dbs(sku: str, delta: int, cfg: dict) -> tuple[bool
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
 
+    # Turso
+    if _has_turso(cfg):
+        try:
+            _tr = _turso_execute(cfg, "SELECT stock_left, original_stock FROM inventory WHERE sku=?", (sku,))
+            if _tr:
+                _ts = int(_tr[0].get("stock_left") or 0) + delta
+                _to = int(_tr[0].get("original_stock") or 0) + delta
+                _turso_execute(cfg,
+                    "UPDATE inventory SET stock_left=?, original_stock=?, status=? WHERE sku=?",
+                    (_ts, _to, _status_from_stock(_ts), sku))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
+
     return any("failed" not in r for r in results), " · ".join(results)
 
 
@@ -1554,8 +1907,25 @@ def adjust_inventory_supabase(sku: str, delta: int, cfg: dict) -> tuple[bool, st
         return False, str(exc)
 
 
+def adjust_inventory_turso(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
+    if not _has_turso(cfg):
+        return False, "Turso not configured"
+    try:
+        rows = _turso_execute(cfg, "SELECT stock_left FROM inventory WHERE sku=?", (sku,))
+        if not rows:
+            return False, "SKU not found in Turso"
+        new_stock = int(rows[0].get("stock_left") or 0) + delta
+        status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
+        _turso_execute(cfg, "UPDATE inventory SET stock_left=?, status=? WHERE sku=?", (new_stock, status, sku))
+        if delta > 0:
+            _turso_execute(cfg, "UPDATE inventory SET original_stock = original_stock + ? WHERE sku=?", (delta, sku))
+        return True, f"Turso stock → {new_stock}"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
-    """Delete a product from ALL configured databases (SQLite, Supabase)."""
+    """Delete a product from all configured databases (SQLite, Supabase, Turso)."""
     results = []
 
     # ── SQLite (always) ──────────────────────────────────────────────
@@ -1584,6 +1954,18 @@ def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+
+    # ── Turso ────────────────────────────────────────────────────────
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "DELETE FROM inventory WHERE sku=?", (sku,))
+            try:
+                _turso_execute(cfg, "DELETE FROM products WHERE sku=?", (sku,))
+            except Exception:
+                pass
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
 
     ok = any("failed" not in r for r in results)
     return ok, " · ".join(results) if results else "No databases written"
@@ -1615,6 +1997,14 @@ def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
             results.append("Supabase")
         except Exception as exc:
             results.append(f"Supabase failed: {exc}")
+
+    # Turso
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "UPDATE inventory SET stock_left=?, status=? WHERE sku=?", (stock, status, sku))
+            results.append("Turso")
+        except Exception as exc:
+            results.append(f"Turso failed: {exc}")
 
     ok = any("failed" not in r for r in results)
     return ok, " · ".join(results) if results else "No databases written"
@@ -1660,6 +2050,23 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
         except Exception as exc:
             errors.append(f"Supabase sync failed: {exc}")
 
+    # ── Turso ────────────────────────────────────────────────────────
+    if _has_turso(cfg):
+        try:
+            for rec in records:
+                _turso_execute(cfg,
+                    "INSERT INTO inventory (sku,item_name,category,price,stock_left,status,image_url) "
+                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
+                    "item_name=excluded.item_name, category=excluded.category, "
+                    "price=excluded.price, stock_left=excluded.stock_left, "
+                    "status=excluded.status, image_url=excluded.image_url",
+                    (rec.get("sku"), rec.get("item_name"), rec.get("category"),
+                     rec.get("price"), rec.get("stock_left"), rec.get("status"),
+                     rec.get("image_url")))
+            synced = max(synced, len(records))
+        except Exception as exc:
+            errors.append(f"Turso sync failed: {exc}")
+
     return synced, errors
 
 
@@ -1677,6 +2084,18 @@ def _fetch_inventory_supabase(conn_str: str) -> list | None:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
+def _fetch_inventory_turso(turso_key: str) -> list | None:
+    if not turso_key:
+        return None
+    try:
+        _u, _t = turso_key.split("|", 1)
+        rows = _turso_execute_direct(_u, _t, "SELECT * FROM inventory ORDER BY item_name")
+        return rows if rows else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def _fetch_inventory_sqlite_cached() -> list | None:
     df = load_inventory_from_sqlite()
     if not df.empty:
@@ -1685,10 +2104,16 @@ def _fetch_inventory_sqlite_cached() -> list | None:
 
 
 def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
-    """Load inventory preferring Supabase > SQLite (results cached 30 s)."""
+    """Load inventory preferring Supabase > Turso > SQLite (results cached 30 s)."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         rows = _fetch_inventory_supabase(_sb_cs)
+        if rows:
+            return pd.DataFrame(rows)
+
+    _tk = _turso_cache_key(cfg)
+    if _tk:
+        rows = _fetch_inventory_turso(_tk)
         if rows:
             return pd.DataFrame(rows)
 
@@ -1699,10 +2124,16 @@ def load_inventory_preferring_cloud(cfg: dict) -> pd.DataFrame:
 
 
 def load_products_for_catalog(cfg: dict) -> list[dict]:
-    """Load product list preferring Supabase > SQLite > config.json (cached 30 s)."""
+    """Load product list preferring Supabase > Turso > SQLite > config.json (cached 30 s)."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         rows = _fetch_inventory_supabase(_sb_cs)
+        if rows:
+            return rows
+
+    _tk = _turso_cache_key(cfg)
+    if _tk:
+        rows = _fetch_inventory_turso(_tk)
         if rows:
             return rows
 
@@ -1751,6 +2182,17 @@ def save_outbound_log(log: dict, cfg: dict):
             conn_sb.close()
         except Exception: pass
 
+    # Turso
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO outbound_logs "
+                "(recipient_name,recipient_email,order_number,products_list,subtotal,tax,shipping,total_cost) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (row["name"],row["email"],row["order"],row["prods"],
+                 row["sub"],row["tax"],row["ship"],row["cost"]))
+        except Exception: pass
+
 
 _FIN_CATEGORIES     = ["Revenue", "Expense", "Cost of Goods (COGS)", "Marketing", "Payroll", "Operations", "Other"]
 _FIN_PAYMENT_METHODS = ["", "Bank Transfer", "Credit Card", "Debit Card", "Cash", "Check", "Wire Transfer", "PayPal", "Venmo", "Stripe", "Other"]
@@ -1760,7 +2202,7 @@ _FIN_PERIODS        = ["monthly", "quarterly", "annual"]
 _FIN_ALL_COLS = "id, entry_date, category, description, amount, notes, payment_method, tags, is_recurring, recur_frequency, created_at"
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_financials_cached(sb_conn_str: str) -> list:
+def _fetch_financials_cached(sb_conn_str: str, turso_key: str = "") -> list:
     if sb_conn_str:
         try:
             conn = _psycopg2_connect(sb_conn_str, connect_timeout=5)
@@ -1770,6 +2212,15 @@ def _fetch_financials_cached(sb_conn_str: str) -> list:
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             conn.close()
             return rows
+        except Exception:
+            pass
+    if turso_key:
+        try:
+            _tu, _tt = turso_key.split("|", 1)
+            rows = _turso_execute_direct(_tu, _tt,
+                f"SELECT {_FIN_ALL_COLS} FROM financials ORDER BY entry_date DESC, id DESC")
+            if rows is not None:
+                return rows
         except Exception:
             pass
     try:
@@ -1782,7 +2233,7 @@ def _fetch_financials_cached(sb_conn_str: str) -> list:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _fetch_budgets_cached(sb_conn_str: str) -> list:
+def _fetch_budgets_cached(sb_conn_str: str, turso_key: str = "") -> list:
     if sb_conn_str:
         try:
             conn = _psycopg2_connect(sb_conn_str, connect_timeout=5)
@@ -1792,6 +2243,15 @@ def _fetch_budgets_cached(sb_conn_str: str) -> list:
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             conn.close()
             return rows
+        except Exception:
+            pass
+    if turso_key:
+        try:
+            _tu, _tt = turso_key.split("|", 1)
+            rows = _turso_execute_direct(_tu, _tt,
+                "SELECT id, category, period, budget_amount, notes, created_at FROM fin_budgets ORDER BY category, period")
+            if rows is not None:
+                return rows
         except Exception:
             pass
     try:
@@ -1805,14 +2265,14 @@ def _fetch_budgets_cached(sb_conn_str: str) -> list:
 
 def get_financials_from_db(cfg: dict) -> pd.DataFrame:
     sb_cs = _get_effective_supabase_conn_str(cfg) or ""
-    rows = _fetch_financials_cached(sb_cs)
+    rows = _fetch_financials_cached(sb_cs, _turso_cache_key(cfg))
     _fin_empty_cols = ["id","entry_date","category","description","amount","notes","payment_method","tags","is_recurring","recur_frequency","created_at"]
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=_fin_empty_cols)
 
 
 def get_budgets_from_db(cfg: dict) -> pd.DataFrame:
     sb_cs = _get_effective_supabase_conn_str(cfg) or ""
-    rows = _fetch_budgets_cached(sb_cs)
+    rows = _fetch_budgets_cached(sb_cs, _turso_cache_key(cfg))
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id","category","period","budget_amount","notes","created_at"])
 
 
@@ -1842,6 +2302,14 @@ def add_financial_entry(entry_date: str, category: str, description: str, amount
             conn_sb.close(); results.append("Supabase")
         except Exception as e:
             results.append(f"Supabase failed: {e}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO financials (entry_date, category, description, amount, notes, payment_method, tags, is_recurring, recur_frequency) VALUES (?,?,?,?,?,?,?,?,?)",
+                (entry_date, category, description, amount, notes, payment_method, tags, _is_rec_int, recur_frequency))
+            results.append("Turso")
+        except Exception as e:
+            results.append(f"Turso failed: {e}")
     _fetch_financials_cached.clear()
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1872,6 +2340,14 @@ def update_financial_entry(row_id: int, entry_date: str, category: str, descript
             conn_sb.close(); results.append("Supabase")
         except Exception as e:
             results.append(f"Supabase failed: {e}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "UPDATE financials SET entry_date=?, category=?, description=?, amount=?, notes=?, payment_method=?, tags=?, is_recurring=?, recur_frequency=? WHERE id=?",
+                (entry_date, category, description, amount, notes, payment_method, tags, _is_rec_int, recur_frequency, row_id))
+            results.append("Turso")
+        except Exception as e:
+            results.append(f"Turso failed: {e}")
     _fetch_financials_cached.clear()
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1894,6 +2370,12 @@ def delete_financial_entry(row_id: int, cfg: dict) -> tuple[bool, str]:
             conn_sb.close(); results.append("Supabase")
         except Exception as e:
             results.append(f"Supabase failed: {e}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "DELETE FROM financials WHERE id=?", (row_id,))
+            results.append("Turso")
+        except Exception as e:
+            results.append(f"Turso failed: {e}")
     _fetch_financials_cached.clear()
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1924,6 +2406,15 @@ def upsert_budget_entry(category: str, period: str, budget_amount: float, notes:
             conn_sb.close(); results.append("Supabase")
         except Exception as e:
             results.append(f"Supabase failed: {e}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg,
+                "INSERT INTO fin_budgets (category, period, budget_amount, notes) VALUES (?,?,?,?) "
+                "ON CONFLICT(category, period) DO UPDATE SET budget_amount=excluded.budget_amount, notes=excluded.notes",
+                (category, period, budget_amount, notes))
+            results.append("Turso")
+        except Exception as e:
+            results.append(f"Turso failed: {e}")
     _fetch_budgets_cached.clear()
     return any("failed" not in r for r in results), " · ".join(results)
 
@@ -1946,12 +2437,18 @@ def delete_budget_entry(row_id: int, cfg: dict) -> tuple[bool, str]:
             conn_sb.close(); results.append("Supabase")
         except Exception as e:
             results.append(f"Supabase failed: {e}")
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "DELETE FROM fin_budgets WHERE id=?", (row_id,))
+            results.append("Turso")
+        except Exception as e:
+            results.append(f"Turso failed: {e}")
     _fetch_budgets_cached.clear()
     return any("failed" not in r for r in results), " · ".join(results)
 
 
 def load_outbound_logs(cfg: dict) -> pd.DataFrame:
-    """Load outbound logs from Supabase or local SQLite."""
+    """Load outbound logs from Supabase, Turso, or local SQLite."""
     _sb_cs = _get_effective_supabase_conn_str(cfg)
     if _sb_cs:
         try:
@@ -1960,6 +2457,14 @@ def load_outbound_logs(cfg: dict) -> pd.DataFrame:
             conn.close()
             df = df.rename(columns={"created_at": "timestamp"})
             return df
+        except Exception: pass
+
+    if _has_turso(cfg):
+        try:
+            rows = _turso_execute(cfg,
+                "SELECT * FROM outbound_logs ORDER BY timestamp DESC LIMIT 500")
+            if rows:
+                return pd.DataFrame(rows)
         except Exception: pass
 
     try:
@@ -2696,6 +3201,7 @@ def parse_multi_csv(tx_text: str, items_text: str) -> tuple[list[dict], list[str
 if page == "Get Started":
     cfg = st.session_state.cfg
     _gs_has_sb       = _has_supabase(cfg)
+    _gs_has_turso_gs = _has_turso(cfg)
     _gs_has_img      = _has_image_host(cfg)
     _gs_has_smtp     = bool(cfg.get("smtp_email") and cfg.get("smtp_password"))
     _gs_has_identity = bool(cfg.get("from_name") and cfg.get("subject"))
@@ -2713,11 +3219,11 @@ if page == "Get Started":
     st.caption("Complete the steps below in order to fully configure MERIT for your firm.")
 
     st.info("**Device Recommendation:** MERIT runs on **Streamlit**, which often has issues on school-issued Chromebooks. For the best experience, use your **personal laptop** or your **school-provided VE laptop**.")
-    st.error("**VE Email Requirement:** Use your **official VE email address** (e.g. yourcompanyname@veinternational.org) for all account registrations — Supabase, Gmail SMTP, and Image Hosting.")
+    st.error("**VE Email Requirement:** Use your **official VE email address** (e.g. yourcompanyname@veinternational.org) for all account registrations — Supabase, Turso, Gmail SMTP, and Image Hosting.")
 
     # ── Checklist ───────────────────────────────────────────────────
     _step1_ok = _gs_has_users
-    _step2_ok = _gs_has_sb
+    _step2_ok = _gs_has_sb or _gs_has_turso_gs   # either cloud DB counts
     _step3_ok = _gs_has_img
     _step4_ok = _gs_has_smtp
     _step5_ok = _gs_has_identity
@@ -2729,7 +3235,10 @@ if page == "Get Started":
         if _step1_ok: st.success("Step 1 — Users")
         else: st.error("Step 1 — Create Users")
     with _cl2:
-        if _step2_ok: st.success("Step 2 — Supabase")
+        if _step2_ok:
+            _db_label = ("Supabase + Turso" if (_gs_has_sb and _gs_has_turso_gs)
+                         else ("Turso" if _gs_has_turso_gs else "Supabase"))
+            st.success(f"Step 2 — {_db_label}")
         else: st.warning("Step 2 — Connect DB")
     with _cl3:
         if _step3_ok: st.success("Step 3 — Images")
@@ -2866,11 +3375,57 @@ team members — they receive a shareable link and set their own password, no ne
                     else:
                         st.caption("built-in")
 
-    # ── STEP 2: Supabase ──────────────────────────────────────────────
-    with st.expander("Step 2 — Connect Supabase & Setup Tables", expanded=not _step2_ok and _step1_ok):
+    # ── STEP 2: Database ──────────────────────────────────────────────
+    with st.expander("Step 2 — Connect a Cloud Database (Supabase or Turso)", expanded=not _step2_ok and _step1_ok):
         st.markdown("""
-Supabase is the cloud database that stores your products, inventory, users, and roles so everything
-persists even when the app restarts.
+MERIT needs a cloud database so your products, inventory, users, and financials persist
+even when the app restarts. Connect **either Supabase or Turso** — or both for redundancy.
+Both are free for VEI firms.
+        """)
+
+        _db_opt_tab1, _db_opt_tab2 = st.tabs(["Option A — Turso (Recommended)", "Option B — Supabase"])
+
+        with _db_opt_tab1:
+            st.markdown("""
+Turso is a fast, distributed SQLite database that is easy to set up and works great with MERIT.
+
+**IMPORTANT:** Use your **official VE email address** when signing up.
+
+#### 1. Sign up at Turso
+Go to [turso.tech](https://turso.tech) → **Sign Up** with your VE email.
+
+#### 2. Create a database
+After logging in you will land on the **Databases** page.
+Click **Create database**, give it a name (e.g. your firm name), and pick the closest region.
+
+#### 3. Get your Database URL
+1. Click on your new database.
+2. Click the **Connect** tab (top of the page).
+3. Copy the **URL** — it looks like: `libsql://[db-name]-[org].turso.io`
+4. Paste it into **Settings → Database → Turso → Database URL**.
+
+#### 4. Get your Auth Token
+1. In the Turso sidebar on the left, look below the usage bar and click on **your logo / avatar**.
+2. Click **Platform API Tokens**.
+3. Click **Create token**.
+4. **Name:** your organization name (e.g. `BluePeak Ventures`).
+5. **Scope:** select your username.
+6. Click **Create** and copy the token (starts with `eyJ…`).
+7. Paste it into **Settings → Database → Turso → Auth Token**.
+
+#### 5. Setup tables
+Back in MERIT, go to **Settings → Database** and click **Setup Turso Tables**.
+This creates all MERIT tables in Turso and syncs your users and roles from Step 1.
+            """)
+            if _gs_has_turso_gs:
+                st.success("Turso is connected.")
+            else:
+                st.warning("Turso not yet configured — follow the steps above.")
+
+        with _db_opt_tab2:
+            st.markdown("""
+Supabase is a PostgreSQL-based cloud database. It offers more features and works well for
+larger firms or those already using Supabase.
 
 **IMPORTANT:** Use your **official VE email address** when signing up.
 
@@ -2901,8 +3456,12 @@ Click **Create new project** and wait about 60 seconds.
 
 1. Supabase Dashboard → gear icon (⚙) → **Project Settings** → **API**.
 2. Under **Legacy API keys** → copy the **anon / public** key (starts with `eyJ…`).
-3. Paste it into **Settings → Supabase Anon Key**.
-        """)
+3. Paste it into **Settings → Database → Supabase Anon Key**.
+            """)
+            if _gs_has_sb:
+                st.success("Supabase is connected.")
+            else:
+                st.warning("Supabase not yet configured — follow the steps above.")
 
     # ── STEP 3: Image Hosting ─────────────────────────────────────────
     with st.expander("Step 3 — Set Up Image Hosting", expanded=not _step3_ok and _step2_ok):
@@ -2963,7 +3522,7 @@ Streamlit Cloud forgets everything on reboot. Saving a **Secrets TOML** makes al
 | **Products** | Add, edit, and delete products with images and descriptions |
 | **Inventory** | Stock overview, adjust stock, and original stock tracking |
 | **Financials** | Revenue overview, ledger, order history, and product revenue breakdowns |
-| **Settings** | All credentials — database, email, image hosting, team management with invite links |
+| **Settings** | All credentials — Supabase, Turso, email, image hosting, team management with invite links |
 | **API Endpoints** | Pre-built code to connect your website to the live product database |
     """)
 
@@ -3654,6 +4213,7 @@ elif page == "Inventory":
                             continue
                         adjust_inventory_sqlite(_asku, _adelta)
                         if _has_sb_inv: adjust_inventory_supabase(_asku, _adelta, cfg)
+                        if _has_turso(cfg): adjust_inventory_turso(_asku, _adelta, cfg)
                         _adj_applied += 1
                     if _adj_applied:
                         st.toast("Stock updated successfully.", icon=None)
@@ -3712,6 +4272,7 @@ elif page == "Inventory":
                                 if not ok:
                                     st.toast("Something went wrong. Please try again.", icon=None)
                                 if _has_sb_inv: adjust_inventory_supabase(_psku, int(_delta_val), cfg)
+                                if _has_turso(cfg): adjust_inventory_turso(_psku, int(_delta_val), cfg)
                                 st.toast(f"Stock updated: {_pname}", icon=None)
                                 _clear_data_caches()
                                 time.sleep(0.5)
@@ -4189,6 +4750,8 @@ elif page == "Settings":
         "inp_sb_pass":          "supabase_db_password",
         "inp_sb_conn":          "supabase_connection_string",
         "inp_sb_anon":          "supabase_anon_key",
+        "inp_turso_url":        "turso_url",
+        "inp_turso_token":      "turso_auth_token",
     }
 
     for _ss_k, _cfg_k in _SETTINGS_KEY_MAP.items():
@@ -4226,6 +4789,11 @@ elif page == "Settings":
         _auto_save_settings()
         st.session_state.pop("_ih_test_result", None)
         st.session_state["_ih_test_pending"] = True
+
+    def _on_turso_change():
+        _auto_save_settings()
+        st.session_state.pop("_turso_test_result", None)
+        st.session_state["_turso_test_pending"] = True
 
     _s_tab_db, _s_tab_email, _s_tab_img, _s_tab_team, _s_tab_secrets = st.tabs(
         ["Database", "Email", "Image Hosting", "Team", "Secrets"]
@@ -4321,6 +4889,78 @@ elif page == "Settings":
                     else:
                         st.warning(f"{_ok} OK, {len(_fail)} failed:")
                         for _f in _fail:
+                            st.caption(_f)
+                except Exception as exc:
+                    st.error(f"Setup failed: {exc}")
+
+        st.divider()
+        st.subheader("Turso Connection")
+        st.caption("Turso is a distributed SQLite-compatible database. Use it as an alternative or in addition to Supabase.")
+        _tc1, _tc2 = st.columns([2, 1])
+        with _tc1:
+            inp_turso_url = st.text_input(
+                "Database URL",
+                placeholder="libsql://[db-name]-[org].turso.io",
+                help="Turso Dashboard → your database → Connect → URL (libsql:// or https://)",
+                key="inp_turso_url",
+                on_change=_on_turso_change,
+            )
+        with _tc2:
+            inp_turso_token = st.text_input(
+                "Auth Token",
+                type="password",
+                placeholder="eyJ...",
+                help="Turso Dashboard → your database → Connect → Auth Token",
+                key="inp_turso_token",
+                on_change=_on_turso_change,
+            )
+
+        _turso_url_val = inp_turso_url.strip()
+        _turso_tok_val = inp_turso_token.strip()
+        _turso_cfg_ready = bool(_turso_url_val and _turso_tok_val)
+
+        if st.session_state.pop("_turso_test_pending", False) and _turso_cfg_ready:
+            with st.spinner("Testing Turso connection..."):
+                try:
+                    _test_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
+                    _turso_execute(_test_cfg, "SELECT 1")
+                    st.session_state["_turso_test_result"] = ("ok", "Connected to Turso successfully.")
+                except Exception as _te:
+                    st.session_state["_turso_test_result"] = ("err", str(_te)[:300])
+
+        if "_turso_test_result" in st.session_state:
+            _tr = st.session_state["_turso_test_result"]
+            if _tr[0] == "ok":
+                st.success(_tr[1])
+            else:
+                st.error(f"Connection failed: {_tr[1]}")
+
+        st.divider()
+        st.subheader("Setup Turso Tables")
+        st.caption("Creates all MERIT tables in Turso and syncs any locally-created users and roles.")
+        if st.button("Setup Turso Tables", type="primary", width="stretch", key="btn_setup_turso", disabled=not _turso_cfg_ready):
+            with st.spinner("Creating tables in Turso..."):
+                try:
+                    _turso_setup_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
+                    _ok_t, _fail_t = 0, []
+                    for _stmt in [s.strip() for s in TURSO_SETUP_SQL.split(";") if s.strip()]:
+                        try:
+                            _turso_execute(_turso_setup_cfg, _stmt)
+                            _ok_t += 1
+                        except Exception as _se:
+                            _fail_t.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                    if not _fail_t:
+                        st.toast("Turso tables ready!")
+                        st.success("Tables created successfully.")
+                        with st.spinner("Syncing users and roles to Turso..."):
+                            _u_cnt, _r_cnt, _sync_errs = sync_local_to_turso(_turso_setup_cfg)
+                        if _sync_errs:
+                            st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
+                        elif _u_cnt or _r_cnt:
+                            st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) to Turso.")
+                    else:
+                        st.warning(f"{_ok_t} OK, {len(_fail_t)} failed:")
+                        for _f in _fail_t:
                             st.caption(_f)
                 except Exception as exc:
                     st.error(f"Setup failed: {exc}")
@@ -4797,9 +5437,9 @@ elif page == "API Endpoints":
 
     if not _has_supabase(cfg):
         st.warning(
-            "**Supabase is not connected yet.** "
-            "Go to **Get Started → Step 1** or **Settings → Database** and paste your "
-            "Supabase connection string, then click **Setup Tables**."
+            "**No cloud database connected.** "
+            "Go to **Get Started → Step 2** or **Settings → Database** to connect "
+            "Supabase or Turso, then click **Setup Tables**."
         )
         st.stop()
 
@@ -6449,6 +7089,7 @@ Templates persist across app reboots when Supabase is connected.
                 for _dsku, _dqty in _deductions.items():
                     adjust_inventory_sqlite(_dsku, -_dqty)
                     if _has_sb_send:    adjust_inventory_supabase(_dsku, -_dqty, cfg)
+                    if _has_turso(cfg): adjust_inventory_turso(_dsku, -_dqty, cfg)
                 _clear_data_caches()
 
             # Persist deduction data for impact chart (survives st.rerun)
