@@ -4804,7 +4804,95 @@ elif page == "Settings":
 
     # ════════════════ DATABASE TAB ════════════════════════════════════
     with _s_tab_db:
-        st.subheader("Supabase Connection")
+
+        # ── Status banner ────────────────────────────────────────────
+        _db_turso_live = _has_turso(cfg)
+        _db_sb_live    = _has_supabase(cfg)
+        _dbs_active    = [n for n, v in [("Turso", _db_turso_live), ("Supabase", _db_sb_live)] if v]
+        if _dbs_active:
+            st.success(f"Connected: {' + '.join(_dbs_active)}")
+        else:
+            st.warning("No cloud database connected. Set up Turso or Supabase below.")
+
+        st.divider()
+
+        # ════ TURSO (primary) ════════════════════════════════════════
+        st.subheader("Turso")
+        st.caption("Recommended — distributed SQLite. No extra packages needed.")
+
+        _tc1, _tc2 = st.columns([3, 2])
+        with _tc1:
+            inp_turso_url = st.text_input(
+                "Database URL",
+                placeholder="libsql://[org-name]-[username].turso.io",
+                help="Turso Dashboard → your database → Connect section → libsql:// URL",
+                key="inp_turso_url",
+                on_change=_on_turso_change,
+            )
+        with _tc2:
+            inp_turso_token = st.text_input(
+                "Auth Token",
+                type="password",
+                placeholder="eyJ...",
+                help="Turso → sidebar → your avatar (below usage bar) → Platform API Tokens → Create token",
+                key="inp_turso_token",
+                on_change=_on_turso_change,
+            )
+
+        _turso_url_val  = inp_turso_url.strip()
+        _turso_tok_val  = inp_turso_token.strip()
+        _turso_cfg_ready = bool(_turso_url_val and _turso_tok_val)
+
+        if st.session_state.pop("_turso_test_pending", False) and _turso_cfg_ready:
+            with st.spinner("Testing Turso connection..."):
+                try:
+                    _test_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
+                    _turso_execute(_test_cfg, "SELECT 1")
+                    st.session_state["_turso_test_result"] = ("ok", "Connected to Turso successfully.")
+                except Exception as _te:
+                    st.session_state["_turso_test_result"] = ("err", str(_te)[:300])
+
+        if "_turso_test_result" in st.session_state:
+            _tr = st.session_state["_turso_test_result"]
+            if _tr[0] == "ok":
+                st.success(_tr[1])
+            else:
+                st.error(f"Turso connection failed: {_tr[1]}")
+
+        if st.button("Setup Turso Tables", type="primary", width="stretch",
+                     key="btn_setup_turso", disabled=not _turso_cfg_ready):
+            with st.spinner("Creating tables in Turso..."):
+                try:
+                    _turso_setup_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
+                    _ok_t, _fail_t = 0, []
+                    for _stmt in [s.strip() for s in TURSO_SETUP_SQL.split(";") if s.strip()]:
+                        try:
+                            _turso_execute(_turso_setup_cfg, _stmt)
+                            _ok_t += 1
+                        except Exception as _se:
+                            _fail_t.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
+                    if not _fail_t:
+                        st.toast("Turso tables ready!")
+                        st.success("Tables created successfully.")
+                        with st.spinner("Syncing users and roles to Turso..."):
+                            _u_cnt, _r_cnt, _sync_errs = sync_local_to_turso(_turso_setup_cfg)
+                        if _sync_errs:
+                            st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
+                        elif _u_cnt or _r_cnt:
+                            st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) to Turso.")
+                    else:
+                        st.warning(f"{_ok_t} OK, {len(_fail_t)} failed:")
+                        for _f in _fail_t:
+                            st.caption(_f)
+                except Exception as exc:
+                    st.error(f"Setup failed: {exc}")
+
+        st.divider()
+
+        # ════ SUPABASE (secondary) ═══════════════════════════════════
+        st.subheader("Supabase")
+        st.caption("PostgreSQL cloud database — optional, works alongside Turso.")
+
         inp_sb_conn = st.text_input(
             "Connection String",
             placeholder="postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
@@ -4859,12 +4947,10 @@ elif page == "Settings":
             if _sbr[0] == "ok":
                 st.success(_sbr[1])
             else:
-                st.error(f"Connection failed: {_sbr[1]}")
+                st.error(f"Supabase connection failed: {_sbr[1]}")
 
-        st.divider()
-        st.subheader("Setup Tables")
-        st.caption("Creates all MERIT tables in Supabase and syncs any locally-created users and roles.")
-        if st.button("Setup Tables", type="primary", width="stretch", key="btn_setup_sb", disabled=not _sb_effective):
+        if st.button("Setup Supabase Tables", type="primary", width="stretch",
+                     key="btn_setup_sb", disabled=not _sb_effective):
             with st.spinner("Creating tables in Supabase..."):
                 try:
                     _conn = _psycopg2_connect(_sb_effective, connect_timeout=15)
@@ -4892,78 +4978,6 @@ elif page == "Settings":
                     else:
                         st.warning(f"{_ok} OK, {len(_fail)} failed:")
                         for _f in _fail:
-                            st.caption(_f)
-                except Exception as exc:
-                    st.error(f"Setup failed: {exc}")
-
-        st.divider()
-        st.subheader("Turso Connection")
-        st.caption("Turso is a distributed SQLite-compatible database. Use it as an alternative or in addition to Supabase.")
-        _tc1, _tc2 = st.columns([2, 1])
-        with _tc1:
-            inp_turso_url = st.text_input(
-                "Database URL",
-                placeholder="libsql://[db-name]-[org].turso.io",
-                help="Turso Dashboard → your database → Connect → URL (libsql:// or https://)",
-                key="inp_turso_url",
-                on_change=_on_turso_change,
-            )
-        with _tc2:
-            inp_turso_token = st.text_input(
-                "Auth Token",
-                type="password",
-                placeholder="eyJ...",
-                help="Turso Dashboard → your database → Connect → Auth Token",
-                key="inp_turso_token",
-                on_change=_on_turso_change,
-            )
-
-        _turso_url_val = inp_turso_url.strip()
-        _turso_tok_val = inp_turso_token.strip()
-        _turso_cfg_ready = bool(_turso_url_val and _turso_tok_val)
-
-        if st.session_state.pop("_turso_test_pending", False) and _turso_cfg_ready:
-            with st.spinner("Testing Turso connection..."):
-                try:
-                    _test_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
-                    _turso_execute(_test_cfg, "SELECT 1")
-                    st.session_state["_turso_test_result"] = ("ok", "Connected to Turso successfully.")
-                except Exception as _te:
-                    st.session_state["_turso_test_result"] = ("err", str(_te)[:300])
-
-        if "_turso_test_result" in st.session_state:
-            _tr = st.session_state["_turso_test_result"]
-            if _tr[0] == "ok":
-                st.success(_tr[1])
-            else:
-                st.error(f"Connection failed: {_tr[1]}")
-
-        st.divider()
-        st.subheader("Setup Turso Tables")
-        st.caption("Creates all MERIT tables in Turso and syncs any locally-created users and roles.")
-        if st.button("Setup Turso Tables", type="primary", width="stretch", key="btn_setup_turso", disabled=not _turso_cfg_ready):
-            with st.spinner("Creating tables in Turso..."):
-                try:
-                    _turso_setup_cfg = {**cfg, "turso_url": _turso_url_val, "turso_auth_token": _turso_tok_val}
-                    _ok_t, _fail_t = 0, []
-                    for _stmt in [s.strip() for s in TURSO_SETUP_SQL.split(";") if s.strip()]:
-                        try:
-                            _turso_execute(_turso_setup_cfg, _stmt)
-                            _ok_t += 1
-                        except Exception as _se:
-                            _fail_t.append(f"{_stmt[:60]}… → {str(_se)[:100]}")
-                    if not _fail_t:
-                        st.toast("Turso tables ready!")
-                        st.success("Tables created successfully.")
-                        with st.spinner("Syncing users and roles to Turso..."):
-                            _u_cnt, _r_cnt, _sync_errs = sync_local_to_turso(_turso_setup_cfg)
-                        if _sync_errs:
-                            st.warning(f"Synced {_u_cnt} users, {_r_cnt} roles — some errors: {'; '.join(_sync_errs[:3])}")
-                        elif _u_cnt or _r_cnt:
-                            st.info(f"Synced {_u_cnt} user(s) and {_r_cnt} role(s) to Turso.")
-                    else:
-                        st.warning(f"{_ok_t} OK, {len(_fail_t)} failed:")
-                        for _f in _fail_t:
                             st.caption(_f)
                 except Exception as exc:
                     st.error(f"Setup failed: {exc}")
