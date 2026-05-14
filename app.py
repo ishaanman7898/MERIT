@@ -2642,7 +2642,43 @@ _invite_token_param = st.query_params.get("invite", "")
 if _invite_token_param:
     _invite_user_info = validate_invite_token(_invite_token_param, _auth_cfg)
     st.markdown("""
-        <style>[data-testid="stSidebar"] { display: none; }</style>
+        <style>
+        [data-testid="stSidebar"] { display: none; }
+        .main .block-container {
+            padding-top: 8vh !important;
+            padding-bottom: 2rem !important;
+            max-width: 100% !important;
+        }
+        .merit-invite-card {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            border: 1px solid rgba(99,102,241,0.25);
+            border-radius: 1.25rem;
+            padding: 2rem 2rem 1.5rem 2rem;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.45);
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        .merit-invite-logo {
+            display: block;
+            width: 60px; height: 60px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border-radius: 50%;
+            font-size: 1.6rem;
+            line-height: 60px;
+            text-align: center;
+            margin: 0 auto 0.75rem auto;
+            box-shadow: 0 0 20px rgba(99,102,241,0.45);
+        }
+        .merit-invite-title {
+            color: #f1f5f9;
+            font-size: 1.6rem;
+            font-weight: 700;
+            margin: 0 0 0.25rem 0;
+            text-align: center;
+        }
+        .merit-invite-sub { color: #94a3b8; font-size: 0.9rem; margin: 0 0 0.2rem 0; text-align: center; }
+        .merit-invite-hint { color: #64748b; font-size: 0.85rem; margin: 0; text-align: center; }
+        </style>
     """, unsafe_allow_html=True)
     _inv_c1, _inv_c2, _inv_c3 = st.columns([1, 2, 1])
     with _inv_c2:
@@ -2650,14 +2686,11 @@ if _invite_token_param:
         _firm_label = _firm_li if _firm_li else "MERIT"
         if _invite_user_info:
             st.markdown(
-                f'<div style="text-align:center;margin-bottom:1rem">'
-                f'<div style="display:inline-flex;align-items:center;justify-content:center;'
-                f'width:60px;height:60px;background:linear-gradient(135deg,#6366f1,#8b5cf6);'
-                f'border-radius:50%;font-size:1.6rem;margin-bottom:0.75rem;'
-                f'box-shadow:0 0 20px rgba(99,102,241,0.45)">M</div>'
-                f'<h1 style="margin:0 0 0.2rem 0;font-size:1.6rem">{_firm_label}</h1>'
-                f'<p style="color:#888;margin:0 0 0.2rem 0">Welcome, {_invite_user_info["full_name"]}!</p>'
-                f'<p style="color:#aaa;font-size:0.85rem;margin:0">Create your password to get started.</p>'
+                f'<div class="merit-invite-card">'
+                f'<div class="merit-invite-logo">M</div>'
+                f'<h1 class="merit-invite-title">{_firm_label}</h1>'
+                f'<p class="merit-invite-sub">Welcome, {_invite_user_info["full_name"]}!</p>'
+                f'<p class="merit-invite-hint">Create your password to get started.</p>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2691,7 +2724,10 @@ if _invite_token_param:
                             st.error(f"Failed to set password: {_inv_msg}")
         else:
             st.markdown(
-                f'<h1 style="text-align:center;margin-bottom:0.5rem">{_firm_label}</h1>',
+                f'<div class="merit-invite-card">'
+                f'<div class="merit-invite-logo">M</div>'
+                f'<h1 class="merit-invite-title">{_firm_label}</h1>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
             st.warning("This invite link is invalid or has already been used. Ask your admin for a new link.")
@@ -2703,11 +2739,10 @@ if _has_users and _login_secrets_active:
         st.markdown("""
             <style>
             [data-testid="stSidebar"] { display: none; }
-            .merit-login-wrap {
-                min-height: 100vh;
-                display: flex;
-                align-items: center;
-                justify-content: center;
+            .main .block-container {
+                padding-top: 8vh !important;
+                padding-bottom: 2rem !important;
+                max-width: 100% !important;
             }
             .merit-login-card {
                 background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
@@ -2718,15 +2753,15 @@ if _has_users and _login_secrets_active:
                 text-align: center;
             }
             .merit-logo-ring {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
+                display: block;
                 width: 64px; height: 64px;
                 background: linear-gradient(135deg, #6366f1, #8b5cf6);
                 border-radius: 50%;
                 font-size: 1.8rem;
-                margin-bottom: 1rem;
+                margin: 0 auto 1rem auto;
                 box-shadow: 0 0 24px rgba(99,102,241,0.5);
+                line-height: 64px;
+                text-align: center;
             }
             .merit-login-title {
                 color: #f1f5f9;
@@ -2734,11 +2769,13 @@ if _has_users and _login_secrets_active:
                 font-weight: 700;
                 margin: 0 0 0.25rem 0;
                 letter-spacing: -0.5px;
+                text-align: center;
             }
             .merit-login-sub {
                 color: #94a3b8;
                 font-size: 0.9rem;
                 margin-bottom: 1.75rem;
+                text-align: center;
             }
             </style>
         """, unsafe_allow_html=True)
