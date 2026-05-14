@@ -3781,6 +3781,20 @@ elif page == "Inventory":
                                 if ok:
                                     _dir = "added" if _restock_delta > 0 else "removed"
                                     st.toast(f"{abs(_restock_delta)} units {_dir} — {_oname}", icon="📦")
+                                    # Auto-log COGS in Financials when buying stock
+                                    if _restock_delta > 0:
+                                        _unit_price = float(_pr.get("price", 0) or 0)
+                                        _cogs_amt   = _unit_price * int(_restock_delta)
+                                        import datetime as _dt
+                                        add_financial_entry(
+                                            str(_dt.date.today()),
+                                            "Cost of Goods (COGS)",
+                                            f"Inventory purchase: {_oname} × {int(_restock_delta)} units @ ${_unit_price:.2f}",
+                                            _cogs_amt,
+                                            f"SKU: {_osku}",
+                                            cfg,
+                                        )
+                                        _fetch_financials_cached.clear()
                                     _clear_data_caches()
                                     time.sleep(0.5)
                                     st.rerun()
@@ -3874,12 +3888,11 @@ elif page == "Financials":
     cfg = st.session_state.cfg
 
     st.title("Financials")
-    st.caption("Revenue, expenses, budgets, P&L, cash flow, and full ledger management — all stored in Supabase.")
+    st.caption("Revenue and expense tracking. Inventory purchases auto-log as COGS.")
 
-    # ── Load all data ─────────────────────────────────────────────
-    _fin_logs    = load_outbound_logs(cfg)
-    _fin_ledger  = get_financials_from_db(cfg)
-    _fin_budgets = get_budgets_from_db(cfg)
+    # ── Load data ─────────────────────────────────────────────────
+    _fin_logs   = load_outbound_logs(cfg)
+    _fin_ledger = get_financials_from_db(cfg)
 
     # Parse outbound log revenue
     _fin_df   = _fin_logs.copy()
@@ -3912,12 +3925,11 @@ elif page == "Financials":
 
     _total_revenue_all = _order_revenue + _led_revenue
     _net_income        = _total_revenue_all - _led_expense
-    _gross_margin_pct  = (_net_income / _total_revenue_all * 100) if _total_revenue_all else 0.0
 
     # ── Radio mode ────────────────────────────────────────────────
     _fin_mode = st.radio(
         "Financial View",
-        ["Overview", "Add Entry", "Ledger", "Budgets", "P&L Statement", "Cash Flow", "Order Revenue", "Revenue by Product"],
+        ["Overview", "Add Entry", "Ledger", "Order Revenue", "Revenue by Product"],
         horizontal=True,
         label_visibility="collapsed",
         key="fin_mode_radio",
@@ -3933,7 +3945,7 @@ elif page == "Financials":
 
         _fme, _fmf, _fmg, _fmh = st.columns(4)
         _fme.metric("Net Income",      f"${_net_income:,.2f}", delta="profit" if _net_income >= 0 else "loss")
-        _fmf.metric("Gross Margin",    f"{_gross_margin_pct:.1f}%")
+        _fmf.metric("Total Orders",    f"{_order_count:,}")
         _avg_ord = _order_revenue / _order_count if _order_count else 0
         _fmg.metric("Avg Order Value", f"${_avg_ord:,.2f}")
         _ledger_entries = len(_fin_ledger) if not _fin_ledger.empty else 0
@@ -3952,69 +3964,25 @@ elif page == "Financials":
 
         if not _fin_ledger.empty:
             st.divider()
-            _ov_c1, _ov_c2 = st.columns(2)
-            with _ov_c1:
-                st.subheader("Expenses by Category")
-                _exp_totals = _fin_ledger[_fin_ledger["category"].isin(_exp_cats)].groupby("category")["_amount"].sum().reset_index()
-                _exp_totals.columns = ["Category", "Amount ($)"]
-                _exp_totals = _exp_totals.sort_values("Amount ($)", ascending=False)
-                if not _exp_totals.empty:
-                    st.bar_chart(_exp_totals.set_index("Category")["Amount ($)"], color="#ef4444")
-                else:
-                    st.info("No expense entries yet.")
-            with _ov_c2:
-                st.subheader("Recurring Entries")
-                if "is_recurring" in _fin_ledger.columns:
-                    _rec_df = _fin_ledger[_fin_ledger["is_recurring"].astype(str).isin(["1","True","true"])].copy()
-                    if not _rec_df.empty:
-                        _rec_disp = _rec_df[["description","category","amount","recur_frequency"]].rename(columns={
-                            "description":"Description","category":"Category","amount":"Amount ($)","recur_frequency":"Frequency"
-                        })
-                        _rec_disp["Amount ($)"] = pd.to_numeric(_rec_disp["Amount ($)"], errors="coerce").round(2)
-                        st.dataframe(_rec_disp, use_container_width=True, hide_index=True,
-                            column_config={"Amount ($)": st.column_config.NumberColumn(format="$%.2f")})
-                    else:
-                        st.info("No recurring entries. Mark entries as recurring in Add Entry.")
-                else:
-                    st.info("No recurring entries.")
-
-        # Budget snapshot on overview
-        if not _fin_budgets.empty and not _fin_ledger.empty:
-            st.divider()
-            st.subheader("Budget Snapshot (Monthly)")
-            _bsnap_rows = []
-            for _, _brow in _fin_budgets[_fin_budgets["period"] == "monthly"].iterrows():
-                _bcat   = str(_brow["category"])
-                _blimit = float(_brow.get("budget_amount", 0) or 0)
-                _bactual = float(_fin_ledger[_fin_ledger["category"] == _bcat]["_amount"].sum()) if "_amount" in _fin_ledger else 0.0
-                _bpct   = (_bactual / _blimit * 100) if _blimit else 0.0
-                _bsnap_rows.append({"Category": _bcat, "Budget ($)": round(_blimit,2), "Actual ($)": round(_bactual,2), "Used (%)": round(_bpct,1)})
-            if _bsnap_rows:
-                _bsnap_df = pd.DataFrame(_bsnap_rows)
-                st.dataframe(_bsnap_df, use_container_width=True, hide_index=True, column_config={
-                    "Budget ($)":  st.column_config.NumberColumn(format="$%.2f"),
-                    "Actual ($)":  st.column_config.NumberColumn(format="$%.2f"),
-                    "Used (%)":    st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
-                })
+            st.subheader("Expenses by Category")
+            _exp_totals = _fin_ledger[_fin_ledger["category"].isin(_exp_cats)].groupby("category")["_amount"].sum().reset_index()
+            _exp_totals.columns = ["Category", "Amount ($)"]
+            _exp_totals = _exp_totals.sort_values("Amount ($)", ascending=False)
+            if not _exp_totals.empty:
+                st.bar_chart(_exp_totals.set_index("Category")["Amount ($)"], color="#ef4444")
 
     # ════ ADD ENTRY ══════════════════════════════════════════════
     elif _fin_mode == "Add Entry":
         st.subheader("Add Financial Entry")
+        st.caption("Inventory purchases are logged automatically — use this for other income and expenses.")
         _ae1, _ae2 = st.columns(2)
         with _ae1:
             _ae_date = st.date_input("Date", value="today", key="fin_ae_date")
             _ae_cat  = st.selectbox("Category", _FIN_CATEGORIES, key="fin_ae_cat")
-            _ae_pm   = st.selectbox("Payment Method", _FIN_PAYMENT_METHODS, key="fin_ae_pm")
         with _ae2:
             _ae_amt  = st.number_input("Amount ($)", min_value=0.0, step=0.01, format="%.2f", key="fin_ae_amt")
             _ae_desc = st.text_input("Description", placeholder="e.g. Office supplies", key="fin_ae_desc")
-            _ae_tags = st.text_input("Tags (comma-separated)", placeholder="e.g. q1, overhead", key="fin_ae_tags")
-
-        _ae_notes = st.text_area("Notes (optional)", height=70, key="fin_ae_notes")
-        _ae_rec   = st.checkbox("Recurring entry", key="fin_ae_rec")
-        _ae_freq  = ""
-        if _ae_rec:
-            _ae_freq = st.selectbox("Frequency", _FIN_RECUR_OPTIONS, key="fin_ae_freq")
+        _ae_notes = st.text_area("Notes (optional)", height=80, key="fin_ae_notes")
 
         if st.button("Add Entry", type="primary", key="btn_fin_add"):
             if not _ae_desc.strip():
@@ -4023,8 +3991,7 @@ elif page == "Financials":
                 st.error("Amount must be greater than 0.")
             else:
                 _aok, _amsg = add_financial_entry(
-                    str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg,
-                    payment_method=_ae_pm, tags=_ae_tags.strip(), is_recurring=_ae_rec, recur_frequency=_ae_freq
+                    str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg
                 )
                 if _aok:
                     st.success(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f} ({_ae_desc.strip()})")
@@ -4036,55 +4003,30 @@ elif page == "Financials":
     # ════ LEDGER ═════════════════════════════════════════════════
     elif _fin_mode == "Ledger":
         st.subheader("Financial Ledger")
-        st.caption("All manually entered income and expense records — fully editable.")
+        st.caption("All entries — manually added and auto-logged from inventory purchases.")
 
-        # Filter controls
-        _lf1, _lf2, _lf3 = st.columns(3)
-        with _lf1:
+        if _fin_ledger.empty:
+            st.info("No entries yet. Add entries manually or purchase inventory to auto-log COGS.")
+        else:
             _lf_cats = ["All"] + _FIN_CATEGORIES
             _lf_cat  = st.selectbox("Filter by Category", _lf_cats, key="fin_lf_cat")
-        with _lf2:
-            _lf_pms  = ["All"] + [p for p in _FIN_PAYMENT_METHODS if p]
-            _lf_pm   = st.selectbox("Filter by Payment Method", _lf_pms, key="fin_lf_pm")
-        with _lf3:
-            _lf_tag  = st.text_input("Search tag or description", placeholder="e.g. q1", key="fin_lf_tag")
-
-        _led_view = _fin_ledger.copy() if not _fin_ledger.empty else _fin_ledger
-        if not _led_view.empty:
+            _led_view = _fin_ledger.copy()
             if _lf_cat != "All":
                 _led_view = _led_view[_led_view["category"] == _lf_cat]
-            if _lf_pm != "All" and "payment_method" in _led_view.columns:
-                _led_view = _led_view[_led_view["payment_method"] == _lf_pm]
-            if _lf_tag.strip() and "tags" in _led_view.columns:
-                _tag_q = _lf_tag.strip().lower()
-                _led_view = _led_view[
-                    _led_view["tags"].str.lower().str.contains(_tag_q, na=False) |
-                    _led_view["description"].str.lower().str.contains(_tag_q, na=False)
-                ]
 
-        if _led_view.empty:
-            st.info("No entries match — use **Add Entry** to record income or expenses.")
-        else:
-            _disp_cols = ["id","entry_date","category","description","amount","payment_method","tags","is_recurring","recur_frequency","notes"]
+            _disp_cols = ["id","entry_date","category","description","amount","notes"]
             _disp_cols = [c for c in _disp_cols if c in _led_view.columns]
             _disp_led  = _led_view[_disp_cols].copy()
             _disp_led["amount"] = pd.to_numeric(_disp_led["amount"], errors="coerce").round(2)
             _disp_led = _disp_led.rename(columns={
-                "id":"ID","entry_date":"Date","category":"Category","description":"Description",
-                "amount":"Amount ($)","payment_method":"Payment Method","tags":"Tags",
-                "is_recurring":"Recurring","recur_frequency":"Frequency","notes":"Notes"
+                "id":"ID","entry_date":"Date","category":"Category",
+                "description":"Description","amount":"Amount ($)","notes":"Notes"
             })
-            st.dataframe(
-                _disp_led, use_container_width=True, hide_index=True,
+            st.dataframe(_disp_led, use_container_width=True, hide_index=True,
                 column_config={
-                    "Amount ($)":     st.column_config.NumberColumn(format="$%.2f"),
-                    "Date":           st.column_config.TextColumn(),
-                    "Recurring":      st.column_config.CheckboxColumn(),
-                    "Payment Method": st.column_config.TextColumn(width="medium"),
-                    "Tags":           st.column_config.TextColumn(width="medium"),
-                }
-            )
-            # CSV download
+                    "Amount ($)": st.column_config.NumberColumn(format="$%.2f"),
+                    "Date":       st.column_config.TextColumn(),
+                })
             _csv_bytes = _disp_led.to_csv(index=False).encode()
             st.download_button("Download CSV", data=_csv_bytes, file_name="merit_ledger.csv", mime="text/csv", key="fin_dl_csv")
 
@@ -4092,8 +4034,7 @@ elif page == "Financials":
             st.subheader("Edit / Delete Entry")
             _all_ids = list(_fin_ledger["id"].astype(int))
             _sel_id  = st.selectbox(
-                "Select entry",
-                _all_ids,
+                "Select entry", _all_ids,
                 format_func=lambda i: f"#{i} — {_fin_ledger[_fin_ledger['id'].astype(int)==i]['description'].values[0] if len(_fin_ledger[_fin_ledger['id'].astype(int)==i]) else i}",
                 key="fin_sel_id"
             )
@@ -4112,31 +4053,16 @@ elif page == "Financials":
                         index=_FIN_CATEGORIES.index(str(_sr.get("category","Expense"))) if str(_sr.get("category","Expense")) in _FIN_CATEGORIES else 0,
                         key="fin_ed_cat"
                     )
-                    _ed_pm_cur = str(_sr.get("payment_method",""))
-                    _ed_pm = st.selectbox(
-                        "Payment Method", _FIN_PAYMENT_METHODS,
-                        index=_FIN_PAYMENT_METHODS.index(_ed_pm_cur) if _ed_pm_cur in _FIN_PAYMENT_METHODS else 0,
-                        key="fin_ed_pm"
-                    )
                 with _ed2:
                     _ed_amt  = st.number_input("Amount ($)", value=float(_sr.get("amount",0) or 0), min_value=0.0, step=0.01, format="%.2f", key="fin_ed_amt")
                     _ed_desc = st.text_input("Description", value=str(_sr.get("description","")), key="fin_ed_desc")
-                    _ed_tags = st.text_input("Tags", value=str(_sr.get("tags","")), key="fin_ed_tags")
                 _ed_notes = st.text_area("Notes", value=str(_sr.get("notes","")), height=70, key="fin_ed_notes")
-                _ed_rec   = st.checkbox("Recurring", value=bool(_sr.get("is_recurring", False)), key="fin_ed_rec")
-                _ed_freq  = ""
-                if _ed_rec:
-                    _cur_freq = str(_sr.get("recur_frequency",""))
-                    _ed_freq  = st.selectbox("Frequency", _FIN_RECUR_OPTIONS,
-                        index=_FIN_RECUR_OPTIONS.index(_cur_freq) if _cur_freq in _FIN_RECUR_OPTIONS else 0,
-                        key="fin_ed_freq")
 
                 _edc1, _edc2 = st.columns(2)
                 with _edc1:
                     if st.button("Save Changes", type="primary", width='stretch', key="btn_fin_save"):
                         _uok, _umsg = update_financial_entry(
-                            int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg,
-                            payment_method=_ed_pm, tags=_ed_tags.strip(), is_recurring=_ed_rec, recur_frequency=_ed_freq
+                            int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg
                         )
                         if _uok:
                             st.success("Entry updated.")
@@ -4153,211 +4079,6 @@ elif page == "Financials":
                             st.rerun()
                         else:
                             st.error(f"Failed: {_dmsg}")
-
-    # ════ BUDGETS ════════════════════════════════════════════════
-    elif _fin_mode == "Budgets":
-        st.subheader("Category Budgets")
-        st.caption("Set spending targets per category and period. Actuals are calculated from the ledger.")
-
-        # Actual spend by category (all time)
-        _bud_actuals: dict[str, float] = {}
-        if not _fin_ledger.empty and "_amount" in _fin_ledger.columns:
-            for _bcat in _FIN_CATEGORIES:
-                _bud_actuals[_bcat] = float(_fin_ledger[_fin_ledger["category"] == _bcat]["_amount"].sum())
-
-        # Budget vs actual table
-        if not _fin_budgets.empty:
-            st.markdown("**Existing Budgets**")
-            _bud_rows = []
-            for _, _brow in _fin_budgets.iterrows():
-                _bcat   = str(_brow["category"])
-                _bper   = str(_brow.get("period","monthly"))
-                _blimit = float(_brow.get("budget_amount",0) or 0)
-                _bact   = _bud_actuals.get(_bcat, 0.0)
-                _bvar   = _blimit - _bact
-                _bpct   = (_bact / _blimit * 100) if _blimit else 0.0
-                _bud_rows.append({
-                    "ID": int(_brow["id"]), "Category": _bcat, "Period": _bper,
-                    "Budget ($)": round(_blimit,2), "Actual ($)": round(_bact,2),
-                    "Variance ($)": round(_bvar,2), "Used (%)": round(_bpct,1),
-                    "Notes": str(_brow.get("notes",""))
-                })
-            _bud_tbl = pd.DataFrame(_bud_rows)
-            st.dataframe(_bud_tbl.drop(columns=["ID"]), use_container_width=True, hide_index=True, column_config={
-                "Budget ($)":   st.column_config.NumberColumn(format="$%.2f"),
-                "Actual ($)":   st.column_config.NumberColumn(format="$%.2f"),
-                "Variance ($)": st.column_config.NumberColumn(format="$%.2f"),
-                "Used (%)":     st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
-            })
-            # Bar chart: budget vs actual
-            _chart_bud = _bud_tbl[["Category","Budget ($)","Actual ($)"]].set_index("Category")
-            st.bar_chart(_chart_bud)
-
-            st.divider()
-            st.subheader("Edit / Delete Budget")
-            _bud_sel = st.selectbox("Select budget", list(_bud_tbl["ID"]),
-                format_func=lambda i: f"#{i} — {_bud_tbl[_bud_tbl['ID']==i]['Category'].values[0]} ({_bud_tbl[_bud_tbl['ID']==i]['Period'].values[0]})",
-                key="bud_sel_id")
-            _bud_sel_row = _fin_budgets[_fin_budgets["id"].astype(int) == int(_bud_sel)]
-            if not _bud_sel_row.empty:
-                _bsr = _bud_sel_row.iloc[0]
-                _bec1, _bec2 = st.columns(2)
-                with _bec1:
-                    _be_cat = st.selectbox("Category", _FIN_CATEGORIES,
-                        index=_FIN_CATEGORIES.index(str(_bsr["category"])) if str(_bsr["category"]) in _FIN_CATEGORIES else 0,
-                        key="bud_ed_cat")
-                    _be_per = st.selectbox("Period", _FIN_PERIODS,
-                        index=_FIN_PERIODS.index(str(_bsr["period"])) if str(_bsr["period"]) in _FIN_PERIODS else 0,
-                        key="bud_ed_per")
-                with _bec2:
-                    _be_amt   = st.number_input("Budget Amount ($)", value=float(_bsr.get("budget_amount",0) or 0), min_value=0.0, step=1.0, format="%.2f", key="bud_ed_amt")
-                    _be_notes = st.text_input("Notes", value=str(_bsr.get("notes","")), key="bud_ed_notes")
-                _bsave_c, _bdel_c = st.columns(2)
-                with _bsave_c:
-                    if st.button("Save Budget", type="primary", width='stretch', key="btn_bud_save"):
-                        _bok, _bmsg = upsert_budget_entry(_be_cat, _be_per, _be_amt, _be_notes, cfg)
-                        if _bok:
-                            st.success("Budget saved.")
-                            _fetch_budgets_cached.clear()
-                            st.rerun()
-                        else:
-                            st.error(f"Failed: {_bmsg}")
-                with _bdel_c:
-                    if st.button("Delete Budget", type="secondary", width='stretch', key="btn_bud_del"):
-                        _bdok, _bdmsg = delete_budget_entry(int(_bud_sel), cfg)
-                        if _bdok:
-                            st.toast("Budget deleted.")
-                            _fetch_budgets_cached.clear()
-                            st.rerun()
-                        else:
-                            st.error(f"Failed: {_bdmsg}")
-
-        st.divider()
-        st.subheader("Add / Update Budget")
-        _nb1, _nb2 = st.columns(2)
-        with _nb1:
-            _nb_cat = st.selectbox("Category", _FIN_CATEGORIES, key="bud_new_cat")
-            _nb_per = st.selectbox("Period", _FIN_PERIODS, key="bud_new_per")
-        with _nb2:
-            _nb_amt   = st.number_input("Budget Amount ($)", min_value=0.0, step=1.0, format="%.2f", key="bud_new_amt")
-            _nb_notes = st.text_input("Notes (optional)", key="bud_new_notes")
-        if st.button("Save Budget", type="primary", key="btn_bud_new"):
-            if _nb_amt <= 0:
-                st.error("Budget amount must be greater than 0.")
-            else:
-                _nbok, _nbmsg = upsert_budget_entry(_nb_cat, _nb_per, _nb_amt, _nb_notes, cfg)
-                if _nbok:
-                    st.success(f"Budget saved — {_nb_cat} ({_nb_per}): ${_nb_amt:,.2f}")
-                    _fetch_budgets_cached.clear()
-                    st.rerun()
-                else:
-                    st.error(f"Failed: {_nbmsg}")
-
-    # ════ P&L STATEMENT ══════════════════════════════════════════
-    elif _fin_mode == "P&L Statement":
-        st.subheader("Profit & Loss Statement")
-        st.caption("Aggregated from all ledger entries and order revenue.")
-
-        _pl_revenue_rows = []
-        _pl_expense_rows = []
-
-        if _order_revenue:
-            _pl_revenue_rows.append({"Line Item": "Order Revenue (Email)", "Amount ($)": round(_order_revenue,2)})
-        if not _fin_ledger.empty and "_amount" in _fin_ledger.columns:
-            for _plcat in _FIN_CATEGORIES:
-                _plamt = float(_fin_ledger[_fin_ledger["category"]==_plcat]["_amount"].sum())
-                if _plamt == 0:
-                    continue
-                if _plcat in _rev_cats:
-                    _pl_revenue_rows.append({"Line Item": _plcat, "Amount ($)": round(_plamt,2)})
-                elif _plcat in _exp_cats:
-                    _pl_expense_rows.append({"Line Item": _plcat, "Amount ($)": round(_plamt,2)})
-
-        st.markdown("#### Revenue")
-        if _pl_revenue_rows:
-            _plr_df = pd.DataFrame(_pl_revenue_rows)
-            st.dataframe(_plr_df, use_container_width=True, hide_index=True,
-                column_config={"Amount ($)": st.column_config.NumberColumn(format="$%.2f")})
-            _plr_total = sum(r["Amount ($)"] for r in _pl_revenue_rows)
-            st.markdown(f"**Total Revenue: ${_plr_total:,.2f}**")
-        else:
-            st.info("No revenue recorded.")
-
-        st.markdown("#### Expenses")
-        if _pl_expense_rows:
-            _ple_df = pd.DataFrame(_pl_expense_rows)
-            st.dataframe(_ple_df, use_container_width=True, hide_index=True,
-                column_config={"Amount ($)": st.column_config.NumberColumn(format="$%.2f")})
-            _ple_total = sum(r["Amount ($)"] for r in _pl_expense_rows)
-            st.markdown(f"**Total Expenses: ${_ple_total:,.2f}**")
-        else:
-            st.info("No expenses recorded.")
-
-        st.divider()
-        _ni_color = "green" if _net_income >= 0 else "red"
-        st.markdown(f"### Net Income: :{_ni_color}[${_net_income:,.2f}]")
-        st.markdown(f"Gross Margin: **{_gross_margin_pct:.1f}%**")
-
-        # Downloadable P&L
-        _pl_all_rows = (
-            [{"Section":"Revenue",  **r} for r in _pl_revenue_rows] +
-            [{"Section":"Expenses", **r} for r in _pl_expense_rows] +
-            [{"Section":"Summary",  "Line Item":"Net Income", "Amount ($)": round(_net_income,2)}]
-        )
-        if _pl_all_rows:
-            _pl_csv = pd.DataFrame(_pl_all_rows).to_csv(index=False).encode()
-            st.download_button("Download P&L CSV", data=_pl_csv, file_name="merit_pl_statement.csv", mime="text/csv", key="fin_dl_pl")
-
-    # ════ CASH FLOW ══════════════════════════════════════════════
-    elif _fin_mode == "Cash Flow":
-        st.subheader("Cash Flow")
-        st.caption("Monthly net cash flow: inflows (revenue) minus outflows (expenses).")
-
-        _cf_rows: list[dict] = []
-        # Inflows from orders
-        if not _fin_df.empty and _ts_col and _cost_col:
-            _cf_date = _fin_df["_date"]
-            if _cf_date.dt.tz is not None:
-                _cf_date = _cf_date.dt.tz_convert(None)
-            _cf_orders = _fin_df.groupby(_cf_date.dt.to_period("M"))["_cost"].sum()
-            for _m, _v in _cf_orders.items():
-                _cf_rows.append({"Month": str(_m), "Inflow ($)": round(float(_v),2), "Outflow ($)": 0.0})
-        # Inflows + outflows from ledger
-        if not _fin_ledger.empty and "entry_date" in _fin_ledger.columns and "_amount" in _fin_ledger.columns:
-            _fin_ledger["_entry_period"] = pd.to_datetime(_fin_ledger["entry_date"], errors="coerce").dt.to_period("M")
-            for _m, _grp in _fin_ledger.groupby("_entry_period"):
-                _in_amt  = float(_grp[_grp["category"].isin(_rev_cats)]["_amount"].sum())
-                _out_amt = float(_grp[_grp["category"].isin(_exp_cats)]["_amount"].sum())
-                _existing = next((r for r in _cf_rows if r["Month"] == str(_m)), None)
-                if _existing:
-                    _existing["Inflow ($)"]  = round(_existing["Inflow ($)"] + _in_amt, 2)
-                    _existing["Outflow ($)"] = round(_existing["Outflow ($)"] + _out_amt, 2)
-                else:
-                    _cf_rows.append({"Month": str(_m), "Inflow ($)": round(_in_amt,2), "Outflow ($)": round(_out_amt,2)})
-
-        if _cf_rows:
-            _cf_df = pd.DataFrame(_cf_rows).sort_values("Month")
-            _cf_df["Net ($)"] = (_cf_df["Inflow ($)"] - _cf_df["Outflow ($)"]).round(2)
-            _cf_df = _cf_df.set_index("Month")
-
-            _cfa, _cfb, _cfc = st.columns(3)
-            _cfa.metric("Total Inflows",  f"${_cf_df['Inflow ($)'].sum():,.2f}")
-            _cfb.metric("Total Outflows", f"${_cf_df['Outflow ($)'].sum():,.2f}")
-            _cfc.metric("Net Cash Flow",  f"${_cf_df['Net ($)'].sum():,.2f}")
-
-            st.divider()
-            st.bar_chart(_cf_df[["Inflow ($)","Outflow ($)"]])
-            st.markdown("**Net Cash Flow by Month**")
-            st.bar_chart(_cf_df["Net ($)"], color="#6366f1")
-            st.dataframe(_cf_df.reset_index(), use_container_width=True, hide_index=True, column_config={
-                "Inflow ($)":  st.column_config.NumberColumn(format="$%.2f"),
-                "Outflow ($)": st.column_config.NumberColumn(format="$%.2f"),
-                "Net ($)":     st.column_config.NumberColumn(format="$%.2f"),
-            })
-            _cf_csv = _cf_df.reset_index().to_csv(index=False).encode()
-            st.download_button("Download Cash Flow CSV", data=_cf_csv, file_name="merit_cashflow.csv", mime="text/csv", key="fin_dl_cf")
-        else:
-            st.info("No data yet for cash flow analysis.")
 
     # ════ ORDER REVENUE ══════════════════════════════════════════
     elif _fin_mode == "Order Revenue":
