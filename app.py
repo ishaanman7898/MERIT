@@ -1,4 +1,4 @@
-"""
+﻿"""
 MERIT — Mass Email & Inventory Tool for Virtual Enterprise (VEI) firms
 Gmail SMTP · Freeimage.host / Imghippo image hosting · Supabase database
 """
@@ -185,12 +185,26 @@ def _init_sqlite():
             conn.executemany(
                 "INSERT OR IGNORE INTO roles (role_name, pages) VALUES (?, ?)",
                 [
-                    ("admin",  "Mass Email,Products,Inventory,Settings,API Endpoints"),
-                    ("staff",  "Mass Email,Products,Inventory"),
-                    ("viewer", "Inventory"),
+                    ("admin",  "Mass Email,Products,Inventory,Financials,Settings,API Endpoints"),
+                    ("staff",  "Mass Email,Products,Inventory,Financials"),
+                    ("viewer", "Inventory,Financials"),
                 ]
             )
             conn.commit()
+    except Exception: pass
+
+    # Migration: add Financials to default role pages if missing
+    try:
+        _default_pages = {
+            "admin":  "Mass Email,Products,Inventory,Financials,Settings,API Endpoints",
+            "staff":  "Mass Email,Products,Inventory,Financials",
+            "viewer": "Inventory,Financials",
+        }
+        for _rn, _rp in _default_pages.items():
+            _row = conn.execute("SELECT pages FROM roles WHERE role_name=?", (_rn,)).fetchone()
+            if _row and "Financials" not in str(_row[0]):
+                conn.execute("UPDATE roles SET pages=? WHERE role_name=?", (_rp, _rn))
+        conn.commit()
     except Exception: pass
 
     # Migration for existing outbound_logs (add subtotal, tax, shipping)
@@ -876,10 +890,15 @@ CREATE TABLE IF NOT EXISTS roles (
 
 -- Seed default roles (safe to run multiple times)
 INSERT INTO roles (role_name, pages) VALUES
-    ('admin',  'Mass Email,Products,Inventory,Settings,API Endpoints'),
-    ('staff',  'Mass Email,Products,Inventory'),
-    ('viewer', 'Inventory')
+    ('admin',  'Mass Email,Products,Inventory,Financials,Settings,API Endpoints'),
+    ('staff',  'Mass Email,Products,Inventory,Financials'),
+    ('viewer', 'Inventory,Financials')
 ON CONFLICT (role_name) DO NOTHING;
+
+-- Migration: add Financials to default roles if missing
+UPDATE roles SET pages = 'Mass Email,Products,Inventory,Financials,Settings,API Endpoints' WHERE role_name = 'admin' AND pages NOT LIKE '%Financials%';
+UPDATE roles SET pages = 'Mass Email,Products,Inventory,Financials' WHERE role_name = 'staff' AND pages NOT LIKE '%Financials%';
+UPDATE roles SET pages = 'Inventory,Financials' WHERE role_name = 'viewer' AND pages NOT LIKE '%Financials%';
 
 -- ── Financials table (manual ledger entries) ────────────────────────────
 CREATE TABLE IF NOT EXISTS financials (
@@ -1913,7 +1932,7 @@ if _invite_token_param:
                 st.divider()
                 _inv_pass  = st.text_input("New Password", type="password", key="inv_pass")
                 _inv_pass2 = st.text_input("Confirm Password", type="password", key="inv_pass2")
-                if st.button("Set Password & Sign In", type="primary", key="inv_btn", use_container_width=True):
+                if st.button("Set Password & Sign In", type="primary", key="inv_btn", width='stretch'):
                     if len(_inv_pass) < 6:
                         st.error("Password must be at least 6 characters.")
                     elif _inv_pass != _inv_pass2:
@@ -1956,7 +1975,7 @@ if _has_users and _login_secrets_active:
             with st.container(border=True):
                 _li_email = st.text_input("Email", placeholder="you@example.com", key="li_email")
                 _li_pass  = st.text_input("Password", type="password", key="li_pass")
-                if st.button("Sign In", type="primary", key="li_btn", use_container_width=True):
+                if st.button("Sign In", type="primary", key="li_btn", width='stretch'):
                     if _li_email.strip() and _li_pass.strip():
                         _li_user = authenticate_user(_li_email.strip(), _li_pass.strip(), _auth_cfg)
                         if _li_user:
@@ -2069,7 +2088,7 @@ with st.sidebar:
         st.divider()
         st.caption(f"Signed in as **{_cur_user.get('full_name') or _cur_user.get('email', '')}**")
         st.caption(f"Role: {_cur_user.get('role', '').capitalize()}")
-        if st.button("Sign Out", key="btn_signout", use_container_width=True):
+        if st.button("Sign Out", key="btn_signout", width='stretch'):
             st.session_state.pop("auth_user", None)
             st.session_state.pop("authenticated", None)
             st.rerun()
@@ -3153,7 +3172,7 @@ elif page == "Products":
                             st.caption(f"Image {_ci + 1}{' (primary)' if _ci == 0 else ''}")
                             _eimg_c1, _eimg_c2 = st.columns(2)
                             with _eimg_c1:
-                                if st.button(f"Remove", key=f"rm_img_{_edit_sku}_{_ci}", use_container_width=True):
+                                if st.button(f"Remove", key=f"rm_img_{_edit_sku}_{_ci}", width='stretch'):
                                     _new_urls = [u for idx2, u in enumerate(_cur_urls) if idx2 != _ci]
                                     _eprod["image_url"] = ",".join(_new_urls) if _new_urls else "N/A"
                                     save_product_to_db(_eprod, cfg)
@@ -3174,7 +3193,7 @@ elif page == "Products":
                                     if _repl_file:
                                         st.image(_repl_file, use_container_width=True)
                                         if _has_image_host(cfg):
-                                            if st.button("Upload & Replace", key=f"repl_btn_{_edit_sku}_{_ci}", type="primary", use_container_width=True):
+                                            if st.button("Upload & Replace", key=f"repl_btn_{_edit_sku}_{_ci}", type="primary", width='stretch'):
                                                 with st.spinner("Uploading replacement…"):
                                                     try:
                                                         _repl_file.seek(0)
@@ -3773,7 +3792,10 @@ elif page == "Financials":
         if not _fin_df.empty and _ts_col and _cost_col:
             st.divider()
             st.subheader("Monthly Revenue (Orders)")
-            _monthly_chart = _fin_df.groupby(_fin_df["_date"].dt.to_period("M"))["_cost"].sum().reset_index()
+            _date_col = _fin_df["_date"]
+            if _date_col.dt.tz is not None:
+                _date_col = _date_col.dt.tz_convert(None)
+            _monthly_chart = _fin_df.groupby(_date_col.dt.to_period("M"))["_cost"].sum().reset_index()
             _monthly_chart.columns = ["Month", "Revenue"]
             _monthly_chart["Month"] = _monthly_chart["Month"].astype(str)
             st.bar_chart(_monthly_chart.set_index("Month")["Revenue"], color="#16a34a")
@@ -3866,7 +3888,7 @@ elif page == "Financials":
 
                 _edc1, _edc2 = st.columns(2)
                 with _edc1:
-                    if st.button("Save Changes", type="primary", use_container_width=True, key="btn_fin_save"):
+                    if st.button("Save Changes", type="primary", width='stretch', key="btn_fin_save"):
                         _uok, _umsg = update_financial_entry(int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg)
                         if _uok:
                             st.success("Entry updated.")
@@ -3875,7 +3897,7 @@ elif page == "Financials":
                         else:
                             st.error(f"Failed: {_umsg}")
                 with _edc2:
-                    if st.button("Delete Entry", type="secondary", use_container_width=True, key="btn_fin_del"):
+                    if st.button("Delete Entry", type="secondary", width='stretch', key="btn_fin_del"):
                         _dok, _dmsg = delete_financial_entry(int(_sel_id), cfg)
                         if _dok:
                             st.toast("Entry deleted.")
@@ -4320,7 +4342,7 @@ elif page == "Settings":
                     _rr_pages = [p.strip() for p in str(_rr.get("pages", "")).split(",") if p.strip()]
                     _rr_is_builtin = _rr_name in _ta_builtin
                     with st.container(border=True):
-                        _rrc1, _rrc2 = st.columns([5, 1])
+                        _rrc1, _rrc2, _rrc3 = st.columns([5, 1, 1])
                         with _rrc1:
                             _rr_label = f"**{_rr_name.capitalize()}**"
                             if _rr_is_builtin:
@@ -4335,8 +4357,15 @@ elif page == "Settings":
                             )
                             st.markdown(_badge_html, unsafe_allow_html=True)
                         with _rrc2:
+                            if _ta_is_admin:
+                                _rr_edit_key = f"_editing_role_{_rr_name}"
+                                _rr_editing = st.session_state.get(_rr_edit_key, False)
+                                if st.button("Edit" if not _rr_editing else "Cancel", key=f"rm_edit_{_rr_name}", width='stretch'):
+                                    st.session_state[_rr_edit_key] = not _rr_editing
+                                    st.rerun()
+                        with _rrc3:
                             if not _rr_is_builtin and _ta_is_admin:
-                                if st.button("Delete", key=f"rm_del_{_rr_name}", use_container_width=True):
+                                if st.button("Delete", key=f"rm_del_{_rr_name}", width='stretch'):
                                     _rrd_ok, _rrd_msg = delete_role_all_dbs(_rr_name, cfg)
                                     if _rrd_ok:
                                         st.toast(f"Role '{_rr_name}' deleted.")
@@ -4344,6 +4373,30 @@ elif page == "Settings":
                                         st.rerun()
                                     else:
                                         st.error(f"Failed: {_rrd_msg}")
+                    if _ta_is_admin and st.session_state.get(f"_editing_role_{_rr_name}", False):
+                        with st.container(border=True):
+                            st.markdown(f"**Edit pages for: {_rr_name}**")
+                            _edit_pages = []
+                            _ep_cols = st.columns(len(_ALL_PAGES))
+                            for _epi, _ep in enumerate(_ALL_PAGES):
+                                with _ep_cols[_epi]:
+                                    if st.checkbox(_ep, value=(_ep in _rr_pages), key=f"ep_{_rr_name}_{_ep}"):
+                                        _edit_pages.append(_ep)
+                            _ep_save, _ep_cancel = st.columns(2)
+                            with _ep_save:
+                                if st.button("Save", key=f"ep_save_{_rr_name}", width='stretch'):
+                                    _ep_ok, _ep_msg = create_role_all_dbs(_rr_name, _edit_pages, cfg)
+                                    if _ep_ok:
+                                        st.toast(f"Role '{_rr_name}' updated.")
+                                        _fetch_roles_cached.clear()
+                                        st.session_state[f"_editing_role_{_rr_name}"] = False
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed: {_ep_msg}")
+                            with _ep_cancel:
+                                if st.button("Cancel", key=f"ep_cancel_{_rr_name}", width='stretch'):
+                                    st.session_state[f"_editing_role_{_rr_name}"] = False
+                                    st.rerun()
 
         # ════════════════ USERS TAB ═══════════════════════════════════
         with _ta_tab_users:
@@ -4460,7 +4513,7 @@ elif page == "Settings":
                                         label_visibility="collapsed",
                                     )
                                     if _new_role_sel != _ur_role_val:
-                                        if st.button("Save", key=f"ur_role_save_{_ur_email_val}", use_container_width=True):
+                                        if st.button("Save", key=f"ur_role_save_{_ur_email_val}", width='stretch'):
                                             _uro_ok, _uro_msg = update_user_role_all_dbs(_ur_email_val, _new_role_sel, cfg)
                                             if _uro_ok:
                                                 st.toast(f"Role updated to {_new_role_sel}.")
@@ -4483,7 +4536,7 @@ elif page == "Settings":
                                     st.markdown(_badge3, unsafe_allow_html=True)
                             with _uc3:
                                 if _ta_is_admin and not _is_self:
-                                    if st.button("Invite Link", key=f"um_invite_{_ur_email_val}", use_container_width=True,
+                                    if st.button("Invite Link", key=f"um_invite_{_ur_email_val}", width='stretch',
                                                  help="Generate a new shareable link for this user to set or reset their password"):
                                         _ri_ok, _ri_tok = generate_new_invite_token(_ur_email_val, cfg)
                                         if _ri_ok:
