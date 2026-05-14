@@ -1429,7 +1429,7 @@ def _turso_arg(v):
     if isinstance(v, int):
         return {"type": "integer", "value": str(v)}
     if isinstance(v, float):
-        return {"type": "real", "value": repr(v)}
+        return {"type": "float", "value": repr(v)}
     return {"type": "text", "value": str(v)}
 
 
@@ -1478,7 +1478,7 @@ def _turso_execute_direct(url: str, token: str, sql: str, params=()) -> list[dic
             return None
         if t == "integer":
             return int(v)
-        if t == "real":
+        if t in ("real", "float"):
             return float(v)
         return v
 
