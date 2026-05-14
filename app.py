@@ -1420,39 +1420,51 @@ def _turso_cache_key(cfg: dict) -> str:
     return f"{url}|{tok}" if (url and tok) else ""
 
 
-def _turso_execute_direct(url: str, token: str, sql: str, params=()) -> list[dict]:
-    """Execute one SQL statement on Turso via Hrana v2 HTTP. Returns list of row dicts."""
+def _turso_arg(v):
+    """Convert a Python value to a Turso Hrana v2 typed arg."""
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": "1" if v else "0"}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "real", "value": repr(v)}
+    return {"type": "text", "value": str(v)}
+
+
+def _turso_http_post(url: str, token: str, payload: dict) -> dict:
+    """POST a Hrana v2 pipeline payload to Turso and return the parsed JSON result."""
     import json as _j
-
-    def _arg(v):
-        if v is None:
-            return {"type": "null"}
-        if isinstance(v, bool):
-            return {"type": "integer", "value": "1" if v else "0"}
-        if isinstance(v, int):
-            return {"type": "integer", "value": str(v)}
-        if isinstance(v, float):
-            return {"type": "real", "value": str(v)}
-        return {"type": "text", "value": str(v)}
-
-    payload = {
-        "requests": [
-            {"type": "execute", "stmt": {"sql": sql, "args": [_arg(p) for p in params]}},
-            {"type": "close"},
-        ]
-    }
+    import urllib.error as _ue
     data = _j.dumps(payload).encode("utf-8")
     req = _urllib_request.Request(
         f"{url}/v2/pipeline",
         data=data,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
-    with _urllib_request.urlopen(req, timeout=10) as resp:
-        result = _j.loads(resp.read())
+    try:
+        with _urllib_request.urlopen(req, timeout=15) as resp:
+            return _j.loads(resp.read())
+    except _ue.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Turso HTTP {exc.code}: {body[:400]}")
+
+
+def _turso_execute_direct(url: str, token: str, sql: str, params=()) -> list[dict]:
+    """Execute one SQL statement on Turso via Hrana v2 HTTP. Returns list of row dicts."""
+    payload = {
+        "baton": None,
+        "requests": [
+            {"type": "execute", "stmt": {"sql": sql, "args": [_turso_arg(p) for p in params]}},
+            {"type": "close"},
+        ],
+    }
+    result = _turso_http_post(url, token, payload)
 
     for r in result.get("results", []):
         if r.get("type") == "error":
-            raise RuntimeError(r.get("error", {}).get("message", "Unknown Turso error"))
+            raise RuntimeError(r.get("error", {}).get("message", "Turso error"))
 
     exec_resp = result["results"][0].get("response", {}).get("result", {})
     cols = [c["name"] for c in exec_resp.get("cols", [])]
@@ -1471,6 +1483,19 @@ def _turso_execute_direct(url: str, token: str, sql: str, params=()) -> list[dic
         return v
 
     return [dict(zip(cols, [_coerce(c) for c in row])) for row in rows]
+
+
+def _turso_pipeline(url: str, token: str, statements: list) -> None:
+    """Execute multiple (sql, params) statements in a single Hrana v2 pipeline call."""
+    requests = [
+        {"type": "execute", "stmt": {"sql": sql, "args": [_turso_arg(p) for p in params]}}
+        for sql, params in statements
+    ]
+    requests.append({"type": "close"})
+    result = _turso_http_post(url, token, {"baton": None, "requests": requests})
+    for r in result.get("results", []):
+        if r.get("type") == "error":
+            raise RuntimeError(r.get("error", {}).get("message", "Turso error"))
 
 
 def _turso_execute(cfg: dict, sql: str, params=()) -> list[dict]:
@@ -1566,6 +1591,8 @@ def sync_local_to_turso(cfg: dict) -> tuple[int, int, list]:
     """Sync all local SQLite users and roles to Turso. Returns (users_synced, roles_synced, errors)."""
     if not _has_turso(cfg):
         return 0, 0, ["Turso not connected"]
+    _surl = _turso_http_url(cfg.get("turso_url", "").strip())
+    _stok = cfg.get("turso_auth_token", "").strip()
     errors = []
     users_synced = roles_synced = 0
     try:
@@ -1573,21 +1600,28 @@ def sync_local_to_turso(cfg: dict) -> tuple[int, int, list]:
         local_roles = local_conn.execute("SELECT role_name, pages FROM roles").fetchall()
         for row in local_roles:
             try:
-                _turso_execute(cfg,
-                    "INSERT INTO roles (role_name, pages) VALUES (?, ?) "
-                    "ON CONFLICT(role_name) DO UPDATE SET pages=excluded.pages",
-                    (row["role_name"], row["pages"]))
+                _turso_pipeline(_surl, _stok, [(
+                    "INSERT INTO roles (role_name, pages) VALUES (?,?)"
+                    " ON CONFLICT(role_name) DO UPDATE SET pages=excluded.pages",
+                    (str(row["role_name"]), str(row["pages"])),
+                )])
                 roles_synced += 1
             except Exception as e:
                 errors.append(f"Role {row['role_name']}: {e}")
-        local_users = local_conn.execute("SELECT email, full_name, role, password_hash, invite_token FROM users").fetchall()
+        local_users = local_conn.execute(
+            "SELECT email, full_name, role, password_hash, invite_token FROM users"
+        ).fetchall()
         for row in local_users:
             try:
-                _turso_execute(cfg,
-                    "INSERT INTO users (email, full_name, role, password_hash, invite_token) VALUES (?,?,?,?,?) "
-                    "ON CONFLICT(email) DO UPDATE SET full_name=excluded.full_name, role=excluded.role, "
-                    "password_hash=excluded.password_hash, invite_token=excluded.invite_token",
-                    (row["email"], row["full_name"], row["role"], row["password_hash"], row["invite_token"]))
+                _turso_pipeline(_surl, _stok, [(
+                    "INSERT INTO users (email, full_name, role, password_hash, invite_token)"
+                    " VALUES (?,?,?,?,?)"
+                    " ON CONFLICT(email) DO UPDATE SET full_name=excluded.full_name,"
+                    " role=excluded.role, password_hash=excluded.password_hash,"
+                    " invite_token=excluded.invite_token",
+                    (str(row["email"]), str(row["full_name"]), str(row["role"]),
+                     str(row["password_hash"]), row["invite_token"]),
+                )])
                 users_synced += 1
             except Exception as e:
                 errors.append(f"User {row['email']}: {e}")
@@ -1720,21 +1754,33 @@ def save_product_to_db(product: dict, cfg: dict) -> tuple[bool, str]:
     # ── Turso ────────────────────────────────────────────────────────
     if _has_turso(cfg):
         try:
-            _turso_execute(cfg,
-                "INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
-                "item_name=excluded.item_name, category=excluded.category, "
-                "price=excluded.price, image_url=excluded.image_url",
-                (row["sku"],row["item_name"],row["category"],row["price"],
-                 row["stock_left"],row["original_stock"],row["status"],row["image_url"]))
-            _turso_execute(cfg,
-                "INSERT INTO products (sku,item_name,category,price,description,buy_button_url,image_url,active) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
-                "item_name=excluded.item_name, category=excluded.category, price=excluded.price, "
-                "description=excluded.description, buy_button_url=excluded.buy_button_url, "
-                "image_url=excluded.image_url, active=excluded.active",
-                (row["sku"],row["item_name"],row["category"],row["price"],
-                 row["description"],row["buy_button_url"],row["image_url"],row["active"]))
+            _turl = _turso_http_url(cfg.get("turso_url", "").strip())
+            _ttok = cfg.get("turso_auth_token", "").strip()
+            _price_f = float(row["price"] or 0)
+            _turso_pipeline(_turl, _ttok, [
+                (
+                    "INSERT INTO inventory (sku,item_name,category,price,stock_left,original_stock,status,image_url)"
+                    " VALUES (?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(sku) DO UPDATE SET"
+                    " item_name=excluded.item_name, category=excluded.category,"
+                    " price=excluded.price, image_url=excluded.image_url",
+                    (str(row["sku"]), str(row["item_name"]), str(row["category"]),
+                     _price_f, int(row["stock_left"]), int(row["original_stock"]),
+                     str(row["status"]), str(row["image_url"])),
+                ),
+                (
+                    "INSERT INTO products (sku,item_name,category,price,description,buy_button_url,image_url,active)"
+                    " VALUES (?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(sku) DO UPDATE SET"
+                    " item_name=excluded.item_name, category=excluded.category,"
+                    " price=excluded.price, description=excluded.description,"
+                    " buy_button_url=excluded.buy_button_url,"
+                    " image_url=excluded.image_url, active=excluded.active",
+                    (str(row["sku"]), str(row["item_name"]), str(row["category"]),
+                     _price_f, str(row["description"]), str(row["buy_button_url"]),
+                     str(row["image_url"]), 1 if row["active"] else 0),
+                ),
+            ])
             results.append("Turso")
         except Exception as exc:
             results.append(f"Turso failed: {exc}")
@@ -1911,14 +1957,21 @@ def adjust_inventory_turso(sku: str, delta: int, cfg: dict) -> tuple[bool, str]:
     if not _has_turso(cfg):
         return False, "Turso not configured"
     try:
-        rows = _turso_execute(cfg, "SELECT stock_left FROM inventory WHERE sku=?", (sku,))
+        _turl = _turso_http_url(cfg.get("turso_url", "").strip())
+        _ttok = cfg.get("turso_auth_token", "").strip()
+        rows = _turso_execute_direct(_turl, _ttok, "SELECT stock_left FROM inventory WHERE sku=?", (str(sku),))
         if not rows:
             return False, "SKU not found in Turso"
-        new_stock = int(rows[0].get("stock_left") or 0) + delta
-        status = "Backordered" if new_stock < 0 else ("Out of stock" if new_stock == 0 else ("Low stock" if new_stock <= 10 else "In stock"))
-        _turso_execute(cfg, "UPDATE inventory SET stock_left=?, status=? WHERE sku=?", (new_stock, status, sku))
+        new_stock = int(rows[0].get("stock_left") or 0) + int(delta)
+        status = ("Backordered" if new_stock < 0 else
+                  "Out of stock" if new_stock == 0 else
+                  "Low stock" if new_stock <= 10 else "In stock")
+        stmts = [("UPDATE inventory SET stock_left=?, status=? WHERE sku=?",
+                   (new_stock, str(status), str(sku)))]
         if delta > 0:
-            _turso_execute(cfg, "UPDATE inventory SET original_stock = original_stock + ? WHERE sku=?", (delta, sku))
+            stmts.append(("UPDATE inventory SET original_stock = original_stock + ? WHERE sku=?",
+                           (int(delta), str(sku))))
+        _turso_pipeline(_turl, _ttok, stmts)
         return True, f"Turso stock → {new_stock}"
     except Exception as exc:
         return False, str(exc)
@@ -1958,11 +2011,12 @@ def delete_product_from_db(sku: str, cfg: dict) -> tuple[bool, str]:
     # ── Turso ────────────────────────────────────────────────────────
     if _has_turso(cfg):
         try:
-            _turso_execute(cfg, "DELETE FROM inventory WHERE sku=?", (sku,))
-            try:
-                _turso_execute(cfg, "DELETE FROM products WHERE sku=?", (sku,))
-            except Exception:
-                pass
+            _turl2 = _turso_http_url(cfg.get("turso_url", "").strip())
+            _ttok2 = cfg.get("turso_auth_token", "").strip()
+            _turso_pipeline(_turl2, _ttok2, [
+                ("DELETE FROM inventory WHERE sku=?", (str(sku),)),
+                ("DELETE FROM products WHERE sku=?",  (str(sku),)),
+            ])
             results.append("Turso")
         except Exception as exc:
             results.append(f"Turso failed: {exc}")
@@ -2001,7 +2055,12 @@ def set_stock_all_dbs(sku: str, stock: int, cfg: dict) -> tuple[bool, str]:
     # Turso
     if _has_turso(cfg):
         try:
-            _turso_execute(cfg, "UPDATE inventory SET stock_left=?, status=? WHERE sku=?", (stock, status, sku))
+            _turl3 = _turso_http_url(cfg.get("turso_url", "").strip())
+            _ttok3 = cfg.get("turso_auth_token", "").strip()
+            _turso_pipeline(_turl3, _ttok3, [
+                ("UPDATE inventory SET stock_left=?, status=? WHERE sku=?",
+                 (int(stock), str(status), str(sku))),
+            ])
             results.append("Turso")
         except Exception as exc:
             results.append(f"Turso failed: {exc}")
@@ -2053,16 +2112,28 @@ def sync_sqlite_to_cloud(cfg: dict) -> tuple[int, list[str]]:
     # ── Turso ────────────────────────────────────────────────────────
     if _has_turso(cfg):
         try:
+            _tsurl = _turso_http_url(cfg.get("turso_url", "").strip())
+            _tstok = cfg.get("turso_auth_token", "").strip()
+            _sql_inv = (
+                "INSERT INTO inventory (sku,item_name,category,price,stock_left,status,image_url)"
+                " VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(sku) DO UPDATE SET"
+                " item_name=excluded.item_name, category=excluded.category,"
+                " price=excluded.price, stock_left=excluded.stock_left,"
+                " status=excluded.status, image_url=excluded.image_url"
+            )
             for rec in records:
-                _turso_execute(cfg,
-                    "INSERT INTO inventory (sku,item_name,category,price,stock_left,status,image_url) "
-                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET "
-                    "item_name=excluded.item_name, category=excluded.category, "
-                    "price=excluded.price, stock_left=excluded.stock_left, "
-                    "status=excluded.status, image_url=excluded.image_url",
-                    (rec.get("sku"), rec.get("item_name"), rec.get("category"),
-                     rec.get("price"), rec.get("stock_left"), rec.get("status"),
-                     rec.get("image_url")))
+                _turso_pipeline(_tsurl, _tstok, [
+                    (_sql_inv, (
+                        str(rec.get("sku") or ""),
+                        str(rec.get("item_name") or ""),
+                        str(rec.get("category") or ""),
+                        float(rec.get("price") or 0),
+                        int(rec.get("stock_left") or 0),
+                        str(rec.get("status") or "In stock"),
+                        str(rec.get("image_url") or "N/A"),
+                    )),
+                ])
             synced = max(synced, len(records))
         except Exception as exc:
             errors.append(f"Turso sync failed: {exc}")
