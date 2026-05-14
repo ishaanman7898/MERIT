@@ -1421,7 +1421,14 @@ def _turso_cache_key(cfg: dict) -> str:
 
 
 def _turso_arg(v):
-    """Convert a Python value to a Turso Hrana v2 typed arg."""
+    """Convert a Python value to a Turso Hrana v2 typed arg.
+
+    Turso type rules (from their JSON schema):
+      integer → {"type":"integer","value":"<str>"}   ← value must be a JSON string
+      float   → {"type":"float",  "value": <number>} ← value must be a JSON number (f64)
+      text    → {"type":"text",   "value":"<str>"}
+      null    → {"type":"null"}
+    """
     if v is None:
         return {"type": "null"}
     if isinstance(v, bool):
@@ -1429,7 +1436,7 @@ def _turso_arg(v):
     if isinstance(v, int):
         return {"type": "integer", "value": str(v)}
     if isinstance(v, float):
-        return {"type": "float", "value": repr(v)}
+        return {"type": "float", "value": v}   # must be a real JSON number, NOT a string
     return {"type": "text", "value": str(v)}
 
 
