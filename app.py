@@ -2569,26 +2569,34 @@ if _invite_token_param:
     _inv_c1, _inv_c2, _inv_c3 = st.columns([1, 2, 1])
     with _inv_c2:
         _firm_li = _auth_cfg.get("from_name", "MERIT").strip()
+        _firm_label = _firm_li if _firm_li else "MERIT"
         if _invite_user_info:
             st.markdown(
-                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
-                f'{_firm_li if _firm_li else "MERIT"}</h1>'
-                f'<p style="text-align:center;color:#888;margin-bottom:0.4rem">'
-                f'Welcome, {_invite_user_info["full_name"]}!</p>'
-                f'<p style="text-align:center;color:#aaa;font-size:0.9rem;margin-bottom:1.5rem">'
-                f'Create your password to access MERIT.</p>',
+                f'<div style="text-align:center;margin-bottom:1rem">'
+                f'<div style="display:inline-flex;align-items:center;justify-content:center;'
+                f'width:60px;height:60px;background:linear-gradient(135deg,#6366f1,#8b5cf6);'
+                f'border-radius:50%;font-size:1.6rem;margin-bottom:0.75rem;'
+                f'box-shadow:0 0 20px rgba(99,102,241,0.45)">M</div>'
+                f'<h1 style="margin:0 0 0.2rem 0;font-size:1.6rem">{_firm_label}</h1>'
+                f'<p style="color:#888;margin:0 0 0.2rem 0">Welcome, {_invite_user_info["full_name"]}!</p>'
+                f'<p style="color:#aaa;font-size:0.85rem;margin:0">Create your password to get started.</p>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
             with st.container(border=True):
-                st.markdown(f"**Email:** {_invite_user_info['email']}")
-                st.markdown(f"**Role:** {_invite_user_info['role'].capitalize()}")
+                _ic1, _ic2 = st.columns(2)
+                _ic1.markdown(f"**Email**\n\n{_invite_user_info['email']}")
+                _ic2.markdown(f"**Role**\n\n{_invite_user_info['role'].capitalize()}")
                 st.divider()
-                _inv_pass  = st.text_input("New Password", type="password", key="inv_pass")
-                _inv_pass2 = st.text_input("Confirm Password", type="password", key="inv_pass2")
-                if st.button("Set Password & Sign In", type="primary", key="inv_btn", width='stretch'):
+                _inv_pass  = st.text_input("New Password", type="password", placeholder="At least 6 characters", key="inv_pass")
+                _inv_pass2 = st.text_input("Confirm Password", type="password", placeholder="Re-enter password", key="inv_pass2")
+                st.write("")
+                if st.button("Set Password & Sign In", type="primary", key="inv_btn", use_container_width=True):
                     if len(_inv_pass) < 6:
+                        st.toast("Password must be at least 6 characters.", icon=None)
                         st.error("Password must be at least 6 characters.")
                     elif _inv_pass != _inv_pass2:
+                        st.toast("Passwords do not match.", icon=None)
                         st.error("Passwords do not match.")
                     else:
                         _inv_ok, _inv_msg = complete_invite(_invite_token_param, _inv_pass, _auth_cfg)
@@ -2598,13 +2606,14 @@ if _invite_token_param:
                             st.session_state["authenticated"] = True
                             st.query_params.clear()
                             _fetch_users_cached.clear()
+                            st.toast(f"Welcome to MERIT, {_invite_user_info['full_name'].split()[0]}!", icon=None)
                             st.rerun()
                         else:
+                            st.toast("Failed to set password. Try again.", icon=None)
                             st.error(f"Failed to set password: {_inv_msg}")
         else:
             st.markdown(
-                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
-                f'{_firm_li if _firm_li else "MERIT"}</h1>',
+                f'<h1 style="text-align:center;margin-bottom:0.5rem">{_firm_label}</h1>',
                 unsafe_allow_html=True,
             )
             st.warning("This invite link is invalid or has already been used. Ask your admin for a new link.")
@@ -2614,31 +2623,80 @@ if _has_users and _login_secrets_active:
     # Multi-user email/password auth
     if not st.session_state.get("auth_user"):
         st.markdown("""
-            <style>[data-testid="stSidebar"] { display: none; }</style>
+            <style>
+            [data-testid="stSidebar"] { display: none; }
+            .merit-login-wrap {
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .merit-login-card {
+                background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+                border: 1px solid rgba(99,102,241,0.25);
+                border-radius: 1.25rem;
+                padding: 2.5rem 2rem 2rem 2rem;
+                box-shadow: 0 25px 60px rgba(0,0,0,0.45);
+                text-align: center;
+            }
+            .merit-logo-ring {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 64px; height: 64px;
+                background: linear-gradient(135deg, #6366f1, #8b5cf6);
+                border-radius: 50%;
+                font-size: 1.8rem;
+                margin-bottom: 1rem;
+                box-shadow: 0 0 24px rgba(99,102,241,0.5);
+            }
+            .merit-login-title {
+                color: #f1f5f9;
+                font-size: 1.6rem;
+                font-weight: 700;
+                margin: 0 0 0.25rem 0;
+                letter-spacing: -0.5px;
+            }
+            .merit-login-sub {
+                color: #94a3b8;
+                font-size: 0.9rem;
+                margin-bottom: 1.75rem;
+            }
+            </style>
         """, unsafe_allow_html=True)
         _li_c1, _li_c2, _li_c3 = st.columns([1, 2, 1])
         with _li_c2:
             _sb_co_li = _auth_cfg.get("from_name", "MERIT").strip()
+            _li_title = _sb_co_li if _sb_co_li else "MERIT"
             st.markdown(
-                f'<h1 style="text-align:center;margin-bottom:0.25rem">'
-                f'{"Sign in to MERIT" if not _sb_co_li else _sb_co_li}</h1>'
-                f'<p style="text-align:center;color:#888;margin-bottom:1.5rem">Sign in to continue</p>',
+                f'<div class="merit-login-card">'
+                f'<div class="merit-logo-ring">M</div>'
+                f'<h1 class="merit-login-title">{_li_title}</h1>'
+                f'<p class="merit-login-sub">Sign in to your workspace</p>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
+            st.write("")
             with st.container(border=True):
                 _li_email = st.text_input("Email", placeholder="you@example.com", key="li_email")
-                _li_pass  = st.text_input("Password", type="password", key="li_pass")
-                if st.button("Sign In", type="primary", key="li_btn", width='stretch'):
+                _li_pass  = st.text_input("Password", type="password", placeholder="••••••••", key="li_pass")
+                st.write("")
+                if st.button("Sign In", type="primary", key="li_btn", use_container_width=True):
                     if _li_email.strip() and _li_pass.strip():
                         _li_user = authenticate_user(_li_email.strip(), _li_pass.strip(), _auth_cfg)
                         if _li_user:
                             st.session_state["auth_user"] = _li_user
                             st.session_state["authenticated"] = True
+                            _li_name = _li_user.get("full_name", "").split()[0] if _li_user.get("full_name") else "back"
+                            st.toast(f"Welcome back, {_li_name}!", icon=None)
                             st.rerun()
                         else:
+                            st.toast("Sign-in failed. Check your credentials.", icon=None)
                             st.error("Incorrect email or password.")
                     else:
+                        st.toast("Enter your email and password to continue.", icon=None)
                         st.warning("Please enter your email and password.")
+                st.caption("Contact your admin if you need access or forgot your password.")
         st.stop()
 # (No legacy password gate — individual user accounts handle all access control)
 
@@ -3298,6 +3356,7 @@ team members — they receive a shareable link and set their own password, no ne
                     _gs_u_email.strip(), _gs_u_name.strip(), _gs_u_role, _gs_u_pass, cfg
                 )
                 if _gs_ok:
+                    st.toast(f"User {_gs_u_name.strip()} created.", icon=None)
                     st.success(f"User **{_gs_u_name.strip()}** created with role **{_gs_u_role}**.")
                     _fetch_users_cached.clear()
                     st.rerun()
@@ -3350,6 +3409,7 @@ team members — they receive a shareable link and set their own password, no ne
                 else:
                     _rok, _rmsg = create_role_all_dbs(_rn, _gs_checked_pages, cfg)
                     if _rok:
+                        st.toast(f"Role {_rn} created.", icon=None)
                         st.success(f"Role **{_rn}** created.")
                         _fetch_roles_cached.clear()
                         st.rerun()
@@ -3545,13 +3605,12 @@ elif page == "Products":
             "No image hosting key set. Go to **Settings → Image Hosting** to add one. "
             "Free options: [freeimage.host](https://freeimage.host) or [imghippo.com](https://imghippo.com)."
         )
-    _has_cloud_db = _has_supabase(cfg)
+    _has_cloud_db = _has_supabase(cfg) or _has_turso(cfg)
     if not _has_cloud_db:
         st.warning(
-            "**Supabase not configured.** Products are only saved locally to `data.db` on this machine. "
+            "**No cloud database connected.** Products are only saved locally to `data.db` on this machine. "
             "If this computer is lost or the app is redeployed, all product and inventory data will be gone. "
-            "Go to **Settings → Database** to connect Supabase. "
-            "Supabase also powers the **API Endpoints** page so your website auto-updates when you change products here."
+            "Go to **Settings → Database** to connect Turso or Supabase."
         )
 
     if "_products_cache" not in st.session_state:
@@ -3561,7 +3620,8 @@ elif page == "Products":
 
     # Compute sync targets for display in this page
     _p_has_sb = _has_supabase(cfg)
-    _p_sync = ["SQLite"] + (["Supabase"] if _p_has_sb else [])
+    _p_has_turso_p = _has_turso(cfg)
+    _p_sync = ["SQLite"] + (["Turso"] if _p_has_turso_p else []) + (["Supabase"] if _p_has_sb else [])
     _p_sync_str = " + ".join(_p_sync)
 
     tab_catalog, tab_add, tab_edit, tab_delete, tab_prod_docs = st.tabs(
@@ -4121,7 +4181,8 @@ elif page == "Inventory":
         with st.spinner("Loading inventory…"):
             st.session_state["_inv_cache"] = load_inventory_preferring_cloud(cfg)
     inv_df = st.session_state["_inv_cache"]
-    _has_sb_inv = _has_supabase(cfg)
+    _has_sb_inv  = _has_supabase(cfg)
+    _has_trs_inv = _has_turso(cfg)
 
     # ── OVERVIEW ────────────────────────────────
     with tab_overview:
@@ -4199,7 +4260,8 @@ elif page == "Inventory":
             st.info("No products found. Add products in the **Products** page first.")
         else:
             _sync_targets = ["SQLite"]
-            if _has_sb_inv: _sync_targets.append("Supabase")
+            if _has_trs_inv: _sync_targets.append("Turso")
+            if _has_sb_inv:  _sync_targets.append("Supabase")
 
             st.info(
                 "**Adjust Stock** makes manual corrections to **Current Stock only**. "
@@ -4299,7 +4361,8 @@ elif page == "Inventory":
             )
 
             _sync_targets_orig = ["SQLite"]
-            if _has_sb_inv: _sync_targets_orig.append("Supabase")
+            if _has_trs_inv: _sync_targets_orig.append("Turso")
+            if _has_sb_inv:  _sync_targets_orig.append("Supabase")
             st.caption(f"Synced to: **{' + '.join(_sync_targets_orig)}**")
 
             st.divider()
@@ -4560,6 +4623,7 @@ elif page == "Financials":
                     str(_ae_date), _ae_cat, _ae_desc.strip(), float(_ae_amt), _ae_notes.strip(), cfg
                 )
                 if _aok:
+                    st.toast(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f}", icon=None)
                     st.success(f"Entry added — {_ae_cat}: ${_ae_amt:,.2f} ({_ae_desc.strip()})")
                     _fetch_financials_cached.clear()
                     st.rerun()
@@ -4631,10 +4695,12 @@ elif page == "Financials":
                             int(_sel_id), str(_ed_date), _ed_cat, _ed_desc.strip(), float(_ed_amt), _ed_notes.strip(), cfg
                         )
                         if _uok:
+                            st.toast("Entry updated.", icon=None)
                             st.success("Entry updated.")
                             _fetch_financials_cached.clear()
                             st.rerun()
                         else:
+                            st.toast("Failed to update entry.", icon=None)
                             st.error(f"Failed: {_umsg}")
                 with _edc2:
                     if st.button("Delete Entry", type="secondary", width='stretch', key="btn_fin_del"):
@@ -4857,8 +4923,10 @@ elif page == "Settings":
         if "_turso_test_result" in st.session_state:
             _tr = st.session_state["_turso_test_result"]
             if _tr[0] == "ok":
+                st.toast("Turso connected!", icon=None)
                 st.success(_tr[1])
             else:
+                st.toast("Turso connection failed.", icon=None)
                 st.error(f"Turso connection failed: {_tr[1]}")
 
         if st.button("Setup Turso Tables", type="primary", width="stretch",
@@ -4947,8 +5015,10 @@ elif page == "Settings":
         if "_sb_test_result" in st.session_state:
             _sbr = st.session_state["_sb_test_result"]
             if _sbr[0] == "ok":
+                st.toast("Supabase connected!", icon=None)
                 st.success(_sbr[1])
             else:
+                st.toast("Supabase connection failed.", icon=None)
                 st.error(f"Supabase connection failed: {_sbr[1]}")
 
         if st.button("Setup Supabase Tables", type="primary", width="stretch",
@@ -5169,6 +5239,7 @@ elif page == "Settings":
                     else:
                         _rm_ok, _rm_msg = create_role_all_dbs(_rm_name.strip().lower(), _rm_checked, cfg)
                         if _rm_ok:
+                            st.toast(f"Role {_rm_name.strip()} saved.", icon=None)
                             st.success(f"Role **{_rm_name.strip()}** saved with: {', '.join(_rm_checked)}")
                             _fetch_roles_cached.clear()
                             st.rerun()
@@ -5298,6 +5369,7 @@ elif page == "Settings":
                             else:
                                 _um_ok, _um_msg = create_user_all_dbs(_um_email.strip(), _um_name.strip(), _um_role, _um_pass_val, cfg)
                                 if _um_ok:
+                                    st.toast(f"User {_um_name.strip()} created.", icon=None)
                                     st.success(f"User **{_um_name.strip()}** created with role **{_um_role}**.")
                                     _fetch_users_cached.clear()
                                     st.rerun()
@@ -5311,6 +5383,7 @@ elif page == "Settings":
                             if _inv_ok:
                                 _base_url = st.session_state.get("_app_base_url", "")
                                 _invite_url = f"{_base_url}?invite={_inv_tok}" if _base_url else f"?invite={_inv_tok}"
+                                st.toast(f"Invite link created for {_um_name.strip()}.", icon=None)
                                 st.success(f"User **{_um_name.strip()}** created. Share the invite link below:")
                                 st.code(_invite_url, language="text")
                                 st.caption("The link is single-use. Once they set their password, it expires automatically.")
@@ -5453,12 +5526,15 @@ elif page == "API Endpoints":
 
     st.title("Connect Your Website")
     st.caption(
-        "Every product you add or edit in MERIT automatically updates in your Supabase database. "
+        "Every product you add or edit in MERIT automatically updates in your cloud database. "
         "This page gives you everything you need to connect that database to a website built on "
         "Bolt.new, Lovable, Cursor, v0, or any other platform."
     )
 
-    if not _has_supabase(cfg):
+    _api_has_sb  = _has_supabase(cfg)
+    _api_has_trs = _has_turso(cfg)
+
+    if not (_api_has_sb or _api_has_trs):
         st.warning(
             "**No cloud database connected.** "
             "Go to **Get Started → Step 2** or **Settings → Database** to connect "
@@ -5469,16 +5545,28 @@ elif page == "API Endpoints":
     # ── Key values banner ────────────────────────────────────────────
     _api_anon_key = cfg.get("supabase_anon_key", "").strip()
     _kv1, _kv2 = st.columns(2)
-    with _kv1:
-        st.markdown("**Your Supabase URL** — paste this into your website builder")
-        st.code(_sb_url_ph, language="text")
-    with _kv2:
-        st.markdown("**Your Supabase Anon Key**")
-        if _api_anon_key:
-            st.code(_api_anon_key, language="text")
-            st.caption("Safe to use in public website code — never use your DB password in a website.")
-        else:
-            st.info("Anon key not saved yet. Go to **Settings → Supabase Anon Key** and paste the `eyJ…` key from Supabase → Project Settings → API.")
+    if _api_has_sb:
+        with _kv1:
+            st.markdown("**Your Supabase URL** — paste this into your website builder")
+            st.code(_sb_url_ph, language="text")
+        with _kv2:
+            st.markdown("**Your Supabase Anon Key**")
+            if _api_anon_key:
+                st.code(_api_anon_key, language="text")
+                st.caption("Safe to use in public website code — never use your DB password in a website.")
+            else:
+                st.info("Anon key not saved yet. Go to **Settings → Supabase Anon Key** and paste the `eyJ…` key from Supabase → Project Settings → API.")
+    elif _api_has_trs:
+        _trs_http = _turso_http_url(cfg.get("turso_url", "").strip())
+        with _kv1:
+            st.markdown("**Your Turso Database URL**")
+            st.code(_trs_http, language="text")
+        with _kv2:
+            st.markdown("**Turso API** — your website calls this HTTP endpoint directly")
+            st.info(
+                "Turso uses a REST-style HTTP API (`/v2/pipeline`). "
+                "See the **AI Prompts** tab below for ready-to-use code that queries your Turso database from a website."
+            )
 
     st.divider()
 
@@ -5491,6 +5579,103 @@ elif page == "API Endpoints":
     with _tab_ai:
         _sb_url_ai = _api_sb_url or "YOUR_SUPABASE_URL"
         st.markdown("### Copy-paste prompts for AI website builders")
+
+        # Turso-only banner — different API than Supabase
+        if _api_has_trs and not _api_has_sb:
+            _trs_url_ai = _turso_http_url(cfg.get("turso_url", "").strip())
+            st.info(
+                "You are using **Turso** as your database. "
+                "Unlike Supabase, Turso does not have a public anon-key REST API — "
+                "your website must call a **serverless function** (Vercel/Netlify/Cloudflare Worker) "
+                "that proxies queries to Turso. The prompt below includes ready-to-use code for this setup."
+            )
+            _turso_master_prompt = f"""\
+=== MERIT DATABASE SCHEMA (Turso / SQLite) ===
+
+Turso database HTTP URL : {_trs_url_ai}
+
+IMPORTANT: Do NOT expose your Turso auth token in public website code.
+Instead, create a serverless function (Vercel API route, Netlify Function, or Cloudflare Worker)
+that holds the token server-side and proxies SELECT queries to Turso.
+
+--- TABLE: inventory  (PRIMARY table for storefront — has live stock levels) ---
+Column          Type      Notes
+-----------     --------  -----------------------------------------
+sku             TEXT      unique product code — use as the URL slug
+item_name       TEXT      product display name
+category        TEXT      product category — use for filter buttons
+price           REAL      retail price in USD
+stock_left      INTEGER   units currently in stock
+status          TEXT      'In stock' | 'Low stock' | 'Out of stock'
+image_url       TEXT      one or more images, comma-separated — ALWAYS take only the FIRST
+original_stock  INTEGER   initial stock quantity
+created_at      TEXT      ISO timestamp
+
+CRITICAL STOREFRONT RULES:
+  1. Only show products WHERE stock_left > 0
+  2. Use the status field for badge text
+
+--- TABLE: products  (catalog with descriptions and buy buttons) ---
+Column          Type      Notes
+-----------     --------  -----------------------------------------
+sku             TEXT      matches inventory.sku
+name            TEXT      product display name
+category        TEXT
+price           REAL
+description     TEXT      full product description
+buy_button_url  TEXT      direct VEI purchase link — use as Buy Now href; hide if empty
+image_url       TEXT      comma-separated, take first URL only
+active          INTEGER   1 = In Store (show), 0 = Out of Store (hide)
+created_at      TEXT
+
+CRITICAL: Always filter WHERE active = 1. Never show Out-of-Store products.
+
+=== SERVERLESS PROXY (required — never expose Turso token to browser) ===
+
+// Example: Vercel API route  /api/products.js
+export default async function handler(req, res) {{
+  const sql = "SELECT i.sku, i.item_name, i.category, i.price, i.stock_left, i.status, i.image_url, p.description, p.buy_button_url FROM inventory i LEFT JOIN products p ON p.sku = i.sku WHERE i.stock_left > 0 AND (p.active IS NULL OR p.active = 1) ORDER BY i.item_name";
+  const resp = await fetch("{_trs_url_ai}/v2/pipeline", {{
+    method: "POST",
+    headers: {{ "Authorization": "Bearer YOUR_TURSO_AUTH_TOKEN", "Content-Type": "application/json" }},
+    body: JSON.stringify({{ requests: [{{ type: "execute", stmt: {{ sql }} }}, {{ type: "close" }}] }})
+  }});
+  const data = await resp.json();
+  const cols = data.results[0].response.result.cols.map(c => c.name);
+  const rows = data.results[0].response.result.rows.map(r =>
+    Object.fromEntries(cols.map((c, i) => [c, r[i].value]))
+  );
+  res.json(rows);
+}}
+
+// In your React component:
+const [products, setProducts] = useState([]);
+useEffect(() => {{
+  fetch('/api/products').then(r => r.json()).then(setProducts);
+}}, []);
+
+=== IMAGE RULES ===
+const getImage = (url) => url?.split(',')[0]?.trim() || null;
+// Show grey placeholder if getImage returns null or 'N/A'
+
+=== WHAT TO BUILD ===
+Build a modern VEI firm product storefront. Fetch data through the /api/products serverless proxy above.
+
+1. Product grid — responsive (1 col mobile, 2 col tablet, 3 col desktop)
+   - Each card: image (first URL), item_name, price, status badge, Buy Now button
+   - Buy Now = <a href={{buy_button_url}}>Buy Now</a>; hide if empty
+   - Badges: In stock → green, Low stock → amber, Out of stock → red
+
+2. Category filter pills at top — "All" default, client-side filter
+
+3. Product detail page /products/:sku — fetch single product, show description, large image, Buy Now
+
+4. No Realtime subscription needed — poll /api/products every 60s if you want live updates
+"""
+            st.markdown("**Paste this into any AI builder (Cursor, v0, Lovable, ChatGPT):**")
+            st.code(_turso_master_prompt, language="text")
+            st.stop()
+
         _api_anon_ai_saved = cfg.get("supabase_anon_key", "").strip()
         if _api_anon_ai_saved:
             st.caption("Your Supabase anon key is saved — it is pre-filled into every prompt below. Just copy and paste.")
@@ -7125,8 +7310,10 @@ Templates persist across app reboots when Supabase is connected.
 
             if failed_n == 0:
                 _inv_note = f" · Deducted stock for {sum(_deductions.values())} item(s)" if _deductions else ""
+                st.toast(f"All {sent_n} emails sent!", icon=None)
                 st.success(f"All {sent_n} emails sent successfully.{_inv_note}")
             else:
+                st.toast(f"{sent_n} sent, {failed_n} failed.", icon=None)
                 st.warning(f"{sent_n} sent, {failed_n} failed. See the results table above.")
 
             st.session_state.queue    = []
