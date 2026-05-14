@@ -3387,34 +3387,37 @@ Both are free for VEI firms.
 
         with _db_opt_tab1:
             st.markdown("""
-Turso is a fast, distributed SQLite database that is easy to set up and works great with MERIT.
+Turso is a fast, distributed SQLite database — easy to set up and free for VEI firms.
 
 **IMPORTANT:** Use your **official VE email address** when signing up.
 
-#### 1. Sign up at Turso
-Go to [turso.tech](https://turso.tech) → **Sign Up** with your VE email.
+#### 1. Sign in to Turso
+Go to [turso.tech](https://turso.tech) and sign in with your VE email.
 
-#### 2. Create a database
-After logging in you will land on the **Databases** page.
-Click **Create database**, give it a name (e.g. your firm name), and pick the closest region.
+#### 2. Create your database
+1. On the **Databases** page, click **Create database**.
+2. **Name** — enter your organization name (e.g. `bluepeak-ventures`).
+3. Leave the **Group** as the default.
+4. Click **Create database**.
 
-#### 3. Get your Database URL
-1. Click on your new database.
-2. Click the **Connect** tab (top of the page).
-3. Copy the **URL** — it looks like: `libsql://[db-name]-[org].turso.io`
-4. Paste it into **Settings → Database → Turso → Database URL**.
+#### 3. Copy your Database URL
+On the database page, look in the **Connect** section and copy the `libsql://` link.
+It looks like: `libsql://[your-org-name]-[username].turso.io`
+
+Paste it into **Settings → Database → Turso → Database URL**.
 
 #### 4. Get your Auth Token
-1. In the Turso sidebar on the left, look below the usage bar and click on **your logo / avatar**.
+1. In the left sidebar, look below the usage bar and click your **logo / avatar**.
 2. Click **Platform API Tokens**.
 3. Click **Create token**.
-4. **Name:** your organization name (e.g. `BluePeak Ventures`).
-5. **Scope:** select your username.
-6. Click **Create** and copy the token (starts with `eyJ…`).
-7. Paste it into **Settings → Database → Turso → Auth Token**.
+4. **Name** — enter your organization name.
+5. **Scope** — select your username.
+6. Press **Enter** (or click Create) and copy the token.
+
+Paste it into **Settings → Database → Turso → Auth Token**.
 
 #### 5. Setup tables
-Back in MERIT, go to **Settings → Database** and click **Setup Turso Tables**.
+In MERIT go to **Settings → Database** and click **Setup Turso Tables**.
 This creates all MERIT tables in Turso and syncs your users and roles from Step 1.
             """)
             if _gs_has_turso_gs:
