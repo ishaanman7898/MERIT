@@ -1414,6 +1414,96 @@ def _has_turso(cfg: dict) -> bool:
     return bool(cfg.get("turso_url", "").strip() and cfg.get("turso_auth_token", "").strip())
 
 
+def _validate_setup_credentials(cfg: dict) -> list:
+    """Test every configured service and return a list of (status, label, detail, fix_hint).
+    status is 'ok', 'warn', or 'err'. Called from the Get Started page after secrets are saved."""
+    results = []
+
+    # ── 1. Cloud database ──────────────────────────────────────────────
+    if _has_turso(cfg):
+        try:
+            _turso_execute(cfg, "SELECT 1")
+            results.append(("ok", "Turso Database", "Connected and responding.", ""))
+        except Exception as _e:
+            _em = str(_e)[:250]
+            if "401" in _em or "unauthorized" in _em.lower():
+                _fix = ("Your Auth Token is invalid or expired. "
+                        "Go to Settings → Database → Turso and regenerate a database-specific token "
+                        "(from the database page — NOT the Platform API token in the sidebar avatar menu).")
+            elif "not found" in _em.lower() or "404" in _em:
+                _fix = ("Database URL not found. Double-check the libsql:// URL from "
+                        "your Turso database Connect section.")
+            elif "timeout" in _em.lower():
+                _fix = "Connection timed out. Check your internet connection and try again."
+            else:
+                _fix = "Go to Settings → Database → Turso and verify your URL and Auth Token."
+            results.append(("err", "Turso Database", _em, _fix))
+    elif _has_supabase(cfg):
+        try:
+            _vc = _psycopg2_connect(
+                _get_effective_supabase_conn_str(cfg), connect_timeout=10
+            )
+            _vc.close()
+            results.append(("ok", "Supabase Database", "Connected and responding.", ""))
+        except Exception as _e:
+            results.append(("err", "Supabase Database", str(_e)[:250],
+                "Check your Connection String and Database Password in Settings → Database → Supabase."))
+    else:
+        results.append(("err", "Cloud Database",
+            "No cloud database configured — data will be lost on every app restart.",
+            "Go to Settings → Database, fill in Turso credentials, and click Setup Turso Tables."))
+
+    # ── 2. Gmail SMTP ──────────────────────────────────────────────────
+    _smtp_email = cfg.get("smtp_email", "").strip()
+    _smtp_pass  = re.sub(r"\s+", "", cfg.get("smtp_password", "").strip())
+    if _smtp_email and _smtp_pass:
+        try:
+            _srv = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+            _srv.starttls()
+            _srv.login(_smtp_email, _smtp_pass)
+            _srv.quit()
+            results.append(("ok", "Gmail SMTP", f"Authenticated as {_smtp_email}.", ""))
+        except smtplib.SMTPAuthenticationError:
+            results.append(("err", "Gmail SMTP",
+                "Authentication failed — Gmail rejected the App Password.",
+                "Go to myaccount.google.com → Security → App Passwords and regenerate the MERIT password. "
+                "Copy all 16 characters with no spaces into Settings → Email → App Password."))
+        except Exception as _e:
+            _em = str(_e)[:200]
+            results.append(("err", "Gmail SMTP", _em,
+                "Check your Gmail address and App Password in Settings → Email. "
+                "Make sure 2-Step Verification is enabled on your Google account."))
+    else:
+        results.append(("err", "Gmail SMTP",
+            "Gmail credentials not configured.",
+            "Go to Settings → Email and enter your VE Gmail address and App Password."))
+
+    # ── 3. Sender identity ──────────────────────────────────────────────
+    _from  = cfg.get("from_name", "").strip()
+    _subj  = cfg.get("subject", "").strip()
+    if _from and _subj:
+        results.append(("ok", "Sender Identity",
+            f'Sending as "{_from}" · subject "{_subj}".', ""))
+    else:
+        _missing = []
+        if not _from: _missing.append("From Name")
+        if not _subj: _missing.append("Default Subject Line")
+        results.append(("err", "Sender Identity",
+            f"Missing: {', '.join(_missing)}.",
+            "Go to Settings → Email → Sender Identity and fill in your firm name and default subject."))
+
+    # ── 4. Image hosting (warning only — optional) ─────────────────────
+    if _has_image_host(cfg):
+        results.append(("ok", "Image Hosting", "API key present.", ""))
+    else:
+        results.append(("warn", "Image Hosting",
+            "No image hosting key configured.",
+            "Product images will not upload until you add a key. "
+            "Get a free key from freeimage.host or imghippo.com and paste it in Settings → Image Hosting."))
+
+    return results
+
+
 def _turso_cache_key(cfg: dict) -> str:
     url = _turso_http_url(cfg.get("turso_url", "").strip())
     tok = cfg.get("turso_auth_token", "").strip()
@@ -2884,8 +2974,11 @@ with st.sidebar:
     # Use pages stored in auth_user at login (from roles table); fall back to static dict
     _base_pages = list(_cur_user.get("pages") or _ROLE_PAGES.get(_cur_role, _ROLE_PAGES["admin"]))
 
-    # Admins can see Get Started before secrets are saved
-    if not _secrets_active and _cur_role == "admin":
+    # Show Get Started until secrets are saved AND all validation checks pass
+    _setup_validated_ok = st.session_state.get("_setup_validated_ok", False)
+    _setup_complete = _secrets_active and _setup_validated_ok
+
+    if not _setup_complete and _cur_role == "admin":
         _nav_pages = ["Get Started"] + _base_pages
     else:
         _nav_pages = _base_pages
@@ -3400,7 +3493,7 @@ if page == "Get Started":
     _step3_ok = _gs_has_img
     _step4_ok = _gs_has_smtp
     _step5_ok = _gs_has_identity
-    _step6_ok = _gs_has_secrets
+    _step6_ok = _gs_has_secrets and st.session_state.get("_setup_validated_ok", False)
 
     st.markdown("### Setup Checklist")
     _cl1, _cl2, _cl3, _cl4, _cl5, _cl6 = st.columns(6)
@@ -3425,6 +3518,58 @@ if page == "Get Started":
     with _cl6:
         if _step6_ok: st.success("Step 6 — Secrets")
         else: st.warning("Step 6 — Save TOML")
+
+    # ── Validation (auto-runs once secrets are saved and app reboots) ───
+    if _gs_has_secrets:
+        if "setup_validation_results" not in st.session_state:
+            with st.spinner("Verifying all credentials from your Secrets TOML…"):
+                _run_val = _validate_setup_credentials(cfg)
+                _run_all_ok = all(r[0] != "err" for r in _run_val)
+                st.session_state["setup_validation_results"] = _run_val
+                st.session_state["_setup_validated_ok"] = _run_all_ok
+
+        _val_results    = st.session_state["setup_validation_results"]
+        _val_passed     = st.session_state.get("_setup_validated_ok", False)
+        _val_has_errors = any(r[0] == "err" for r in _val_results)
+
+        st.subheader("Credential Verification")
+        if _val_passed:
+            st.success("All checks passed — your setup is complete. Navigate to any page from the sidebar.")
+        else:
+            st.error(
+                "Some checks failed. Fix the issues shown below, update your credentials in **Settings**, "
+                "re-save the Secrets TOML, and click **Re-run Checks** below."
+            )
+
+        for _vs, _vl, _vd, _vf in _val_results:
+            if _vs == "ok":
+                st.success(f"**{_vl}** — {_vd}")
+            elif _vs == "warn":
+                with st.container(border=True):
+                    st.warning(f"**{_vl}** — {_vd}")
+                    if _vf:
+                        st.caption(f"Fix: {_vf}")
+            else:
+                with st.container(border=True):
+                    st.error(f"**{_vl}** — {_vd}")
+                    if _vf:
+                        st.markdown(f"**How to fix:** {_vf}")
+
+        _vr_c1, _vr_c2 = st.columns([1, 4])
+        with _vr_c1:
+            if st.button("Re-run Checks", key="btn_rerun_val", type="secondary"):
+                st.session_state.pop("setup_validation_results", None)
+                st.session_state.pop("_setup_validated_ok", None)
+                st.rerun()
+        if _val_passed:
+            with _vr_c2:
+                if st.button("Enter MERIT →", key="btn_enter_merit", type="primary"):
+                    _first_page = (
+                        [p for p in list(_cur_user.get("pages") or _ROLE_PAGES.get(_cur_role, ["Mass Email"]))
+                         if p != "Get Started"] or ["Mass Email"]
+                    )[0]
+                    st.session_state["sidebar_page"] = _first_page
+                    st.rerun()
 
     st.divider()
 
@@ -3684,14 +3829,26 @@ Controls who the email appears to come from.
 
     # ── STEP 6: Secrets TOML ─────────────────────────────────────────
     with st.expander("Step 6 — Save Secrets TOML (Final Step)", expanded=not _step6_ok and _step5_ok):
-        st.markdown("""
+        if _gs_has_secrets:
+            # Secrets are active — point to the validation results above
+            if st.session_state.get("_setup_validated_ok"):
+                st.success("Secrets are active and all checks passed.")
+            else:
+                st.warning(
+                    "Secrets are active but some checks failed. "
+                    "See **Credential Verification** above for details on what to fix."
+                )
+        else:
+            st.markdown("""
 Streamlit Cloud forgets everything on reboot. Saving a **Secrets TOML** makes all your credentials permanent.
+After pasting the TOML and saving, the app reboots and **automatically verifies** every credential.
 
-1. Go to **Settings → Secrets TOML** and copy the generated code block.
-2. Click **Manage app** (bottom-right) → **⋮** → **Settings** → **Secrets**.
-3. Paste the code and click **Save**.
-4. The app reboots and **Get Started disappears from the sidebar** — setup is complete.
-        """)
+1. Complete Steps 1–5 above.
+2. Go to **Settings → Secrets** tab and copy the generated code block.
+3. Click **Manage app** (bottom-right of your Streamlit Cloud page) → **⋮** → **Settings** → **Secrets**.
+4. Paste the block and click **Save**.
+5. The app reboots. MERIT will run a full credential check — fix any issues flagged, then you are done.
+            """)
 
     st.divider()
     st.subheader("What each page does")
@@ -5044,6 +5201,15 @@ elif page == "Settings":
         _val = cfg.get(_cfg_k, "")
         if not st.session_state.get(_ss_k) and _val:
             st.session_state[_ss_k] = _val
+
+    # Banner when all fields are loaded from Streamlit Secrets
+    _stg_secrets_live = False
+    try:
+        _stg_secrets_live = hasattr(st, "secrets") and "merit" in st.secrets
+    except Exception:
+        pass
+    if _stg_secrets_live:
+        st.info("Settings auto-loaded from your Streamlit Secrets. Any changes you save here will take effect immediately and will be reflected in the Secrets tab for your next TOML update.")
 
     def _auto_save_settings():
         _new = {**st.session_state.cfg}
