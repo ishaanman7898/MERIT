@@ -31,7 +31,7 @@ env/
 .gemini/
 
 # Development and test files
-test_turso.py
+tests/*.py
 
 # Uploaded images and local assets
 *.jpg
