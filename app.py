@@ -3841,13 +3841,14 @@ Controls who the email appears to come from.
         else:
             st.markdown("""
 Streamlit Cloud forgets everything on reboot. Saving a **Secrets TOML** makes all your credentials permanent.
-After pasting the TOML and saving, the app reboots and **automatically verifies** every credential.
+After saving and rebooting, MERIT automatically verifies every credential.
 
 1. Complete Steps 1–5 above.
 2. Go to **Settings → Secrets** tab and copy the generated code block.
-3. Click **Manage app** (bottom-right of your Streamlit Cloud page) → **⋮** → **Settings** → **Secrets**.
+3. Click **Manage app** (bottom-right corner of your Streamlit Cloud page) → **⋮** → **Settings** → **Secrets**.
 4. Paste the block and click **Save**.
-5. The app reboots. MERIT will run a full credential check — fix any issues flagged, then you are done.
+5. Go back to **Manage app** → click **⋮** → click **Reboot app**.
+6. Wait for the app to come back online — MERIT will run a full credential check automatically. Fix any issues flagged above, then you are done.
             """)
 
     st.divider()
