@@ -4445,8 +4445,8 @@ elif page == "Inventory":
     st.title("Inventory")
     st.caption("Stock overview and adjustments. See the **Financials** page for revenue and ledger tracking.")
 
-    tab_overview, tab_adjust, tab_original, tab_inv_docs, tab_inv_reset = st.tabs(
-        ["Overview", "Adjust Stock", "Original Stock", "Documentation", "Reset Inventory"]
+    tab_overview, tab_adjust, tab_original, tab_inv_reset, tab_inv_docs = st.tabs(
+        ["Overview", "Adjust Stock", "Original Stock", "Reset Inventory", "Documentation"]
     )
 
     # Load shared data
@@ -4787,9 +4787,10 @@ Revenue tracking, the ledger, and order history have moved to the dedicated **Fi
         st.subheader("Reset Inventory")
         st.warning(
             "**This is a destructive action.** "
-            "Resetting inventory wipes **all stock levels** across every database — "
-            "SQLite, Turso, and Supabase. Product records (names, prices, descriptions) "
-            "are kept. Only stock quantities are cleared."
+            "Resetting inventory wipes stock levels across every database — "
+            "SQLite, Turso, and Supabase. "
+            "This also resets the Financials page — product revenue breakdowns will be empty "
+            "until new orders are sent."
         )
 
         _ri_mode = st.radio(
@@ -4798,6 +4799,26 @@ Revenue tracking, the ledger, and order history have moved to the dedicated **Fi
             key="ri_mode",
         )
         _ri_zero = _ri_mode.startswith("Zero")
+
+        # Show which products will be affected
+        _ri_inv = inv_df.copy() if not inv_df.empty else pd.DataFrame()
+        if not _ri_inv.empty:
+            st.markdown(f"**Products that will be affected ({len(_ri_inv)}):**")
+            _ri_display_cols = [c for c in ["item_name", "sku", "stock_left", "original_stock", "status"] if c in _ri_inv.columns]
+            st.dataframe(
+                _ri_inv[_ri_display_cols].rename(columns={
+                    "item_name": "Product", "sku": "SKU",
+                    "stock_left": "Current Stock", "original_stock": "Original Stock", "status": "Status"
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if _ri_zero:
+                st.caption("All products above will have their stock set to 0. Product records are preserved.")
+            else:
+                st.caption("All inventory rows above will be deleted. Product records (names, prices, descriptions) are preserved in the Products table.")
+        else:
+            st.info("No inventory rows found.")
 
         st.divider()
         st.markdown("**Type** `RESET` **below to confirm, then click the button.**")
@@ -4872,6 +4893,8 @@ Revenue tracking, the ledger, and order history have moved to the dedicated **Fi
             if _ri_ok:
                 st.toast(f"Inventory {_ri_label}.", icon=None)
                 st.success(f"Inventory {_ri_label} · {' + '.join(_ri_results)}")
+                if not _ri_zero:
+                    st.session_state["_ri_show_rebuild"] = True
             else:
                 st.toast("Reset failed.", icon=None)
                 st.error(f"Reset failed: {' · '.join(_ri_results)}")
@@ -4882,6 +4905,82 @@ Revenue tracking, the ledger, and order history have moved to the dedicated **Fi
                 import time as _t; _t.sleep(0.4)
                 st.rerun()
 
+        # ── Rebuild rows (shown after delete) ────────────────────────────
+        if st.session_state.get("_ri_show_rebuild"):
+            st.divider()
+            st.subheader("Rebuild Inventory Rows")
+            st.info(
+                "Your inventory rows were deleted. Click below to re-create empty inventory rows "
+                "for every product in your Products table (stock will start at 0). "
+                "Product names, prices, and descriptions are unchanged."
+            )
+            _rebuild_prods_df = load_products_for_catalog(cfg)
+            if _rebuild_prods_df:
+                st.markdown(f"**{len(_rebuild_prods_df)} products found in Products table:**")
+                st.dataframe(
+                    pd.DataFrame([{"Product": p["item_name"], "SKU": p.get("sku",""), "Price": p.get("price","")} for p in _rebuild_prods_df]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            _rb_cols = st.columns([1, 3])
+            with _rb_cols[0]:
+                if st.button("Rebuild Inventory Rows", type="primary", use_container_width=True, key="btn_ri_rebuild"):
+                    _rb_results = []
+                    _rebuild_sql_vals = [
+                        (p.get("sku",""), p.get("item_name",""), p.get("category",""),
+                         p.get("price", 0.0), 0, 0, "Out of stock", p.get("image_url",""))
+                        for p in _rebuild_prods_df
+                    ]
+                    # SQLite
+                    try:
+                        _rb_conn = _get_sqlite_conn()
+                        for _rv in _rebuild_sql_vals:
+                            _rb_conn.execute(
+                                "INSERT INTO inventory (sku, item_name, category, price, stock_left, original_stock, status, image_url) "
+                                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO NOTHING",
+                                _rv,
+                            )
+                        _rb_conn.commit()
+                        _rb_conn.close()
+                        _rb_results.append("SQLite")
+                    except Exception as _rbe: _rb_results.append(f"SQLite failed: {_rbe}")
+                    # Turso
+                    if _has_trs_inv:
+                        try:
+                            _rb_turl = _turso_http_url(cfg.get("turso_url","").strip())
+                            _rb_ttok = cfg.get("turso_auth_token","").strip()
+                            for _rv in _rebuild_sql_vals:
+                                _turso_pipeline(_rb_turl, _rb_ttok, [(
+                                    "INSERT INTO inventory (sku, item_name, category, price, stock_left, original_stock, status, image_url) "
+                                    "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO NOTHING", _rv,
+                                )])
+                            _rb_results.append("Turso")
+                        except Exception as _rbe2: _rb_results.append(f"Turso failed: {_rbe2}")
+                    # Supabase
+                    _rb_sb = _get_supabase_conn(cfg)
+                    if _rb_sb is not None:
+                        try:
+                            with _rb_sb:
+                                with _rb_sb.cursor() as _rb_cur:
+                                    for _rv in _rebuild_sql_vals:
+                                        _rb_cur.execute(
+                                            "INSERT INTO inventory (sku, item_name, category, price, stock_left, original_stock, status, image_url) "
+                                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(sku) DO NOTHING",
+                                            _rv,
+                                        )
+                            _rb_sb.close()
+                            _rb_results.append("Supabase")
+                        except Exception as _rbe3: _rb_results.append(f"Supabase failed: {_rbe3}")
+                    if any("failed" not in r for r in _rb_results):
+                        st.success(f"Rebuilt {len(_rebuild_sql_vals)} inventory rows · {' + '.join(_rb_results)}")
+                        st.session_state.pop("_ri_show_rebuild", None)
+                        _clear_data_caches()
+                        st.session_state.pop("_inv_cache", None)
+                        import time as _t2; _t2.sleep(0.4)
+                        st.rerun()
+                    else:
+                        st.error(f"Rebuild failed: {' · '.join(_rb_results)}")
+
 # ═════════════════════════════════════════════
 # FINANCIALS PAGE
 # ═════════════════════════════════════════════
@@ -4890,7 +4989,13 @@ elif page == "Financials":
     cfg = st.session_state.cfg
 
     st.title("Financials")
-    st.caption("Revenue and expense tracking. Inventory purchases auto-log as COGS.")
+    st.caption(
+        "These financials track **inventory-based order revenue** (emails sent via Mass Email) "
+        "and **manual ledger entries**. If you need to add COGS, payroll, rent, or other expenses, "
+        "use **Add Entry** below — you can record any line item manually. "
+        "This page does not replace a full accounting system, but gives your accounting team a "
+        "working ledger and revenue overview."
+    )
 
     # ── Load data ─────────────────────────────────────────────────
     _fin_logs   = load_outbound_logs(cfg)
@@ -4939,19 +5044,40 @@ elif page == "Financials":
 
     # ════ OVERVIEW ═══════════════════════════════════════════════
     if _fin_mode == "Overview":
+        # Pull COGS separately for gross profit
+        _cogs_amount = 0.0
+        _other_exp   = 0.0
+        if not _fin_ledger.empty and "category" in _fin_ledger.columns:
+            _led_cogs = _fin_ledger[_fin_ledger["category"] == "Cost of Goods (COGS)"]
+            _led_other = _fin_ledger[_fin_ledger["category"].isin(_exp_cats - {"Cost of Goods (COGS)"})]
+            _cogs_amount  = float(_led_cogs["_amount"].sum()) if not _led_cogs.empty and "_amount" in _led_cogs.columns else 0.0
+            _other_exp    = float(_led_other["_amount"].sum()) if not _led_other.empty and "_amount" in _led_other.columns else 0.0
+        _gross_profit  = _total_revenue_all - _cogs_amount
+        _gross_margin  = (_gross_profit / _total_revenue_all * 100) if _total_revenue_all else 0.0
+
+        # Row 1 — Revenue
         _fma, _fmb, _fmc, _fmd = st.columns(4)
         _fma.metric("Total Revenue",   f"${_total_revenue_all:,.2f}")
         _fmb.metric("Order Revenue",   f"${_order_revenue:,.2f}")
         _fmc.metric("Ledger Revenue",  f"${_led_revenue:,.2f}")
-        _fmd.metric("Total Expenses",  f"${_led_expense:,.2f}")
+        _fmd.metric("Total Orders",    f"{_order_count:,}")
 
+        # Row 2 — Profitability
         _fme, _fmf, _fmg, _fmh = st.columns(4)
-        _fme.metric("Net Income",      f"${_net_income:,.2f}", delta="profit" if _net_income >= 0 else "loss")
-        _fmf.metric("Total Orders",    f"{_order_count:,}")
+        _fme.metric("Gross Profit",    f"${_gross_profit:,.2f}", delta=f"{_gross_margin:.1f}% margin")
+        _fmf.metric("COGS",            f"${_cogs_amount:,.2f}")
+        _fmg.metric("Other Expenses",  f"${_other_exp:,.2f}")
+        _fmh.metric("Net Income",      f"${_net_income:,.2f}", delta="profit" if _net_income >= 0 else "loss")
+
+        # Row 3 — Operations
+        _fmi, _fmj, _fmk, _fml = st.columns(4)
         _avg_ord = _order_revenue / _order_count if _order_count else 0
-        _fmg.metric("Avg Order Value", f"${_avg_ord:,.2f}")
+        _fmi.metric("Avg Order Value", f"${_avg_ord:,.2f}")
+        _fmj.metric("Total Expenses",  f"${_led_expense:,.2f}")
         _ledger_entries = len(_fin_ledger) if not _fin_ledger.empty else 0
-        _fmh.metric("Ledger Entries",  f"{_ledger_entries:,}")
+        _fmk.metric("Ledger Entries",  f"{_ledger_entries:,}")
+        _expense_cats = _fin_ledger["category"].nunique() if not _fin_ledger.empty and "category" in _fin_ledger.columns else 0
+        _fml.metric("Expense Categories", f"{_expense_cats}")
 
         if not _fin_df.empty and _ts_col and _cost_col:
             st.divider()
@@ -4972,6 +5098,31 @@ elif page == "Financials":
             _exp_totals = _exp_totals.sort_values("Amount ($)", ascending=False)
             if not _exp_totals.empty:
                 st.bar_chart(_exp_totals.set_index("Category")["Amount ($)"], color="#ef4444")
+                st.dataframe(
+                    _exp_totals.assign(**{"Amount ($)": _exp_totals["Amount ($)"].map(lambda x: f"${x:,.2f}")}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # P&L Summary
+        st.divider()
+        st.subheader("Profit & Loss Summary")
+        _pl_rows = [
+            ("Order Revenue (Mass Email)",  f"${_order_revenue:,.2f}"),
+            ("Ledger Revenue",              f"${_led_revenue:,.2f}"),
+            ("Total Revenue",               f"${_total_revenue_all:,.2f}"),
+            ("Cost of Goods (COGS)",        f"(${_cogs_amount:,.2f})"),
+            ("Gross Profit",                f"${_gross_profit:,.2f}"),
+            (f"Gross Margin",               f"{_gross_margin:.1f}%"),
+            ("Other Expenses",              f"(${_other_exp:,.2f})"),
+            ("Net Income",                  f"${_net_income:,.2f}"),
+        ]
+        _pl_df = pd.DataFrame(_pl_rows, columns=["Line Item", "Amount"])
+        st.dataframe(_pl_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "COGS and other expenses come from manual ledger entries. "
+            "Use **Add Entry** to record COGS, payroll, operating expenses, and any other line items."
+        )
 
     # ════ ADD ENTRY ══════════════════════════════════════════════
     elif _fin_mode == "Add Entry":
@@ -5953,8 +6104,8 @@ elif page == "API Endpoints":
     st.divider()
 
     # ── Tabs ─────────────────────────────────────────────────────────
-    _tab_ai, _tab_live, _tab_api, _tab_code, _tab_schema = st.tabs(
-        ["AI Prompts", "Live Preview", "REST Endpoints", "Code Snippets", "Schema & Security SQL"]
+    _tab_ai, _tab_api, _tab_code, _tab_schema = st.tabs(
+        ["AI Prompts", "REST Endpoints", "Code Snippets", "Schema & Security SQL"]
     )
 
     # ── AI Prompts ────────────────────────────────────────────────────
@@ -6056,10 +6207,11 @@ Build a modern VEI firm product storefront. Fetch data through the /api/products
 """
             st.markdown("**Paste this into any AI builder (Cursor, v0, Lovable, ChatGPT):**")
             st.code(_turso_master_prompt, language="text")
-            st.stop()
 
         _api_anon_ai_saved = cfg.get("supabase_anon_key", "").strip()
-        if _api_anon_ai_saved:
+        if _api_has_trs and not _api_has_sb:
+            pass  # Turso prompt already shown above
+        elif _api_anon_ai_saved:
             st.caption("Your Supabase anon key is saved — it is pre-filled into every prompt below. Just copy and paste.")
         else:
             st.caption(
@@ -6513,84 +6665,20 @@ Step 9 — RLS SQL (run once in Supabase SQL Editor before going live)
             _cursor_prompt += _products_block
             st.code(_cursor_prompt, language="text")
 
-    # ── Live Preview ─────────────────────────────────────────────────
-    with _tab_live:
-        st.markdown("### Live snapshot from your Supabase database")
-        st.caption("This is exactly the data your website will see when it reads from Supabase.")
-
-        _live_conn_str = _get_effective_supabase_conn_str(cfg)
-
-        # Validate format before attempting connection
-        if not _live_conn_str.startswith("postgresql://"):
-            st.error(
-                "**Connection string format is incorrect.** "
-                "It must start with `postgresql://`. "
-                "Go to **Settings → Database** and paste the full connection string from Supabase."
-            )
-        else:
-            if st.button("Load / Refresh Data", key="btn_api_refresh", type="primary"):
-                st.cache_data.clear()
-                st.rerun()
-
-            try:
-                _live_conn = _psycopg2_connect(_live_conn_str)
-
-                _preview_inv, _preview_prod = st.columns(2)
-                with _preview_inv:
-                    st.markdown("**Your products** (inventory table)")
-                    try:
-                        _inv_df = pd.read_sql(
-                            "SELECT sku, item_name AS name, category, price, stock_left, status "
-                            "FROM inventory ORDER BY item_name LIMIT 50",
-                            _live_conn,
-                        )
-                        if not _inv_df.empty:
-                            st.dataframe(_inv_df, use_container_width=True, hide_index=True)
-                            st.caption(f"{len(_inv_df)} products shown (max 50)")
-                        else:
-                            st.info("No products yet. Add some in the **Products** page.")
-                    except Exception as _e:
-                        st.error(f"Could not read products: {_e}")
-
-                with _preview_prod:
-                    st.markdown("**Category breakdown**")
-                    try:
-                        _cat_df = pd.read_sql(
-                            "SELECT category, COUNT(*) AS products, SUM(stock_left) AS total_stock "
-                            "FROM inventory GROUP BY category ORDER BY products DESC",
-                            _live_conn,
-                        )
-                        if not _cat_df.empty:
-                            st.dataframe(_cat_df, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No categories yet.")
-                    except Exception as _e:
-                        st.error(f"Could not read categories: {_e}")
-
-                _live_conn.close()
-            except Exception as _live_err:
-                _err_msg = str(_live_err)
-                if "password" in _err_msg.lower() or "authentication" in _err_msg.lower():
-                    st.error(
-                        "**Wrong database password.** "
-                        "Go to **Settings → Database** and check that the Database Password field matches "
-                        "the password you set when creating your Supabase project."
-                    )
-                elif "could not connect" in _err_msg.lower() or "timeout" in _err_msg.lower():
-                    st.error(
-                        "**Could not reach Supabase.** Check your internet connection and try again. "
-                        "If you are on a school network, try a personal hotspot."
-                    )
-                else:
-                    st.error(f"**Connection failed.** {_err_msg}")
-
     # ── REST Endpoints ────────────────────────────────────────────────
     with _tab_api:
         st.markdown("### REST API Endpoints")
-        st.caption(
-            "These are the URLs your website calls to read product data. "
-            "The AI Prompts tab generates the full code for you, but these endpoints are here to test, debug, or copy into tools like Postman."
-        )
+        if _api_has_trs and not _api_has_sb:
+            st.info(
+                "**REST Endpoints are a Supabase feature.** You are using Turso as your database. "
+                "Turso does not have a public REST API — your website must call a serverless proxy function. "
+                "See the **AI Prompts** tab for ready-to-use Turso serverless proxy code."
+            )
+        else:
+            st.caption(
+                "These are the URLs your website calls to read product data. "
+                "The AI Prompts tab generates the full code for you, but these endpoints are here to test, debug, or copy into tools like Postman."
+            )
 
         # ── How authentication works ───────────────────────────────────
         _rest_anon = cfg.get("supabase_anon_key", "").strip() or "YOUR_SUPABASE_ANON_KEY"
@@ -7275,13 +7363,25 @@ Design brief: [describe your campaign style here — e.g. "modern and bold, high
 
             st.markdown("**HTML Template**")
             st.caption("Use `{{name}}` for recipient name and `{{from_name}}` for your firm name.")
+            _camp_db_tpl = load_email_template("campaign_template", _camp_cfg)
             _camp_tpl_raw = st.text_area(
                 "Campaign HTML",
-                value=_DEFAULT_CAMPAIGN_TEMPLATE,
+                value=_camp_db_tpl if _camp_db_tpl else _DEFAULT_CAMPAIGN_TEMPLATE,
                 height=240,
                 key="camp_html",
                 label_visibility="collapsed",
             )
+
+            _camp_tpl_c1, _camp_tpl_c2 = st.columns(2)
+            with _camp_tpl_c1:
+                if st.button("Save Template", type="primary", width="stretch", key="btn_camp_save_tpl"):
+                    save_email_template("campaign_template", _camp_tpl_raw.strip(), _camp_cfg)
+                    st.toast("Campaign template saved to database.")
+                    st.success("Template saved — it will reload automatically on your next visit.")
+            with _camp_tpl_c2:
+                if st.button("Reset to Default", width="stretch", key="btn_camp_reset_tpl"):
+                    save_email_template("campaign_template", _DEFAULT_CAMPAIGN_TEMPLATE, _camp_cfg)
+                    st.rerun()
 
             _camp_prev_col, _camp_send_col = st.columns(2)
             with _camp_prev_col:
